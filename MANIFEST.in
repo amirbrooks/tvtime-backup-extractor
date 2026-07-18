@@ -1,0 +1,10 @@
+include AGENTS.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include SECURITY.md
+include SUPPORT.md
+include requirements.txt
+include requirements-dev.txt
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py

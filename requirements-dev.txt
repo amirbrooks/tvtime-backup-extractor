@@ -1,0 +1,5 @@
+build==1.5.0
+packaging==25.0
+pyproject_hooks==1.2.0
+ruff==0.15.20
+setuptools==83.0.0

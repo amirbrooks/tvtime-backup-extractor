@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvtime-backup-extractor"
+version = "0.1.0"
+description = "Privacy-conscious extraction of TV Time data from authorized encrypted iOS backups"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Amir Brooks" },
+]
+keywords = ["ios", "iphone", "backup", "tv-time", "data-export"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Archiving :: Backup",
+]
+dependencies = [
+  "iphone-backup-decrypt==0.9.0",
+  "pycryptodome==3.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build==1.5.0",
+  "ruff==0.15.20",
+]
+
+[project.scripts]
+tvtime-extractor = "tvtime_extractor.cli:entrypoint"
+
+[project.urls]
+Repository = "https://github.com/amirbrooks/tvtime-backup-extractor"
+Issues = "https://github.com/amirbrooks/tvtime-backup-extractor/issues"
+
+[tool.setuptools.packages.find]
+include = ["tvtime_extractor*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.whl
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Decrypted or generated TV Time/iOS data — never commit these
+data/
+audit/
+private/
+TVTime-Extraction/
+**/TVTime-Extraction/
+raw/
+manifest/
+metadata/
+analysis/
+cache_responses/
+*.sparsebundle/
+*.backup/
+*.binarycookies
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.plist
+profile_and_settings.json
+TVTime-Validation-Full-List.md
