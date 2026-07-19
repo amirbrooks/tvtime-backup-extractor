@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tvtime-backup-extractor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Privacy-conscious extraction of TV Time data from authorized encrypted iOS backups"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = "MIT"
 authors = [
   { name = "Amir Brooks" },
@@ -17,7 +17,6 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Operating System :: MacOS",
-  "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -30,16 +29,21 @@ classifiers = [
 dependencies = [
   "iphone-backup-decrypt==0.9.0",
   "pycryptodome==3.23.0",
+  "reportlab==5.0.0",
+  "pillow==12.3.0",
+  "charset-normalizer==3.4.9",
 ]
 
 [project.optional-dependencies]
 dev = [
   "build==1.5.0",
+  "pypdf==6.14.2",
   "ruff==0.15.20",
 ]
 
 [project.scripts]
 tvtime-extractor = "tvtime_extractor.cli:entrypoint"
+tvtime-extractor-helper = "tvtime_extractor.helper_main:entrypoint"
 
 [project.urls]
 Repository = "https://github.com/amirbrooks/tvtime-backup-extractor"

@@ -1,0 +1,151 @@
+{
+  "schema": "tvtime-native-license-provenance-v3",
+  "profiles": [
+    {
+      "id": "homebrew-python-3.13.12",
+      "python_version": "3.13.12",
+      "python_license": {
+        "license_files": [
+          {
+            "path": "CPython-3.13.12-LICENSE.txt",
+            "sha256": "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb"
+          }
+        ],
+        "upstream_archive_sha256": "12e7cb170ad2d1a69aee96a1cc7fc8de5b1e97a2bdac51683a3db016ec9a2996",
+        "upstream_archive_url": "https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz",
+        "upstream_license_extraction": "byte-exact-whole-file",
+        "upstream_license_path": "LICENSE",
+        "upstream_release": "Python-3.13.12",
+        "upstream_source": "Python.org CPython 3.13.12 source release"
+      },
+      "release_eligible": false,
+      "source": "Homebrew Python 3.13.12 reviewed local-development runtime",
+      "components": [
+        {
+          "component": "mpdecimal",
+          "display_name": "mpdecimal",
+          "runtime_version": "4.0.1",
+          "license_files": [
+            {
+              "path": "mpdecimal-4.0.1-COPYRIGHT.txt",
+              "sha256": "dba079e24a0286052f9f36a5e0b4f6cc95bc83ada657eb26bef8c0b6473f6512"
+            }
+          ],
+          "upstream_archive_sha256": "96d33abb4bb0070c7be0fed4246cd38416188325f820468214471938545b1ac8",
+          "upstream_archive_url": "https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.1.tar.gz",
+          "upstream_license_extraction": "byte-exact-whole-file",
+          "upstream_license_path": "COPYRIGHT.txt",
+          "upstream_release": "mpdecimal-4.0.1",
+          "upstream_source": "Homebrew mpdecimal 4.0.1 pinned source input"
+        },
+        {
+          "component": "openssl",
+          "display_name": "OpenSSL",
+          "runtime_version": "3.6.1",
+          "license_files": [
+            {
+              "path": "OpenSSL-3.6.1-LICENSE.txt",
+              "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+            }
+          ],
+          "upstream_archive_sha256": "b1bfedcd5b289ff22aee87c9d600f515767ebf45f77168cb6d64f231f518a82e",
+          "upstream_archive_url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.1/openssl-3.6.1.tar.gz",
+          "upstream_license_extraction": "byte-exact-whole-file",
+          "upstream_license_path": "LICENSE.txt",
+          "upstream_release": "openssl-3.6.1",
+          "upstream_source": "Homebrew openssl@3 3.6.1 pinned source input"
+        },
+        {
+          "component": "sqlite",
+          "display_name": "SQLite",
+          "runtime_version": "3.51.2",
+          "license_files": [
+            {
+              "path": "SQLite-3.51.2-PUBLIC-DOMAIN.txt",
+              "sha256": "06545a6ec25fbbff6c62f205f94a35be49e38f33bea827a8cfb07d7b82e4b083"
+            }
+          ],
+          "upstream_archive_sha256": "fbd89f866b1403bb66a143065440089dd76100f2238314d92274a082d4f2b7bb",
+          "upstream_archive_url": "https://sqlite.org/2026/sqlite-autoconf-3510200.tar.gz",
+          "upstream_license_extraction": "sqlite3.h lines 4-9; remove leading '**' and at most one following space; join with LF and end with exactly one LF",
+          "upstream_license_path": "sqlite3.h",
+          "upstream_release": "sqlite-autoconf-3510200",
+          "upstream_source": "Homebrew sqlite 3.51.2 pinned source input"
+        }
+      ]
+    },
+    {
+      "id": "official-cpython-3.13.12-universal2",
+      "python_version": "3.13.12",
+      "python_license": {
+        "license_files": [
+          {
+            "path": "CPython-3.13.12-LICENSE.txt",
+            "sha256": "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb"
+          }
+        ],
+        "upstream_archive_sha256": "12e7cb170ad2d1a69aee96a1cc7fc8de5b1e97a2bdac51683a3db016ec9a2996",
+        "upstream_archive_url": "https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz",
+        "upstream_license_extraction": "byte-exact-whole-file",
+        "upstream_license_path": "LICENSE",
+        "upstream_release": "Python-3.13.12",
+        "upstream_source": "Python.org CPython 3.13.12 source release"
+      },
+      "release_eligible": true,
+      "source": "CPython v3.13.12 official macOS universal2 BuildScript",
+      "components": [
+        {
+          "component": "mpdecimal",
+          "display_name": "mpdecimal",
+          "runtime_version": "4.0.0",
+          "license_files": [
+            {
+              "path": "mpdecimal-4.0.0-COPYRIGHT.txt",
+              "sha256": "2713324211652ce4a60e6e21e54f9dc3004299e591b0933a352f1a89c5fb53c2"
+            }
+          ],
+          "upstream_archive_sha256": "942445c3245b22730fd41a67a7c5c231d11cb1b9936b9c0f76334fb7d0b4468c",
+          "upstream_archive_url": "https://www.bytereef.org/software/mpdecimal/releases/mpdecimal-4.0.0.tar.gz",
+          "upstream_license_extraction": "byte-exact-whole-file",
+          "upstream_license_path": "COPYRIGHT.txt",
+          "upstream_release": "mpdecimal-4.0.0",
+          "upstream_source": "CPython v3.13.12 macOS BuildScript pinned input"
+        },
+        {
+          "component": "openssl",
+          "display_name": "OpenSSL",
+          "runtime_version": "3.0.18",
+          "license_files": [
+            {
+              "path": "OpenSSL-3.0.18-LICENSE.txt",
+              "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+            }
+          ],
+          "upstream_archive_sha256": "d80c34f5cf902dccf1f1b5df5ebb86d0392e37049e5d73df1b3abae72e4ffe8b",
+          "upstream_archive_url": "https://github.com/openssl/openssl/releases/download/openssl-3.0.18/openssl-3.0.18.tar.gz",
+          "upstream_license_extraction": "byte-exact-whole-file",
+          "upstream_license_path": "LICENSE.txt",
+          "upstream_release": "openssl-3.0.18",
+          "upstream_source": "CPython v3.13.12 macOS BuildScript pinned input"
+        },
+        {
+          "component": "sqlite",
+          "display_name": "SQLite",
+          "runtime_version": "3.50.4",
+          "license_files": [
+            {
+              "path": "SQLite-3.50.4-PUBLIC-DOMAIN.txt",
+              "sha256": "06545a6ec25fbbff6c62f205f94a35be49e38f33bea827a8cfb07d7b82e4b083"
+            }
+          ],
+          "upstream_archive_sha256": "a3db587a1b92ee5ddac2f66b3edb41b26f9c867275782d46c3a088977d6a5b18",
+          "upstream_archive_url": "https://www.sqlite.org/2025/sqlite-autoconf-3500400.tar.gz",
+          "upstream_license_extraction": "sqlite3.h lines 4-9; remove leading '**' and at most one following space; join with LF and end with exactly one LF",
+          "upstream_license_path": "sqlite3.h",
+          "upstream_release": "sqlite-autoconf-3500400",
+          "upstream_source": "CPython v3.13.12 macOS BuildScript pinned input"
+        }
+      ]
+    }
+  ]
+}

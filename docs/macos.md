@@ -1,191 +1,215 @@
 # macOS guide
 
-This is the recommended path for a first private recovery run. It uses free Apple and Python tools;
-iMazing is not required.
+The native app is the intended recovery experience for macOS 14 or later. It is free, includes its
+recovery engine, and does not require iMazing, Python, Homebrew, Git, GitHub CLI, or developer tools
+for end users.
 
-## 1. Install and verify Python
+> **Current distribution status:** no signed and notarized v0.2.0 DMG has been published yet. The
+> app bundle produced by `script/build_local_app.sh` is ad-hoc signed for local development and is
+> not a downloadable public release. Until verified DMGs are published, use the
+> [Python CLI fallback](../README.md#python-cli-fallback) or build locally as a contributor.
 
-The project supports and tests Python 3.10, 3.11, 3.12, and 3.13. For a fresh Mac, install Python
-3.13 using the free **macOS 64-bit universal2 installer** from
-[python.org/downloads/macos](https://www.python.org/downloads/macos/). Homebrew is not required.
-Close and reopen Terminal after installation, then verify what will run:
+Contributor app builds use exact CPython 3.13.12 plus a reviewed native-runtime license profile;
+the broader Python 3.10-through-3.13 range applies to the CLI, not native app packaging. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#native-macos-development-setup).
 
-```text
-python3 --version
-command -v python3
-```
+## 1. Make a completed encrypted backup
 
-Continue if the version is 3.10 through 3.13. If Apple's `python3` asks to install Command Line Tools
-or reports an older version, use the Python.org installer and repeat the verification. The later
-commands call `.venv/bin/python` directly so they cannot silently switch interpreters.
-
-## 2. Make and verify an encrypted backup
-
-1. Connect the iPhone or iPad to the Mac, unlock it, and approve **Trust** if asked.
+1. Connect the iPhone or iPad, unlock it, and approve **Trust** if asked.
 2. Open Finder and select the device in the sidebar.
 3. Under **General**, select **Back up all of the data on your device to this Mac**.
-4. Enable **Encrypt local backup**, choose a unique password, and store it safely.
-5. Select **Back Up Now**. Keep the cable connected and respond if Finder asks you to unlock the
-   device. The display does not need to remain permanently on.
-6. Wait until Finder no longer says **Backing up**, its progress indicator has disappeared, and the
-   **Latest Backup to this Mac** date and time have updated.
-7. Choose **Manage Backups**. Confirm that the newly dated backup is present and shows the encrypted
-   backup lock indicator. Use **Show in Finder** to identify its folder.
+4. Enable **Encrypt local backup**, choose a unique password, and save it in a password manager.
+5. Select **Back Up Now**. Keep the cable connected and respond to any unlock prompt.
+6. Wait until Finder no longer says **Backing up**, the progress indicator has disappeared, and
+   **Latest Backup to this Mac** shows the expected new date and time.
+7. Choose **Manage Backups**. Confirm the new backup appears with the encrypted-backup lock
+   indicator. Use **Show in Finder** to identify it.
 
-Do not infer completion only from a pause in the progress animation or the backup's size. The
-extractor needs the encryption password and cannot recover or reset it.
+The phone screen does not need to remain permanently on, but the cable must remain connected and the
+phone may need to be unlocked when Finder asks. Do not infer completion from backup size or a pause
+in the animation.
 
-Once those checks pass, click the eject button beside the device in Finder. Wait for the device to
-disappear from Finder's sidebar, then disconnect the cable. The extraction uses the Mac backup and
-does not require the phone to remain attached.
+Once all completion checks pass, eject the device in Finder. Wait for it to disappear from the
+sidebar, then disconnect it. Recovery uses the local Mac backup; the phone should remain disconnected
+so the source backup cannot be updated during extraction.
 
-## 3. Locate and verify the backup folder
+The backup password may differ from the phone passcode, Apple Account password, and Mac login. The
+extractor cannot recover or reset it.
 
-Finder backups are normally stored under:
+## 2. Identify the individual backup folder
 
-```text
-$HOME/Library/Application Support/MobileSync/Backup/
-```
-
-In Finder, choose **Go → Go to Folder**, paste `~/Library/Application Support/MobileSync/Backup/`,
-and open `Backup`. Each long-named child folder is a device backup. Prefer **Manage Backups → Show
-in Finder** when several backups exist.
-
-In Terminal, set `BACKUP` to that individual long-named folder. Replace `BACKUP_FOLDER_NAME`; do not
-include the literal placeholder:
+Finder backups are normally under:
 
 ```text
-BACKUP="$HOME/Library/Application Support/MobileSync/Backup/BACKUP_FOLDER_NAME"
-test -f "$BACKUP/Manifest.plist" && test -f "$BACKUP/Manifest.db" \
-  && echo "Backup folder confirmed"
+~/Library/Application Support/MobileSync/Backup/
 ```
 
-If **Show in Finder** reveals a different location, use that actual path instead. The confirmation
-must print before continuing. Do not move, rename, edit, or clean the source backup.
+Each child of that folder represents a device backup. When the parent contains exactly one valid
+completed backup, the app accepts the parent and selects that backup automatically. When several
+backups exist, open the intended child before choosing it; **Manage Backups → Show in Finder** is the
+safest way to identify the correct one. An individual backup contains regular `Manifest.plist` and
+`Manifest.db` files, but ordinary users do not need to inspect those files manually.
 
-## 4. Choose protected output and check space
+Do not move, rename, edit, clean, or duplicate the backup as part of recovery. The app's system
+folder picker normally opens at the standard backup location and lets macOS grant access to the
+chosen folder.
 
-Use either a FileVault-protected Mac account or an encrypted APFS volume/disk image with a password
-distinct from the iOS backup password. Avoid iCloud Drive, Dropbox, shared folders, the project, and
-the source backup.
+## 3. App-managed private output
 
-The extractor does not duplicate a 120 GB device backup. It needs working space for:
+The native app creates every recovery in its own private local app container. The user does not
+choose or mount an output volume. Each run receives a new `TVTime-Recovery-...` directory with
+owner-only permissions, outside known cloud, shared, source-backup, and Git locations. The result
+screen can reveal that directory in Finder.
 
-- one temporary decrypted `Manifest.db`, approximately the size of the source `Manifest.db`;
-- the files in the backed-up TV Time app domain;
-- normalized tables and the report; and
-- another `Manifest.db` only if the advanced `--include-decrypted-manifest` option is used.
+The first screen's **Show Previous Recoveries** button reveals the private app-managed parent after
+a relaunch or after starting over. Review old completed or incomplete runs there before deleting
+anything; the app does not automatically delete recovery output.
 
-The storage amount shown for TV Time on the phone is only an estimate of the app-domain output. A
-conservative starting allowance is twice the source `Manifest.db`, twice the reported TV Time data,
-plus 1 GB of headroom. If either size is unknown, leave several GB free. Inspect the manifest size
-and the destination's available space without changing either:
+Recovered reports are readable plaintext. The sandbox and owner-only permissions reduce accidental
+access but do not provide whole-disk encryption, so FileVault remains recommended. Anyone who can
+access the Mac account—or an administrator with sufficient privileges—may be able to read the
+recovered files.
+
+The app records the app-managed parent's filesystem device and inode before and after its local and
+non-cloud checks. Preflight and recovery must use the same identity. For each helper launch, the app
+verifies that no path component is a symbolic link, opens the exact parent, and passes only that
+directory handle through the private local protocol. The helper verifies the handle against the
+request and holds it for the complete operation. It creates and opens the fresh child relative to
+that handle, changes its dedicated process into the held output-root identity, and keeps every
+private descendant relative throughout extraction, analysis, and reporting. A substituted path
+receives no recovered plaintext, and final success requires the original identities to remain
+visible. The numeric identities are internal and are not written to a recovery report.
+
+Preflight also produces an internal source receipt bound to the selected backup root, its critical
+metadata files, and the source totals shown on the confirmation screen. The app keeps this receipt
+only in memory and sends it to the recovery helper after password entry. Recovery rescans the source
+and must match the receipt before the fresh output child is created. Selecting another backup,
+retrying, cancelling, failing, or completing clears the retained receipt.
+
+The app creates a fresh child such as `TVTime-Recovery-<timestamp>` beneath its private app-managed
+parent. It refuses a path that already exists, overlaps the backup, is inside a Git worktree, or uses
+an unsafe link. A retry always receives another fresh name.
+
+### Space calculation
+
+The destination does not need to hold the entire device backup. Preflight requires free space of at
+least `max(512 MiB, 2 × Manifest.db size)`. It shows that minimum alongside the backup's logical size,
+the manifest size, and destination free space.
+
+After the encrypted manifest identifies the TV Time domains, recovery also requires the selected
+files' declared bytes, temporary staging space equal to the largest selected encrypted payload, and
+headroom of `max(64 MiB, 10% of selected bytes)`. Enabling advanced decrypted-manifest retention
+adds one manifest-sized file to that check. This second check prevents a large app-domain extraction
+from relying only on the initial manifest allowance.
+
+Filesystem allocation can exceed logical sizes, so leave additional room. A failed attempt is kept
+private and cannot be reused; allow room for a fresh retry until the first run is validated.
+
+## 4. Install a published app when available
+
+Only follow these installation steps after the project publishes both the artifact and its checksum:
+
+1. On an Apple silicon Mac, download the DMG labeled `Apple-Silicon-arm64`. On an Intel Mac,
+   download `Intel-x86_64`.
+2. Compare the DMG's SHA-256 value with its entry in the published `SHA256SUMS`.
+3. Open the DMG, drag **TV Time Backup Extractor** to **Applications**, then eject the DMG.
+4. Open the installed app from Applications.
+
+A legitimate public package must be Developer ID signed, notarized, stapled, and accepted by
+Gatekeeper. Do not disable Gatekeeper or use an unsigned app downloaded from an issue, message, or
+unofficial mirror. The current local development bundle does not satisfy this distribution contract.
+
+## 5. Run the guided recovery
+
+1. Select **Choose Backup…** and choose the individual device-backup folder.
+2. Wait while the app prepares private app-managed storage and scans the backup without modifying
+   it.
+3. Review the confirmation screen. It must show the encrypted backup as confirmed, the snapshot as
+   finished, the destination as private app-managed local storage, and enough free space.
+4. Acknowledge that the recovered files contain sensitive viewing history and are readable
+   plaintext on this Mac.
+5. Enter the encrypted-backup password in the secure field and select **Start Recovery**. The app
+   rechecks local/cloud policy and directory identity immediately before it starts.
+
+The password is sent only to the bundled local helper and is not intentionally persisted. The field
+is cleared when recovery starts. The app and helper do not contact TV Time or Apple network services.
+
+Recovery progresses through extraction, analysis, and reporting. The app copies only the primary TV
+Time app domain and directly related plugin domains. It does not make another full backup copy.
+
+## 6. Cancellation, closing, and quitting
+
+Selecting **Cancel Check** during preflight stops the read-only scan and creates no recovery output.
+
+Selecting **Cancel Recovery**, closing the window, or quitting while recovery is active opens a
+confirmation dialog. **Continue Recovery** is the safe default. Confirmed cancellation asks the
+helper to stop at a safe checkpoint and preserves any incomplete output for private diagnosis.
+
+An incomplete run cannot be resumed, overwritten, merged, or used as a completed recovery. Keep it
+private until the reason is understood, then use **Show Incomplete Recovery Folder** before starting
+over if you need to inspect or remove that run. If
+recovery finishes while a close or quit confirmation is visible, completion wins and the app keeps
+the successful result available rather than treating it as cancelled.
+
+## 7. Validate the result
+
+The success screen appears only after the app reopens and validates the completed package. It shows
+the selected-source, completion-marker, copied-file, and sealed-artifact checks together with an
+aggregate chart, separate watched/saved movie and named/unnamed event counts, copied-file totals,
+byte-count differences, and aggregate media-reference counts. Validate those counts before opening
+private reports.
+
+The app offers:
+
+- **Open Visual Report** for the self-contained offline HTML catalogue;
+- **Open PDF** when a faithful printable PDF could be produced;
+- **Open Markdown** for the canonical complete text report; and
+- **Show Recovery Folder** for the complete private package, including CSV tables and completion
+  markers.
+
+Opening a report launches the default browser or viewer. Its private filename may appear in that
+application's history or macOS Recent Items. Close it after validation and clear that history if your
+privacy model requires it; clearing history does not delete the report itself.
+
+The PDF is optional. If recovered text requires character shaping or glyphs that the available
+embedded font cannot preserve, the app states that the PDF was not created. The Markdown and offline
+HTML reports remain the complete human-readable outputs.
+
+For a successful full recovery, verify locally—without posting the files—that both markers say
+`complete`:
 
 ```text
-ls -lh "$BACKUP/Manifest.db"
-df -h "$HOME"
+PRIVATE_RUN/TVTime-Extraction/metadata/run_state.json
+PRIVATE_RUN/TVTime-Extraction/analysis/recovery_state.json
 ```
 
-For output in a FileVault-protected home folder, create a unique run name automatically:
+Also confirm that copied files equal selected files and that the report lists the expected titles,
+favorites, episodes, and watch events. Byte-count differences remain explicit salvage notes with
+declared/copied sizes and app-relative paths in the readable reports; they do not silently disappear.
+Validate the recovered databases and readable content before relying on the result.
+
+For an authorized local acceptance run, the repository validator can prove the complete root
+layout, both completion contracts, artifact hashes and sizes, raw-cache-to-title/table parity,
+offline HTML properties, deterministic PDF parity, and final copied-raw/sealed-artifact integrity.
+It does not claim that every filesystem access/change timestamp is immutable. Pass the private path
+over standard input so it does not become a process argument:
 
 ```text
-OUTPUT="$HOME/TVTime-Private/run-$(date +%Y%m%d-%H%M%S)"
+printf '%s\n' "$PRIVATE_RUN" | ./.venv/bin/python -I script/validate_recovery_output.py
 ```
 
-For an encrypted volume, replace `PRIVATE_VOLUME` with its visible volume name:
+Every `GATE` line and the final `RESULT` must say `PASS`. Its aggregate `COUNT` lines remain private
+and must not be pasted into issues, documentation, CI logs, or release evidence.
 
-```text
-OUTPUT="/Volumes/PRIVATE_VOLUME/TVTime-Private/run-$(date +%Y%m%d-%H%M%S)"
-df -h "/Volumes/PRIVATE_VOLUME"
-```
+Keep the original encrypted backup until this review is complete. Never upload a report, table,
+database, marker, screenshot of recovered content, or backup to an issue.
 
-Do not pre-create `TVTime-Extraction`; the program creates it and refuses to overwrite one.
+## CLI fallback on macOS
 
-## 5. Download and install
+The free CLI supports Python 3.10 through 3.13. It remains available for automation and while no
+notarized app package has been published. Follow [Python CLI fallback](../README.md#python-cli-fallback)
+and use a fresh private output path.
 
-Follow [Download the release package or source](../README.md#1-download-the-release-package-or-source).
-The release wheel is the shortest route and needs neither Git nor Apple Command Line Tools. From the
-folder containing the downloaded wheel, run:
-
-```text
-python3 -m venv .venv
-./.venv/bin/python -m pip install --only-binary=:all: ./tvtime_backup_extractor-0.1.0-py3-none-any.whl
-./.venv/bin/python -m tvtime_extractor --version
-./.venv/bin/python -m tvtime_extractor recover --help
-```
-
-Alternatively, the source ZIP route also works without Git or Apple Command Line Tools. If using
-Git, first verify `git --version`; GitHub CLI users should also verify `gh auth status`.
-
-From the project folder, create the environment and install the pinned dependencies:
-
-```text
-test -f pyproject.toml && echo "Project folder confirmed"
-python3 -m venv .venv
-./.venv/bin/python -m pip install --only-binary=:all: --requirement requirements.txt
-./.venv/bin/python -m pip install --no-deps .
-./.venv/bin/python -m tvtime_extractor --version
-./.venv/bin/python -m tvtime_extractor recover --help
-```
-
-No shell activation is required. If the project is moved to another folder or Mac, recreate
-`.venv` there instead of copying it.
-
-## 6. Understand the extraction boundary
-
-The tool opens the backup read-only and temporarily decrypts its `Manifest.db` inside the private
-output. It requires `AppDomain-com.tozelabs.tvshowtime`, discovers any other matching TV Time
-domain belonging directly to the app's plugins, and copies every regular file recorded in those
-domains while preserving each manifest relative path below:
-
-```text
-TVTime-Extraction/raw/APP_DOMAIN/RELATIVE_PATH
-```
-
-The source file IDs, counts, declared sizes, actual sizes, and SHA-256 hashes are recorded privately
-in `metadata/inventory.csv`. The primary analysis reads the copied `Documents/DioCache.db`; the
-copied image-cache database is catalogued when available. Nothing is written to the phone or source
-backup, and no TV Time or Apple network service is contacted.
-
-## 7. Run the recovery
-
-Keep `BACKUP` and `OUTPUT` from the earlier steps, then run:
-
-```text
-./.venv/bin/python -m tvtime_extractor recover \
-  --backup "$BACKUP" \
-  --output "$OUTPUT" \
-  --acknowledge-sensitive-output
-```
-
-Enter the backup password at the hidden prompt. Do not include it in the command, shell history, a
-text file, environment variable, or bug report.
-
-If macOS reports **Operation not permitted** while reading the backup, stop and follow
-[Full Disk Access](troubleshooting.md#macos-reports-operation-not-permitted). Do not copy the backup
-into the repository as a workaround.
-
-## 8. Confirm and retain safely
-
-A successful run exits with code 0 and prints a readable summary. **Copy failures** should be `0`,
-and **Files copied** should show the same copied and expected count. A nonzero **Size warnings** count
-is retained in the private metadata and followed by SQLite integrity checks; validate the report
-before relying on the result. Confirm that the report exists without printing its private content:
-
-```text
-test -f "$OUTPUT/TVTime-Extraction/analysis/TVTime-Recovered-Data.md" \
-  && echo "Recovery report confirmed"
-open "$OUTPUT/TVTime-Extraction/analysis/TVTime-Recovered-Data.md"
-```
-
-Validate the recovered titles, favorites, and watch events. A local app cache may be incomplete, so
-keep the original encrypted backup until the report and tables have been checked.
-
-For any retry, set a new `OUTPUT` value and run the full command again:
-
-```text
-OUTPUT="$HOME/TVTime-Private/run-$(date +%Y%m%d-%H%M%S)-retry"
-```
-
-Do not delete, empty, merge, or overwrite a partial run before diagnosing it privately. See
-[privacy](privacy.md) before copying or eventually deleting any output.
+If Terminal reports **Operation not permitted** when reading MobileSync, follow
+[macOS reports Operation not permitted](troubleshooting.md#macos-reports-operation-not-permitted).
+Do not move the backup into the repository as a workaround.

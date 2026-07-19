@@ -1,174 +1,303 @@
 # Troubleshooting
 
-## `Manifest.plist was not found`
+Keep the source backup and every recovery output private while troubleshooting. Use a fresh
+destination for each retry; never delete, empty, merge, rename, or edit an earlier run merely to make
+the tool accept the same path.
 
-`--backup` must point to the individual long-named backup folder, not its parent `Backup` directory.
-Confirm both required files without printing private contents:
+## There is no downloadable v0.2.0 macOS app
+
+That is the expected repository state until release packaging is completed. The native app has been
+validated as a local ad-hoc development build, but no Developer ID-signed and notarized v0.2.0 DMG
+has been published.
+
+Do not download an unsigned copy from an issue or unofficial mirror, and do not disable Gatekeeper.
+Use the [Python CLI fallback](../README.md#python-cli-fallback) or follow the contributor-only local
+build instructions in [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## The published macOS app will not open
+
+First confirm that an official release actually exists and that the downloaded DMG matches the Mac:
+`Apple-Silicon-arm64` for Apple silicon or `Intel-x86_64` for Intel. Verify its SHA-256 checksum
+against the release's `SHA256SUMS`, install the app in Applications, and open that installed copy.
+
+A legitimate published package must be Developer ID signed, notarized, stapled, and accepted by
+Gatekeeper. If those conditions are not met, stop. Do not use “Open Anyway” as a workaround for an
+unofficial or ad-hoc build.
+
+## The app says the backup folder is invalid
+
+Select the individual device-backup folder, not the parent folder named `Backup`. The selected folder
+must directly contain regular files named:
+
+```text
+Manifest.plist
+Manifest.db
+```
+
+In Finder, use the device page's **Manage Backups → Show in Finder** action to identify the intended
+backup. Do not move it into the repository or select a copied subset.
+
+For CLI use, verify only the file presence without printing private content:
 
 ```text
 test -f "$BACKUP/Manifest.plist" && test -f "$BACKUP/Manifest.db" \
   && echo "Backup folder confirmed"
 ```
 
-On macOS, Finder's **Manage Backups → Show in Finder** is the safest way to identify that folder.
-Do not move it into the project.
+## Inspect privacy-safe native diagnostics locally
 
-## The Finder backup may not have completed
+The macOS app records only fixed operation, milestone, and allow-listed failure codes in Apple's
+local unified log. It does not log paths, backup identifiers, filenames, titles, recovered counts,
+passwords, or free-form error text, and it does not transmit telemetry.
 
-Reconnect the device and select it in Finder. A completed run has all of these signals:
+For a contributor-built local app, run the repository's normal packaged build with its narrow
+telemetry filter:
 
-- Finder no longer says **Backing up** and no backup progress indicator remains;
-- **Latest Backup to this Mac** shows the expected current date and time; and
-- **Manage Backups** lists that newly dated backup with the encrypted-backup lock indicator.
+```text
+./script/build_and_run.sh --telemetry
+```
 
-Only then eject the device in Finder, wait for it to disappear from the sidebar, and disconnect it.
-The phone display does not need to remain permanently on, but keep the cable connected and respond
-to any unlock prompt while the backup is running.
+Then reproduce the user-interface action and look for category `RecoveryDiagnostics`. A normal run
+has bounded events such as `picker_presented`, `preflight started`, and `validation completed`. A
+failure contains an allow-listed `reason`; an unknown local error is only
+`unrecognized_failure`.
+
+Do not broaden the predicate, export a `.logarchive`, or attach terminal output to an issue. Other
+system logs can contain private data. Share only the app's displayed reference code and a manually
+paraphrased stage unless a maintainer provides a synthetic reproduction procedure.
+
+## The backup is not marked finished
+
+Reconnect the device and select it in Finder or Apple Devices. A completed run has all of these
+signals:
+
+- the application no longer says **Backing up** and no progress indicator remains;
+- the latest local-backup date and time have updated; and
+- backup management lists that new backup with the encrypted-backup lock indicator.
+
+Only then eject the device, wait for it to disappear, and disconnect it. The phone display does not
+need to remain permanently on, but keep the cable connected and respond to unlock prompts while the
+backup is being made.
+
+The extractor also requires `Status.plist` to report a finished snapshot. It refuses an absent,
+unfinished, or changing status rather than guessing.
+
+## The backup is not confirmed as encrypted
+
+Create another local backup with **Encrypt local backup** enabled and store its password safely. An
+unencrypted backup is not accepted. Enabling FileVault on the Mac does not change whether Finder's
+device backup itself is marked encrypted.
 
 ## The backup password fails
 
-Use the password chosen when **Encrypt local backup** was enabled. It may differ from the device
-passcode, Apple Account password, Mac login, or output-volume password. The project cannot recover
-it. Confirm the same password works when managing or restoring the backup with Apple software.
+Use the password chosen when **Encrypt local backup** was enabled. It can differ from the device
+passcode, Apple Account password, and Mac login.
 
-## TV Time app domain is missing
+The extractor cannot recover or reset it. Confirm the password using trusted Apple software. Do not
+paste it into a support request, command, environment variable, shell history, or screenshot.
 
-The extractor searches the decrypted backup index for TV Time domains and specifically requires:
+## Private output storage is refused
+
+The extractor refuses a destination that:
+
+- already exists;
+- overlaps the source backup;
+- is inside a Git repository;
+- is or traverses an unsafe symbolic link or reparse point; or
+- is on a nonlocal volume, is an ubiquitous item, is under a known cloud/File Provider or shared
+  root, or uses FUSE, an unknown filesystem, or an ambiguous stacked Linux mount; or
+- does not have a safe existing immediate parent (required by the POSIX CLI's held-directory check).
+
+The native macOS app prepares a new owner-only child in its private local container automatically;
+start over so it can recheck that location. The CLI still requires a new child path on private
+encrypted storage. Do not choose a cloud-synced or shared CLI destination.
+
+On Linux, FUSE, network, shared-folder, overlay, temporary, unknown, and ambiguous stacked mounts
+are refused with no override. Use a directly mounted, locally encrypted filesystem supported by the
+[Linux guide](linux.md#destination-filesystem-checks). Do not share `mountinfo` or mount-command
+output; it can contain private paths.
+
+## The app says there is not enough free space
+
+The extractor does not make a second copy of the complete device backup. The initial
+manifest-processing preflight checks for at least the larger of 512 MiB or twice the source
+`Manifest.db` size. The app displays that initial floor and the destination's free space, but the
+floor is not the complete recovery-space requirement.
+
+After reading the encrypted manifest, recovery performs another check for:
+
+- all selected TV Time files at their declared sizes;
+- one staging snapshot as large as the largest selected encrypted source payload;
+- headroom equal to the larger of 64 MiB or 10% of those selected bytes; and
+- one additional manifest-sized retained file only when decrypted-manifest retention is enabled.
+
+It checks again after optional manifest retention; that second check omits the already-retained
+manifest allowance but still includes the largest staging snapshot. Filesystem allocation and a
+future fresh retry can need more, so leave additional room. Free space on another volume does not
+increase the Mac's app-managed recovery storage.
+
+For CLI diagnosis on macOS or Linux, inspect rather than modify:
+
+```text
+ls -lh "$BACKUP/Manifest.db"
+df -h "/path/to/private/destination-parent"
+```
+
+After a disk-full failure, preserve the partial run privately, free space without touching the
+backup, and retry into a new output folder.
+
+## The source changed during recovery
+
+Use a completed, ejected, disconnected backup. The extractor snapshots the source manifest metadata
+and selected encrypted payload metadata, then revalidates it before marking extraction complete. It
+stops if a selected source file or finished status changes.
+
+Do not run Finder backup creation, backup cleanup, migration, or synchronization against the same
+backup while extracting. Preserve the incomplete output, let Apple software settle, confirm the
+backup is still finished, disconnect the phone, and retry into a fresh output folder.
+
+## Cancelling, closing, or quitting behaves unexpectedly
+
+Cancelling preflight creates no recovery output. During active recovery, Cancel, window close, and
+quit require confirmation; **Continue Recovery** is the safe default. Confirmed cancellation can take
+time because the helper stops at cooperative safety checkpoints.
+
+Incomplete output is preserved and cannot be resumed or reused. If recovery naturally completes
+while a close or quit confirmation is visible, the successful result remains active; completion does
+not become a cancellation.
+
+## Extraction stopped or finished with copy failures
+
+Analysis does not proceed when a selected file could not be copied. The private
+`metadata/summary.json` records the failure inventory. Do not attach or quote it in an issue.
+
+Every started extraction has `metadata/run_state.json`, initially marked `incomplete`. It becomes
+`complete` only after source revalidation and safe extraction cleanup. A wrong password,
+interruption, disk error, source change, or copy failure leaves the run incomplete.
+
+Preserve the output for private diagnosis and retry the full recovery into a new destination. Never
+edit `run_state.json` to bypass analysis validation.
+
+## The full recovery has no complete report marker
+
+A successful full recovery also requires
+`TVTime-Extraction/analysis/recovery_state.json` with `status` set to `complete`. The report builder
+stages output privately and atomically promotes the whole analysis directory only after Markdown and
+HTML are complete and the PDF is either generated faithfully or explicitly omitted.
+
+If `recovery_state.json` is missing, not complete, or an `.analysis-incomplete` or
+`.report-incomplete` directory remains, treat the output as incomplete. Do not merge or repair it by
+hand. Retry into a new destination.
+
+Standalone `extract` intentionally produces only `run_state.json`; it does not constitute a full
+recovery report.
+
+## The result reports byte-count differences
+
+The decryption dependency can return a file length different from the length declared in backup
+metadata. The extractor records every mismatch privately, suppresses dependency output that could
+expose absolute paths, and continues only when every selected file was copied. The analyzer then
+requires the primary recovered database to pass SQLite integrity checks.
+
+Keep the source and output. Validate the readable titles and counts, copied-file total, completion
+markers, and private discrepancy records. A difference is an explicit salvage warning: it is neither
+silently discarded nor automatically proof of an unusable recovery.
+
+## The PDF was not created
+
+This can be the intended safe result. The extractor refuses to produce a PDF if its embedded font or
+available shaping support cannot faithfully render every recovered character. It records the PDF as
+omitted and keeps both of these complete:
+
+```text
+TVTime-Recovered-Data.md
+TVTime-Recovered-Data.html
+```
+
+Do not convert the Markdown or HTML with an online service. If a PDF is essential, use a trusted
+offline viewer's print function and manually verify every name; that derivative is outside the
+extractor's fidelity guarantee.
+
+## The visual report shows no remote images
+
+That is intentional. The HTML is self-contained, uses no JavaScript, and blocks network requests.
+It visualizes aggregate counts and recovered text but does not fetch posters, trailers, or image
+cache URLs. Detailed sanitized references are available in the private CSV tables.
+
+## A report opens but appears in history or Recent Items
+
+Opening a report hands it to the default browser, PDF viewer, Markdown viewer, or Finder. Its private
+filename may appear in that application's history, macOS Recent Items, Quick Look cache, or state
+restoration.
+
+Close the report after validation and clear local history if required. Disable browser or document
+sync before opening private output. Clearing history does not delete the underlying report; see the
+[privacy guide](privacy.md#reports-browsers-and-recent-items).
+
+## The TV Time app domain is missing
+
+The extractor requires the primary backup domain:
 
 ```text
 AppDomain-com.tozelabs.tvshowtime
 ```
 
-The selected backup may predate TV Time installation, be incomplete, belong to another device, or
-use an unsupported app version. Open TV Time on the device, allow its local data to settle, and make
-a new completed encrypted backup. Do not edit the manifest or copy a similarly named domain by
-hand.
+The selected backup may predate TV Time installation, belong to another device, be incomplete, or
+come from an unsupported app version. Do not edit the manifest or copy a similarly named domain by
+hand. If possible, open TV Time on the authorized device, let its local data settle, create another
+completed encrypted backup, eject the device, and retry from that new backup.
 
-When the domain is present, the extractor copies every regular file recorded for its matching TV
-Time app domains—not the entire device backup—and preserves each domain and relative path under
-`TVTime-Extraction/raw/`. Analysis then looks for the copied `Documents/DioCache.db`.
+## `DioCache.db` is missing or unsupported
 
-## `DioCache.db` is missing
+The current parser expects the copied primary app-domain file `Documents/DioCache.db`. A newer TV
+Time version may have changed its storage format, or the local cache may not include the database or
+recognized payloads.
 
-Extraction found the app container but not the cache schema expected by version 0.1.0. Preserve the
-private extraction and report only a redacted description of the error. A newer TV Time release may
-have changed its storage format, or the local cache may not contain the expected database.
+Preserve the private extraction. Report only the version, platform, parser status, and a synthetic or
+abstract description. Do not upload the database or cache.
 
 ## macOS reports `Operation not permitted`
 
-macOS privacy controls can prevent Terminal from reading
-`$HOME/Library/Application Support/MobileSync/Backup` even when the files exist.
+This section applies mainly to the Python CLI. macOS privacy controls can prevent Terminal from
+reading the standard MobileSync location even when the files exist.
 
 1. Open **System Settings → Privacy & Security → Full Disk Access**.
-2. Enable the trusted terminal application that will run the command, such as Terminal or iTerm.
-   If it is not listed, add that application from `/System/Applications/Utilities` or
-   `/Applications`.
-3. Quit that terminal application completely, reopen it, return to the project folder, and retry
-   using a **new** output path.
+2. Enable only the trusted terminal application that runs the command, such as Terminal or iTerm.
+3. Quit that terminal completely, reopen it, return to the project directory, and retry with a new
+   output path.
 
-Grant access only to the application actually hosting the shell. Do not grant it to downloaded
-scripts or move the backup into a Git repository. You may disable the permission again after
-recovery if you no longer need terminal access to protected files.
+Grant access only to the application hosting the trusted shell. Do not grant it to downloaded
+scripts and do not move the backup into a Git repository. Disable the permission later if it is no
+longer needed.
 
-## The destination is refused
+The sandboxed native app instead uses a system folder picker so the user can grant read-only access
+to the selected backup. Use **Manage Backups → Show in Finder** to locate the correct child folder
+before choosing it. Native output stays in the app's private local container.
 
-The tool refuses destinations that overlap the source backup, sit inside a Git repository, use a
-symbolic link as the final destination, or already exist. Choose a new folder on encrypted storage.
-This protection prevents accidental overwrite or publication.
+## CLI installation fails
 
-Do not delete an earlier run merely to reuse its name. Create another unique run instead:
+Supported Python versions are 3.10 through 3.13. Use a trusted installer and the repository's exact
+`requirements.lock`; do not remove pins or hashes, and do not mix interpreters.
 
-```text
-OUTPUT="$HOME/TVTime-Private/run-$(date +%Y%m%d-%H%M%S)-retry"
-```
-
-On another platform, choose an equivalently new private path.
-
-## The disk fills or there may not be enough space
-
-The extractor does not make another full copy of the iPhone backup. Its peak destination use
-includes a temporary decrypted `Manifest.db`, the TV Time app-domain files, and analysis output.
-`--include-decrypted-manifest` retains one additional manifest-sized file.
-
-On macOS, inspect rather than modify the source and destination:
+From the project folder on macOS or Linux:
 
 ```text
-ls -lh "$BACKUP/Manifest.db"
-df -h "$HOME"
-```
-
-For an external destination, run `df -h "/Volumes/PRIVATE_VOLUME"` after replacing the volume name.
-As a conservative starting allowance, leave twice the source `Manifest.db`, twice the reported TV
-Time data, plus 1 GB free; if sizes are unknown, leave several GB. After a disk-full failure, retain
-the partial run privately, free space without touching the backup, set a fresh `OUTPUT`, and retry.
-
-## Extraction finished with failures
-
-Exit code 3 means at least one app-container file failed. Analysis does not start automatically.
-Review the private `metadata/summary.json` locally. Do not attach it to an issue. Ensure the backup is
-complete, readable, and unchanged, then retry the full recovery into a different destination.
-
-Every started extraction also contains private `metadata/run_state.json`. It changes to `complete`
-only after the source manifest remained stable and the extraction summary was written. A wrong
-password, interruption, disk error, or changing source leaves it as `incomplete`; analysis refuses
-that marked run. Preserve it for diagnosis and use a new output path for the retry.
-
-## The readable summary reports size warnings
-
-The decryption dependency can report an actual file length that differs from the length recorded in
-the backup metadata. The extractor records every mismatch privately, suppresses dependency messages
-that would reveal absolute paths, and continues only when each selected file was copied. The analyzer
-then requires `DioCache.db` to pass SQLite `quick_check` before producing a normal report.
-
-Keep the backup and output. Validate the recovered title counts and readable report, and inspect the
-private `metadata/summary.json` locally if needed. Do not paste paths or discrepancy records into an
-issue. A size warning is not silently discarded, but it is not automatically a failed recovery when
-the recovered database passes integrity checks.
-
-## Installation fails
-
-Supported and tested versions are Python 3.10 through 3.13; Python 3.13 is recommended for a new
-installation. On macOS, use the free official installer from
-[python.org/downloads/macos](https://www.python.org/downloads/macos/)—Homebrew is not required—and
-verify it:
-
-```text
-python3 --version
-command -v python3
-```
-
-From the project folder, create a new environment rather than reusing or deleting one from another
-path or Mac:
-
-```text
-python3 -m venv .venv-retry
-./.venv-retry/bin/python -m pip install --only-binary=:all: --requirement requirements.txt
-./.venv-retry/bin/python -m pip install --no-deps .
+python3.13 -m venv .venv-retry
+./.venv-retry/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements.lock
+./.venv-retry/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements-source-build.lock
+./.venv-retry/bin/python -m pip install --no-index --no-build-isolation --no-deps .
+./.venv-retry/bin/python -m pip check
 ./.venv-retry/bin/python -m tvtime_extractor --version
 ```
 
-Use the repository's pinned `requirements.txt`. If a binary wheel is unavailable for an unusual
-Python/platform combination, use Python 3.13 rather than removing pins. Continue to call
-`.venv-retry/bin/python` for that attempt; do not mix interpreters from the two environments.
+On Windows PowerShell, create the environment with `py -3.13 -m venv .venv-retry`, then use
+`.venv-retry\Scripts\python.exe`. You may substitute an explicit 3.10, 3.11, or 3.12; do not use an
+unqualified launcher that can select Python 3.14. Virtual environments are tied to their path and
+computer; create a new one rather than copying or repairing an environment from elsewhere.
 
-## The repository will not download
+## The installed CLI command is not found
 
-For **Download ZIP**, open the public repository page and choose **Code → Download ZIP**. For GitHub
-CLI, confirm both authentication and the required Git executable before cloning:
-
-```text
-gh auth status
-git --version
-```
-
-Then run `gh repo clone amirbrooks/tvtime-backup-extractor`. A fresh Mac without Git can use
-**Code → Download ZIP** instead; this project does not require Git at runtime. Never put a personal
-access token in a clone URL or support report. Private forks additionally require the signed-in
-account to have access.
-
-## The installed command is not found
-
-Activation is optional. Run the project environment's interpreter directly.
+Shell activation is optional. Invoke the environment's interpreter directly.
 
 macOS or Linux:
 
@@ -182,14 +311,18 @@ Windows PowerShell:
 .venv\Scripts\python.exe -m tvtime_extractor --help
 ```
 
-## Rerunning analysis
+## Rerunning analysis or reports
 
-`analyze` requires a fresh extraction without an `analysis` directory. To preserve provenance, the
-tool does not merge or overwrite results. Make a new full recovery run rather than manually mixing
-old and new files.
+`analyze` requires one complete extraction and refuses an existing analysis directory. `report`
+requires one complete analysis and refuses existing report artifacts. These rules preserve
+provenance and prevent mixed runs.
+
+Make a new full recovery rather than manually combining or overwriting files. Advanced developers
+using the separate commands must preserve the extraction completion marker.
 
 ## Getting safe help
 
-Read [SUPPORT.md](../SUPPORT.md). Share only platform, Python version, tool version, subcommand, exit
-code, and a paraphrased/redacted message. Never share the backup, output, reports, databases,
-cookies, passwords, IDs, hashes, private paths, or screenshots of viewing history.
+Read [SUPPORT.md](../SUPPORT.md). Share only the application or CLI version, platform, architecture
+or Python version when relevant, workflow stage, exit code, and a paraphrased synthetic message.
+Never share the backup, output, reports, databases, cookies, passwords, IDs, hashes, private paths,
+counts from a real recovery, or screenshots of viewing history.

@@ -4,7 +4,19 @@ include CONTRIBUTING.md
 include SECURITY.md
 include SUPPORT.md
 include requirements.txt
+include requirements.lock
 include requirements-dev.txt
+include requirements-dev.lock
+include requirements-macos-build.txt
+include requirements-macos-build.lock
+include requirements-source-build.txt
+include requirements-source-build.lock
 recursive-include docs *.md
+recursive-include macos/Bundle *.entitlements *.icns *.json *.md *.plist *.png *.txt
+recursive-include macos/Sources *.swift
+recursive-include macos/Tests *.swift
+include macos/Package.swift
+include macos/Package.resolved
+recursive-include script *.py *.sh *.swift
 recursive-include scripts *.py
 recursive-include tests *.py
