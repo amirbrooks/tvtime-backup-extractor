@@ -26,8 +26,10 @@
 - macOS 14+ users receive a native SwiftUI workflow when an architecture-specific signed and
   notarized DMG is published. End users must not need Python, iMazing, Homebrew, Git, or developer
   tools.
-- The current local app build is ad-hoc signed and local-only. No documentation, release note, or UI
-  may imply that a Developer ID-signed, notarized, tagged, or downloadable v0.2.0 artifact exists.
+- `script/build_local_app.sh` remains an ad-hoc, local-only acceptance path. The controlled release
+  pipeline has also produced Developer ID-signed, notarized, stapled local candidates for both
+  architectures, but no documentation, release note, or UI may imply that a tagged, published, or
+  downloadable v0.2.0 artifact exists until the public-release gates are completed.
 - The Python CLI remains the free fallback with Python 3.10 through 3.13. Full encrypted-backup
   recovery is supported on macOS and Linux; Windows supports analysis and report rebuilding from an
   existing completed extraction only in this baseline.
@@ -150,7 +152,8 @@ TypeScript and JavaScript gates are not applicable; the offline report contains 
 ## Release discipline
 
 - Version 0.2.0 is a development baseline until the release checklist is completed. Do not create a
-  tag, upload assets, or change release status based only on a successful local ad-hoc build.
+  tag, upload assets, or claim public availability based only on a successful local build or
+  notarization run.
 - A distributable Mac release requires full Xcode, Swift 6.2-compatible tooling, an Apple Silicon
   build Mac with Rosetta for dual-architecture execution, the official python.org CPython 3.13.12
   universal2 build Python matching the reviewed release-native profile, a Developer ID Application

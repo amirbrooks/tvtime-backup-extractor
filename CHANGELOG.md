@@ -4,8 +4,9 @@ All notable changes are documented here. The project follows semantic versioning
 
 ## 0.2.0 - Unreleased
 
-Version 0.2.0 is a source and local-acceptance baseline. No v0.2.0 tag, downloadable DMG, or public
-release asset is represented by this entry.
+Version 0.2.0 is a source and local-acceptance baseline. Local Developer ID-signed, notarized,
+stapled Apple silicon and Intel candidates have passed the controlled release pipeline, but no
+v0.2.0 tag, downloadable DMG, or public release asset is represented by this entry.
 
 ### Native macOS application
 
@@ -102,6 +103,10 @@ release asset is represented by this entry.
 - The release pipeline performs no upload and cannot run without a real Developer ID Application
   identity, configured notarization profile, full Xcode, universal2 build Python, and dual-
   architecture execution support.
+- Validated that pipeline locally through signing, notarization, stapling, Gatekeeper,
+  architecture-specific packaged-helper smoke, mounted-DMG license verification, provenance
+  manifests, checksums, and privacy scans for both Apple silicon and Intel candidates. This is local
+  release-preparation evidence, not a claim that v0.2.0 has been tagged or published.
 
 ### Tests and documentation
 

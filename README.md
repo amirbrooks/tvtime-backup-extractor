@@ -8,10 +8,11 @@ human-readable reports plus detailed CSV tables.
 The project is free and open source. iMazing is not required. It does not modify the phone or source
 backup, contact TV Time, restore data to the app, or provide an official cloud-account export.
 
-> **Release status:** the source is at the v0.2.0 development baseline. The macOS application has
-> been built and validated locally with an ad-hoc signature, but there is not yet a downloadable,
-> Developer ID-signed, notarized v0.2.0 public artifact. Do not redistribute the local development
-> app as though it were a release. The currently published v0.1.0 prerelease is CLI-only: its
+> **Release status:** the source is at the v0.2.0 development baseline. The controlled macOS release
+> pipeline has produced and validated local Developer ID-signed, notarized, stapled candidates for
+> Apple silicon and Intel, but there is still no v0.2.0 tag, public release, or downloadable
+> artifact. Do not redistribute a local candidate as though it were published. The currently
+> published v0.1.0 prerelease is CLI-only: its
 > complete Markdown catalogue contains the actual recovered series, movie, favorite, episode, and
 > identifiable watch-event names rather than counts alone. The v0.2.0 source adds the shared offline
 > HTML/PDF views and native macOS result experience. For safety, use v0.1.0 only with Python 3.10
