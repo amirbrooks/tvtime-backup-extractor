@@ -5,9 +5,13 @@ artifact has been published.
 
 ## Current status
 
-As of 2026-07-18:
+As of 2026-07-19:
 
 - source and bundle metadata use version `0.2.0`;
+- the complete synthetic Python and native macOS CI matrix passes on the merged release-candidate
+  source;
+- source-bound wheel and source-distribution builds pass clean-environment installation, dependency,
+  CLI-help, membership, metadata, checksum, and privacy verification locally;
 - the native macOS app has a host-architecture local acceptance path;
 - that local path is sandboxed and ad-hoc signed only;
 - no v0.2.0 release tag is represented as created;
