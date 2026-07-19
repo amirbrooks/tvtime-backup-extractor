@@ -442,7 +442,14 @@ def is_known_synced_or_shared_path(
 
 def _darwin_volume_is_local(path: Path) -> bool:
     libc = ctypes.CDLL(None, use_errno=True)
-    statfs = getattr(libc, "statfs", None)
+    # Intel macOS keeps the pre-64-bit-inode ``statfs`` ABI under the bare
+    # symbol and exposes the current ``struct statfs`` layout through the
+    # suffixed symbol. Apple silicon has only the current bare symbol. Prefer
+    # the explicit modern ABI when it exists so an x86_64 helper running under
+    # Rosetta does not read shifted fields and misclassify local APFS storage.
+    statfs = getattr(libc, "statfs$INODE64", None)
+    if statfs is None:
+        statfs = getattr(libc, "statfs", None)
     if statfs is None:
         return False
     statfs.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DarwinStatFS)]

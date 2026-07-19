@@ -24,6 +24,7 @@ from tvtime_extractor.safety import (
     _WINDOWS_FILE_SHARE_WRITE,
     _WINDOWS_GENERIC_READ,
     EXTRACTION_DIRECTORY_NAME,
+    _darwin_volume_is_local,
     _linux_volume_is_local,
     _windows_close_handle,
     _windows_create_file_directory_handle,
@@ -252,6 +253,39 @@ class PortablePathTests(unittest.TestCase):
 
 
 class DestinationSafetyTests(unittest.TestCase):
+    class _DarwinStatFSFunction:
+        def __init__(self, flags: int) -> None:
+            self.flags = flags
+            self.calls = 0
+            self.argtypes: object = None
+            self.restype: object = None
+
+        def __call__(self, _path: bytes, filesystem_pointer: object) -> int:
+            self.calls += 1
+            filesystem_pointer._obj.f_flags = self.flags  # type: ignore[attr-defined]
+            return 0
+
+    def test_darwin_local_volume_prefers_current_inode64_statfs_abi(self) -> None:
+        legacy = self._DarwinStatFSFunction(0)
+        current = self._DarwinStatFSFunction(0x00001000)
+        libc = type("SyntheticDarwinLibC", (), {"statfs": legacy})()
+        setattr(libc, "statfs$INODE64", current)
+
+        with mock.patch("tvtime_extractor.safety.ctypes.CDLL", return_value=libc):
+            self.assertTrue(_darwin_volume_is_local(Path("/synthetic/private")))
+
+        self.assertEqual(current.calls, 1)
+        self.assertEqual(legacy.calls, 0)
+
+    def test_darwin_local_volume_uses_bare_statfs_when_modern_symbol_is_absent(self) -> None:
+        current = self._DarwinStatFSFunction(0x00001000)
+        libc = type("SyntheticDarwinLibC", (), {"statfs": current})()
+
+        with mock.patch("tvtime_extractor.safety.ctypes.CDLL", return_value=libc):
+            self.assertTrue(_darwin_volume_is_local(Path("/synthetic/private")))
+
+        self.assertEqual(current.calls, 1)
+
     @staticmethod
     def _backup(base: Path) -> Path:
         backup = base / "backup"
