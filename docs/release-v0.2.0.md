@@ -5,18 +5,22 @@ artifact has been published.
 
 ## Current status
 
-As of 2026-07-19:
+As of 2026-07-20:
 
 - source and bundle metadata use version `0.2.0`;
 - the complete synthetic Python and native macOS CI matrix passes on the merged release-candidate
   source;
 - source-bound wheel and source-distribution builds pass clean-environment installation, dependency,
   CLI-help, membership, metadata, checksum, and privacy verification locally;
-- the native macOS app has a host-architecture local acceptance path;
-- that local path is sandboxed and ad-hoc signed only;
+- the host-architecture contributor acceptance path remains sandboxed and ad-hoc signed;
+- the controlled dual-architecture release pipeline has also produced local Developer ID-signed,
+  notarized, stapled Apple silicon and Intel DMGs from reviewed source;
+- both local DMGs passed exact-architecture, hardened-runtime, sandbox-entitlement, Gatekeeper,
+  packaged-helper synthetic-preflight, native-license, manifest, checksum, and privacy gates;
 - no v0.2.0 release tag is represented as created;
 - no v0.2.0 DMG, release manifest, or checksum file is represented as published; and
-- no Developer ID signing or Apple notarization result is claimed.
+- clean-device installation, authorized private real-backup acceptance, draft-asset re-download,
+  and public-release approval remain outstanding distribution gates.
 
 The README and platform guides must keep this state visible until every gate below is completed and
 the distribution state is updated deliberately.

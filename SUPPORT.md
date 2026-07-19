@@ -3,9 +3,10 @@
 This is a community, best-effort alpha project. It is not affiliated with TV Time or Apple and does
 not provide account recovery, password recovery, data restoration, or legal advice.
 
-The current supported development baseline is source version 0.2.0. A sandboxed native macOS app has
-been validated locally with an ad-hoc signature, but no downloadable, Developer ID-signed, notarized
-v0.2.0 DMG is currently offered. Do not request help bypassing Gatekeeper for an unofficial app.
+The current supported development baseline is source version 0.2.0. The controlled release pipeline
+has validated local Developer ID-signed, notarized, stapled macOS candidates for both architectures,
+but no v0.2.0 tag, public release, or downloadable DMG is currently offered. Do not request help
+bypassing Gatekeeper for an unofficial or locally shared app.
 
 Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md),
 [output reference](docs/output-reference.md), and [troubleshooting guide](docs/troubleshooting.md).

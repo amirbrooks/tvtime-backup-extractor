@@ -4,9 +4,10 @@ The native app is the intended recovery experience for macOS 14 or later. It is 
 recovery engine, and does not require iMazing, Python, Homebrew, Git, GitHub CLI, or developer tools
 for end users.
 
-> **Current distribution status:** no signed and notarized v0.2.0 DMG has been published yet. The
-> app bundle produced by `script/build_local_app.sh` is ad-hoc signed for local development and is
-> not a downloadable public release. Until verified DMGs are published, use the
+> **Current distribution status:** the controlled release pipeline has validated local Developer
+> ID-signed, notarized, stapled DMGs for Apple silicon and Intel, but no v0.2.0 tag, public release,
+> or downloadable artifact exists yet. The app bundle produced by `script/build_local_app.sh`
+> remains ad-hoc signed for contributor use. Until verified DMGs are published, use the
 > [Python CLI fallback](../README.md#python-cli-fallback) or build locally as a contributor.
 
 Contributor app builds use exact CPython 3.13.12 plus a reviewed native-runtime license profile;
@@ -115,9 +116,11 @@ Only follow these installation steps after the project publishes both the artifa
 3. Open the DMG, drag **TV Time Backup Extractor** to **Applications**, then eject the DMG.
 4. Open the installed app from Applications.
 
-A legitimate public package must be Developer ID signed, notarized, stapled, and accepted by
-Gatekeeper. Do not disable Gatekeeper or use an unsigned app downloaded from an issue, message, or
-unofficial mirror. The current local development bundle does not satisfy this distribution contract.
+A legitimate public package must be Developer ID signed, notarized, stapled, accepted by Gatekeeper,
+and downloaded with its published checksum from the official release. Do not disable Gatekeeper or
+use an app from an issue, message, local candidate, or unofficial mirror. The ad-hoc contributor
+bundle does not satisfy this distribution contract, and successful local notarization alone does not
+make a candidate public.
 
 ## 5. Run the guided recovery
 
