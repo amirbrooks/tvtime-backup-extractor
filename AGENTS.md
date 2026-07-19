@@ -166,6 +166,9 @@ TypeScript and JavaScript gates are not applicable; the offline report contains 
   entitlement checks, notarization, stapling, Gatekeeper assessment, privacy scanning, license
   collection, exact pre/post-sign native Mach-O license-manifest verification, release-manifest
   generation, and checksums before publication is considered.
+- Intel macOS resolves the current 64-bit-inode `statfs` ABI through `statfs$INODE64`; the bare
+  symbol has a legacy layout. Keep the local-volume probe architecture-aware and retain the signed
+  packaged-helper smoke for both `arm64` and `x86_64`.
 - Release packaging must name the reviewed full Git commit, start and finish with a clean worktree,
   execute only from a read-only `git archive` of that commit, disable automatic Swift resolution,
   rebuild helpers from hash-locked dependencies without trusting caches, and record the source

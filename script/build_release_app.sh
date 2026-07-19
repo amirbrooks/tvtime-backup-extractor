@@ -381,6 +381,10 @@ build_release_for_architecture() {
   /bin/cp "$swift_binary" "$app_macos/$EXECUTABLE_NAME"
   /usr/bin/strip -S "$app_macos/$EXECUTABLE_NAME"
   /bin/chmod 755 "$app_macos/$EXECUTABLE_NAME"
+  # Cross-compiled Swift executables are unsigned. Give both architectures the
+  # same valid terminal ad-hoc signature so the pre-sign canonical license hash
+  # can be compared with the later Developer ID-signed binary.
+  /usr/bin/codesign --force --sign - "$app_macos/$EXECUTABLE_NAME"
   verify_macho_exact_architecture "$app_macos/$EXECUTABLE_NAME" "$architecture"
 
   helper_python="$ROOT_DIR/.build-tools/helper-venv-$architecture/bin/python"
@@ -391,6 +395,15 @@ build_release_for_architecture() {
   /bin/cp "$ROOT_DIR/macos/Bundle/THIRD_PARTY_NOTICES.md" "$app_resources/"
   /bin/cp "$ROOT_DIR/LICENSE" "$app_resources/PROJECT_LICENSE.txt"
   /bin/cp "$HELPER_INFO_PLIST" "$helper_contents/Info.plist"
+  # Git release staging deliberately makes tracked inputs read-only. The copied
+  # bundle resources must be owner-writable so xattr can remove staging metadata
+  # before the bundle is signed.
+  /bin/chmod u+w \
+    "$app_contents/Info.plist" \
+    "$app_resources/AppIcon.icns" \
+    "$app_resources/THIRD_PARTY_NOTICES.md" \
+    "$app_resources/PROJECT_LICENSE.txt" \
+    "$helper_contents/Info.plist"
   /bin/cp "$helper_source/tvtime-helper" "$helper_macos/tvtime-helper"
   /bin/chmod 755 "$helper_macos/tvtime-helper"
   /usr/bin/ditto "$helper_source/_internal" "$helper_resources/_internal"

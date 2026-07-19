@@ -855,6 +855,35 @@ class NativeLicenseCompletenessTests(unittest.TestCase):
             mounted_verification,
         )
 
+    def test_release_builder_makes_copied_source_resources_writable_before_xattr(self) -> None:
+        contents = (ROOT / "script" / "build_release_app.sh").read_text(encoding="utf-8")
+        function_contents = contents[contents.index("build_release_for_architecture()") :]
+        chmod_index = function_contents.index("/bin/chmod u+w")
+        xattr_index = function_contents.index('/usr/bin/xattr -cr "$app_bundle"')
+        self.assertLess(chmod_index, xattr_index)
+        chmod_invocation = function_contents[chmod_index:xattr_index]
+        for copied_resource in (
+            '"$app_contents/Info.plist"',
+            '"$app_resources/AppIcon.icns"',
+            '"$app_resources/THIRD_PARTY_NOTICES.md"',
+            '"$app_resources/PROJECT_LICENSE.txt"',
+            '"$helper_contents/Info.plist"',
+        ):
+            self.assertIn(copied_resource, chmod_invocation)
+
+    def test_release_builder_signs_cross_compiled_swift_before_license_inventory(self) -> None:
+        contents = (ROOT / "script" / "build_release_app.sh").read_text(encoding="utf-8")
+        function_contents = contents[contents.index("build_release_for_architecture()") :]
+        strip_index = function_contents.index('/usr/bin/strip -S "$app_macos/$EXECUTABLE_NAME"')
+        ad_hoc_sign_index = function_contents.index(
+            '/usr/bin/codesign --force --sign - "$app_macos/$EXECUTABLE_NAME"'
+        )
+        license_inventory_index = function_contents.index(
+            '"$ROOT_DIR/script/collect_macos_licenses.py"'
+        )
+        self.assertLess(strip_index, ad_hoc_sign_index)
+        self.assertLess(ad_hoc_sign_index, license_inventory_index)
+
 
 class MacRunScriptContractTests(unittest.TestCase):
     def test_telemetry_stream_is_narrow_and_attaches_before_launch(self) -> None:
