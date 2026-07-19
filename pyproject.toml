@@ -46,8 +46,12 @@ tvtime-extractor = "tvtime_extractor.cli:entrypoint"
 tvtime-extractor-helper = "tvtime_extractor.helper_main:entrypoint"
 
 [project.urls]
+Homepage = "https://github.com/amirbrooks/tvtime-backup-extractor"
 Repository = "https://github.com/amirbrooks/tvtime-backup-extractor"
+Documentation = "https://github.com/amirbrooks/tvtime-backup-extractor#readme"
+Changelog = "https://github.com/amirbrooks/tvtime-backup-extractor/blob/main/CHANGELOG.md"
 Issues = "https://github.com/amirbrooks/tvtime-backup-extractor/issues"
+Security = "https://github.com/amirbrooks/tvtime-backup-extractor/security/policy"
 
 [tool.setuptools.packages.find]
 include = ["tvtime_extractor*"]

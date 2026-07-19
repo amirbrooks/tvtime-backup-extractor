@@ -155,6 +155,13 @@ TypeScript and JavaScript gates are not applicable; the offline report contains 
   build Mac with Rosetta for dual-architecture execution, the official python.org CPython 3.13.12
   universal2 build Python matching the reviewed release-native profile, a Developer ID Application
   identity, and a configured `notarytool` Keychain profile.
+- The standard python.org installer places the release Python at
+  `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13`. Verify the installer signature
+  and published SHA-256 before installation, then prove that executable runs under both `arch
+  -arm64` and `arch -x86_64`; do not substitute Homebrew Python for a distributable build.
+- Configure notarization credentials outside the repository with `notarytool store-credentials` and
+  pass only the resulting Keychain profile name to the release script. Never request, paste, log, or
+  persist an Apple app-specific password in an agent command or environment file.
 - Both DMGs must pass exact-architecture validation, inside-out signing, hardened runtime and sandbox
   entitlement checks, notarization, stapling, Gatekeeper assessment, privacy scanning, license
   collection, exact pre/post-sign native Mach-O license-manifest verification, release-manifest
