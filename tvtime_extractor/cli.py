@@ -3,22 +3,56 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import __version__
 from .analyze import analyze_extraction
-from .errors import TVTimeError, UserInputError
-from .extract import extract_backup, public_summary, read_backup_password
+from .errors import (
+    PartialExtractionError,
+    TVTimeError,
+    UserInputError,
+    insufficient_space_error,
+    is_insufficient_space_error,
+)
+from .extract import public_summary, read_backup_password
+from .models import (
+    DestinationDirectoryIdentity,
+    PreflightResult,
+    RecoveryEvent,
+    RecoveryEventKind,
+    RecoveryRequest,
+    RecoveryStage,
+)
 from .report import build_report
-from .safety import set_private_umask
+from .safety import (
+    held_destination_parent,
+    require_fresh_output_platform_support,
+    set_private_umask,
+)
+from .service import RecoveryService
 
 
 def _progress(message: str) -> None:
     print(f"[tvtime-extractor] {message}", file=sys.stderr, flush=True)
 
 
-def _add_extraction_arguments(parser: argparse.ArgumentParser) -> None:
+def _report_preflight(result: PreflightResult) -> None:
+    _progress("Preflight passed: the backup is encrypted and marked finished.")
+    _progress(
+        f"Backup scan: {result.backup_regular_files} regular files, "
+        f"{result.backup_logical_bytes} logical bytes."
+    )
+    _progress(
+        f"Destination space: {result.destination_free_bytes} bytes free; "
+        f"{result.minimum_working_bytes} bytes required for manifest processing."
+    )
+
+
+def _add_extraction_arguments(
+    parser: argparse.ArgumentParser, *, allow_decrypted_manifest: bool = False
+) -> None:
     parser.add_argument(
         "--backup",
         required=True,
@@ -29,7 +63,10 @@ def _add_extraction_arguments(parser: argparse.ArgumentParser) -> None:
         "--output",
         required=True,
         type=Path,
-        help="Private encrypted destination; TVTime-Extraction will be created inside it",
+        help=(
+            "New recovery-folder path on private encrypted storage; its parent must exist but "
+            "this path must not already exist"
+        ),
     )
     parser.add_argument(
         "--password-stdin",
@@ -41,11 +78,12 @@ def _add_extraction_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Confirm that the destination will contain highly sensitive decrypted data",
     )
-    parser.add_argument(
-        "--include-decrypted-manifest",
-        action="store_true",
-        help="Also retain the full decrypted device manifest (advanced and highly sensitive)",
-    )
+    if allow_decrypted_manifest:
+        parser.add_argument(
+            "--include-decrypted-manifest",
+            action="store_true",
+            help="Also retain the full decrypted device manifest (advanced and highly sensitive)",
+        )
 
 
 def _add_output_format_argument(parser: argparse.ArgumentParser) -> None:
@@ -69,7 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Show a traceback for unexpected errors (may expose private local paths)",
+        help=(
+            "Show a private traceback that may expose backup paths, dependency details, or "
+            "password text; never paste or share it"
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -79,17 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_extraction_arguments(recover)
     _add_output_format_argument(recover)
-    recover.add_argument(
-        "--include-raw-cache",
-        action="store_true",
-        help="Export verbatim cached API payloads (advanced and potentially account-identifying)",
-    )
 
     extract = subparsers.add_parser(
         "extract",
         help="Decrypt only the TV Time app container from a local iOS backup",
     )
-    _add_extraction_arguments(extract)
+    _add_extraction_arguments(extract, allow_decrypted_manifest=True)
     _add_output_format_argument(extract)
 
     analyze = subparsers.add_parser(
@@ -122,21 +158,114 @@ def _require_sensitive_output_acknowledgement(args: argparse.Namespace) -> None:
         )
 
 
-def _run_extraction(args: argparse.Namespace):
-    _require_sensitive_output_acknowledgement(args)
-    passphrase = read_backup_password(password_stdin=args.password_stdin)
-    try:
-        _progress("Opening the encrypted backup and copying the TV Time app data...")
-        return extract_backup(
-            backup_directory=args.backup,
-            output_directory=args.output,
-            passphrase=passphrase,
-            include_decrypted_manifest=args.include_decrypted_manifest,
+@contextmanager
+def _held_cli_destination_parent(
+    output: Path,
+) -> Iterator[tuple[int, DestinationDirectoryIdentity, Path]]:
+    with held_destination_parent(output) as (descriptor, identity_tuple, visible_output):
+        identity = DestinationDirectoryIdentity(
+            device=identity_tuple[0],
+            inode=identity_tuple[1],
         )
-    finally:
-        # Python strings cannot be reliably erased from memory. This only drops
-        # the CLI's reference; the password is never intentionally written to disk.
-        passphrase = ""
+        yield descriptor, identity, visible_output
+
+
+def _run_extraction(args: argparse.Namespace):
+    require_fresh_output_platform_support()
+    _require_sensitive_output_acknowledgement(args)
+    with _held_cli_destination_parent(args.output) as (
+        destination_parent_descriptor,
+        destination_identity,
+        visible_output,
+    ):
+        request = RecoveryRequest(
+            backup_directory=args.backup,
+            output_directory=visible_output,
+            acknowledge_sensitive_output=True,
+            include_decrypted_manifest=args.include_decrypted_manifest,
+            destination_parent_identity=destination_identity,
+        )
+        _progress("Checking that the encrypted backup is finished and the destination is safe...")
+        service = RecoveryService()
+        preflight = service.preflight(
+            request,
+            destination_parent_descriptor=destination_parent_descriptor,
+        )
+        _report_preflight(preflight)
+        passphrase = read_backup_password(password_stdin=args.password_stdin)
+        try:
+            _progress("Opening the encrypted backup and copying the TV Time app data...")
+            return service.extract(
+                request,
+                passphrase=passphrase,
+                destination_parent_descriptor=destination_parent_descriptor,
+                preflight_result=preflight,
+            )
+        finally:
+            # Python strings cannot be reliably erased from memory. This only drops
+            # the CLI's reference; the password is never intentionally written to disk.
+            passphrase = ""
+
+
+def _recovery_progress(event: RecoveryEvent) -> None:
+    if event.stage is RecoveryStage.EXTRACTION and event.kind is RecoveryEventKind.COMPLETED:
+        _progress(f"Extracted {event.current} of {event.total} selected files.")
+        if event.details.get("size_discrepancy_count"):
+            _progress(
+                "Warning: some decrypted sizes differed from backup metadata; "
+                "analysis will validate the recovered databases."
+            )
+        return
+    if event.kind is not RecoveryEventKind.STARTED:
+        return
+    messages = {
+        RecoveryStage.EXTRACTION: (
+            "Opening the encrypted backup and copying the TV Time app data..."
+        ),
+        RecoveryStage.ANALYSIS: "Analyzing the recovered TV Time cache...",
+        RecoveryStage.REPORT: "Building the readable report and media-reference tables...",
+    }
+    message = messages.get(event.stage)
+    if message:
+        _progress(message)
+
+
+def _run_recovery(args: argparse.Namespace):
+    require_fresh_output_platform_support()
+    _require_sensitive_output_acknowledgement(args)
+    with _held_cli_destination_parent(args.output) as (
+        destination_parent_descriptor,
+        destination_identity,
+        visible_output,
+    ):
+        request = RecoveryRequest(
+            backup_directory=args.backup,
+            output_directory=visible_output,
+            acknowledge_sensitive_output=True,
+            include_raw_cache=False,
+            include_decrypted_manifest=False,
+            destination_parent_identity=destination_identity,
+        )
+        service = RecoveryService()
+        _progress("Checking that the encrypted backup is finished and the destination is safe...")
+        preflight = service.preflight(
+            request,
+            destination_parent_descriptor=destination_parent_descriptor,
+        )
+        _report_preflight(preflight)
+        passphrase = read_backup_password(password_stdin=args.password_stdin)
+        try:
+            return service.recover(
+                request,
+                passphrase=passphrase,
+                progress=_recovery_progress,
+                destination_parent_descriptor=destination_parent_descriptor,
+                preflight_result=preflight,
+            )
+        finally:
+            # Python strings cannot be reliably erased from memory. This only drops
+            # the CLI's reference; the password is never intentionally written to disk.
+            passphrase = ""
 
 
 def _print_extraction_summary(result) -> None:
@@ -153,9 +282,9 @@ def _print_extraction_summary(result) -> None:
 def _print_analysis_summary(summary: dict[str, object]) -> None:
     movie_total = int(summary["watched_movies"]) + int(summary["movie_watchlist"])
     print("TV Time analysis summary")
-    print(f"  TV series titles: {summary['series_library']}")
+    print(f"  Recovered series records: {summary['series_library']}")
     print(
-        f"  Movie titles: {movie_total} "
+        f"  Recovered movie records: {movie_total} "
         f"({summary['watched_movies']} watched; {summary['movie_watchlist']} saved)"
     )
     print(f"  Favorites: {summary['favorite_shows']} shows; {summary['favorite_movies']} movies")
@@ -163,20 +292,26 @@ def _print_analysis_summary(summary: dict[str, object]) -> None:
         f"  Watch events: {summary['watch_events']} "
         f"({summary['watch_events_with_titles']} matched to a title)"
     )
-    print(f"  Identifiable cached episodes: {summary['episode_cache_unique']}")
+    print(f"  Recovered cached episode records: {summary['episode_cache_unique']}")
     print(f"  Parser status: {summary['parser_status']}")
 
 
 def _print_report_summary(summary: dict[str, object]) -> None:
     movie_total = int(summary["watched_movies"]) + int(summary["movie_watchlist"])
     print("Readable recovery report")
-    print(f"  Named TV series: {summary['series']}")
-    print(f"  Named movies: {movie_total}")
+    print(f"  Recovered series records: {summary['series']}")
+    print(f"  Recovered movie records: {movie_total}")
     print(f"  Named watch events: {summary['named_watch_events']} of {summary['watch_events']}")
     print(f"  Image references: {summary['image_cache_references']}")
     print(f"  Trailer references: {summary['trailer_references']}")
-    print(f"  Report: {summary['report']}")
-    print("  The report lists every identifiable recovered title/name found in the local cache.")
+    print(f"  Markdown report: {summary['report']}")
+    if summary.get("visual_report"):
+        print(f"  Offline HTML report: {summary['visual_report']}")
+    if summary.get("pdf_report"):
+        print(f"  Printable PDF report: {summary['pdf_report']}")
+    elif summary.get("pdf_status") == "omitted":
+        print(f"  PDF status: {summary.get('pdf_warning') or 'omitted for text fidelity'}")
+    print("  The report lists every recovered record and each available title/name.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -213,34 +348,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "recover":
-            result = _run_extraction(args)
-            _progress(
-                f"Extracted {result.summary['files_extracted']} of "
-                f"{result.summary['files_expected']} selected files."
-            )
-            if result.summary["size_discrepancies"]:
-                _progress(
-                    "Warning: some decrypted sizes differed from backup metadata; "
-                    "analysis will validate the recovered databases."
-                )
-            if result.has_failures:
-                if args.json:
-                    print(json.dumps({"extraction": public_summary(result)}, indent=2))
-                else:
-                    _print_extraction_summary(result)
+            try:
+                recovery = _run_recovery(args)
+            except PartialExtractionError as exc:
+                result = exc.extraction_result
+                if result is not None:
+                    _progress(
+                        f"Extracted {result.summary['files_extracted']} of "
+                        f"{result.summary['files_expected']} selected files."
+                    )
+                    if result.summary["size_discrepancies"]:
+                        _progress(
+                            "Warning: some decrypted sizes differed from backup metadata; "
+                            "analysis will validate the recovered databases."
+                        )
+                    if args.json:
+                        print(json.dumps({"extraction": public_summary(result)}, indent=2))
+                    else:
+                        _print_extraction_summary(result)
                 print(
                     "Extraction finished with failures. Review the private metadata/summary.json; "
                     "analysis was not started.",
                     file=sys.stderr,
                 )
-                return 3
-            _progress("Analyzing the recovered TV Time cache...")
-            analysis_summary = analyze_extraction(
-                extraction_directory=result.extraction_root,
-                include_raw_cache=args.include_raw_cache,
-            )
-            _progress("Building the readable report and media-reference tables...")
-            report_summary = build_report(extraction_directory=result.extraction_root)
+                return exc.exit_code
+            result = recovery.extraction
+            analysis_summary = recovery.analysis
+            report_summary = recovery.report
             if args.json:
                 print(
                     json.dumps(
@@ -292,6 +426,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Cancelled.", file=sys.stderr)
         return 130
+    except OSError as exc:
+        if args.debug:
+            raise
+        if is_insufficient_space_error(exc):
+            print(f"error: {insufficient_space_error()}", file=sys.stderr)
+        else:
+            print(
+                f"error: unexpected {type(exc).__name__}. "
+                "Rerun with --debug only in a private terminal.",
+                file=sys.stderr,
+            )
+        return 1
     except Exception as exc:
         if args.debug:
             raise

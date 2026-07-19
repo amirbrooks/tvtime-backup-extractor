@@ -16,13 +16,13 @@ env:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    name: Full recovery Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.13"]
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Check out the repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -31,13 +31,150 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install pinned runtime dependencies
-        run: "python -m pip install --only-binary=:all: --requirement requirements.txt"
-      - name: Install this package without resolving dependencies
-        run: python -m pip install --no-deps .
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements.lock"
+      - name: Install the pinned source-build backend
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-source-build.lock"
+      - name: Install this package without network or build isolation
+        run: python -m pip install --no-index --no-build-isolation --no-deps .
+      - name: Install pinned test dependencies
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-dev.lock"
+      - name: Verify the installed dependency graph
+        run: python -m pip check
       - name: Run synthetic tests
         run: python -m unittest discover -s tests -v
       - name: Check the installed command
-        run: tvtime-extractor --help
+        run: |
+          tvtime-extractor --help
+          tvtime-extractor recover --help
+          tvtime-extractor extract --help
+          tvtime-extractor analyze --help
+          tvtime-extractor report --help
+
+  windows-existing-extraction:
+    name: Windows existing-extraction Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned runtime dependencies
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements.lock"
+      - name: Install the pinned source-build backend
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-source-build.lock"
+      - name: Install this package without network or build isolation
+        run: python -m pip install --no-index --no-build-isolation --no-deps .
+      - name: Install pinned test dependencies
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-dev.lock"
+      - name: Verify the installed dependency graph
+        run: python -m pip check
+      - name: Test only supported Windows existing-extraction and fail-closed contracts
+        run: >-
+          python -m unittest -v
+          tests.test_analyze_report
+          tests.test_analysis_bounds_and_labels
+          tests.test_cancellation_and_reports
+          tests.test_recovery_output_validator
+          tests.test_safety.WindowsDirectoryHandleContractTests
+          tests.test_cli.CliTests.test_debug_help_warns_that_tracebacks_can_expose_secrets_and_must_not_be_shared
+      - name: Check installed review commands and documented refusal commands
+        run: |
+          tvtime-extractor --help
+          tvtime-extractor recover --help
+          tvtime-extractor extract --help
+          tvtime-extractor analyze --help
+          tvtime-extractor report --help
+
+  macos-app:
+    name: Native macOS app
+    runs-on: macos-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up pinned packaging Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.12"
+      - name: Require the committed Swift dependency lock
+        run: |
+          test -s macos/Package.resolved
+          git ls-files --error-unmatch -- macos/Package.resolved
+          shasum -a 256 macos/Package.resolved >"$RUNNER_TEMP/swift-package-lock.sha256"
+      - name: Check Swift formatting
+        run: |
+          xcrun swift-format lint --strict --recursive macos/Package.swift macos/Sources macos/Tests
+          xcrun swift-format lint --strict script/validate_pdf_render.swift
+      - name: Test the native recovery core
+        run: swift test --package-path macos --disable-automatic-resolution
+      - name: Test optimized native code
+        run: swift test --package-path macos --disable-automatic-resolution --configuration release
+      - name: Build the optimized native application
+        run: swift build --package-path macos --disable-automatic-resolution --configuration release
+      - name: Build the complete local application bundle
+        run: |
+          BUILD_HOME="$RUNNER_TEMP/tvtime-native-build-home"
+          mkdir -p "$BUILD_HOME"
+          HOME="$BUILD_HOME" \
+            TVTIME_BUILD_PYTHON="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).resolve())')" \
+            ./script/build_local_app.sh
+      - name: Confirm Swift dependencies stayed locked
+        run: |
+          shasum -a 256 -c "$RUNNER_TEMP/swift-package-lock.sha256"
+          git diff --exit-code -- macos/Package.resolved
+      - name: Verify the assembled application bundle
+        run: |
+          ROOT_DIR="$PWD"
+          source script/macos_packaging_lib.sh
+          APP="dist/TV Time Backup Extractor.app"
+          HELPER="$APP/Contents/Helpers/TVTimeHelper.bundle"
+          ARCH="$(uname -m)"
+          verify_macos_app_signatures "$APP"
+          verify_hardened_runtime_signatures "$APP"
+          verify_macho_tree_exact_architecture "$APP" "$ARCH"
+          verify_local_adhoc_sandbox_entitlements "$APP"
+          verify_bundled_app_icon "$APP" "macos/Bundle/AppIcon.icns"
+          # setup-python's public runtime lives under $HOME/hostedtoolcache. Scan
+          # the checkout, isolated build home, and user-data roots separately.
+          python script/scan_macos_release.py \
+            --root "$APP" \
+            --forbidden-value "$PWD" \
+            --forbidden-value "$RUNNER_TEMP/tvtime-native-build-home" \
+            --forbidden-value "$HOME/Desktop" \
+            --forbidden-value "$HOME/Documents" \
+            --forbidden-value "$HOME/Downloads" \
+            --forbidden-value "$HOME/Library" \
+            --forbidden-value "$HOME/.cache" \
+            --forbidden-value "$HOME/.config" \
+            --forbidden-value "$HOME/.local"
+          ".build-tools/helper-venv-$ARCH/bin/python" -I \
+            script/collect_macos_licenses.py \
+            --verify-output "$APP/Contents/Resources/Licenses" \
+            --app "$APP" \
+            --required-native-profile "official-cpython-3.13.12-universal2" \
+            --bundled-license \
+              "$HELPER/Contents/Resources/_internal/reportlab/fonts/bitstream-vera-license.txt"
+          if find "$HELPER" -iname '*darkgarden*' -print -quit | grep -q .; then
+            echo "error: packaged helper contains DarkGarden assets" >&2
+            exit 1
+          fi
+      - name: Exercise the real frozen-helper protocol with synthetic metadata
+        run: |
+          python script/smoke_packaged_helper.py \
+            --helper "dist/TV Time Backup Extractor.app/Contents/Helpers/TVTimeHelper.bundle/Contents/MacOS/tvtime-helper"
+      - name: Raster-check the synthetic visual report with PDFKit
+        run: |
+          REPORT_ROOT="$RUNNER_TEMP/visual-report-smoke"
+          PDF_PATH="$(
+            ".build-tools/helper-venv-$(uname -m)/bin/python" -I \
+              script/build_visual_report_fixture.py --output "$REPORT_ROOT"
+          )"
+          xcrun swift script/validate_pdf_render.swift "$PDF_PATH"
 
   quality:
     name: Lint, format, and build
@@ -50,15 +187,83 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install pinned development tools
-        run: "python -m pip install --only-binary=:all: --requirement requirements-dev.txt"
+        run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-dev.lock"
       - name: Lint
         run: python -m ruff check .
       - name: Check formatting
         run: python -m ruff format --check .
+      - name: Parse-check release shell and Python helpers
+        run: |
+          for shell_script in script/*.sh; do
+            bash -n "$shell_script"
+          done
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
+            python -m compileall -q tvtime_extractor script scripts tests
       - name: Build wheel and source distribution
-        run: python -m build --no-isolation
+        run: python -I script/build_python_distributions.py --source-commit "$GITHUB_SHA"
+      - name: Verify source binding, artifact membership, and private content exclusion
+        run: |
+          python -I script/verify_python_release.py \
+            --root dist \
+            --source-commit "$GITHUB_SHA" \
+            --source-tree "$(git rev-parse "$GITHUB_SHA^{tree}")" \
+            --forbidden-value "$PWD" \
+            --forbidden-value "$HOME"
+      - name: Assert source archive privacy metadata
+        run: python -I script/sdist_metadata.py --verify dist/*.tar.gz
+      - name: Check source archive completeness
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tarfile
+
+          archive, = pathlib.Path("dist").glob("*.tar.gz")
+          with tarfile.open(archive, "r:gz") as source:
+              names = set(source.getnames())
+          suffixes = (
+              "/macos/Package.resolved",
+              "/requirements.lock",
+              "/requirements-dev.lock",
+              "/requirements-macos-build.lock",
+              "/requirements-source-build.lock",
+              "/requirements-source-build.txt",
+              "/macos/Bundle/AppIcon.icns",
+              "/macos/Bundle/AppIcon-1024.png",
+              "/macos/Bundle/NativeLicenses/PROVENANCE.json",
+              "/macos/Bundle/NativeLicenses/CPython-3.13.12-LICENSE.txt",
+              "/macos/Bundle/NativeLicenses/OpenSSL-3.0.18-LICENSE.txt",
+              "/macos/Bundle/NativeLicenses/OpenSSL-3.6.1-LICENSE.txt",
+              "/macos/Bundle/NativeLicenses/mpdecimal-4.0.0-COPYRIGHT.txt",
+              "/macos/Bundle/NativeLicenses/mpdecimal-4.0.1-COPYRIGHT.txt",
+              "/macos/Bundle/NativeLicenses/SQLite-3.50.4-PUBLIC-DOMAIN.txt",
+              "/macos/Bundle/NativeLicenses/SQLite-3.51.2-PUBLIC-DOMAIN.txt",
+              "/macos/Tests/TVTimeRecoveryCoreTests/RecoverySessionTests.swift",
+              "/script/build_release_app.sh",
+              "/script/build_python_distributions.py",
+              "/script/build_visual_report_fixture.py",
+              "/script/git_source_stage.py",
+              "/script/sdist_metadata.py",
+              "/script/verify_python_release.py",
+              "/script/validate_pdf_render.swift",
+              "/script/smoke_packaged_helper.py",
+              "/tvtime_extractor/visual_report.py",
+          )
+          missing = [suffix for suffix in suffixes if not any(name.endswith(suffix) for name in names)]
+          if missing:
+              raise SystemExit(f"source archive is incomplete: {missing}")
+          PY
       - name: Smoke-test the wheel in an isolated environment
         run: |
           python -m venv .package-smoke
+          .package-smoke/bin/python -m pip install \
+            --require-hashes \
+            --only-binary=:all: \
+            --requirement requirements.lock
           .package-smoke/bin/python -m pip install --no-deps dist/*.whl
+          .package-smoke/bin/python -m pip check
+          .package-smoke/bin/tvtime-extractor --version
           .package-smoke/bin/tvtime-extractor --help
+          .package-smoke/bin/tvtime-extractor recover --help
+          .package-smoke/bin/tvtime-extractor extract --help
+          .package-smoke/bin/tvtime-extractor analyze --help
+          .package-smoke/bin/tvtime-extractor report --help

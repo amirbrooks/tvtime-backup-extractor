@@ -1,2 +1,5 @@
 iphone-backup-decrypt==0.9.0
 pycryptodome==3.23.0
+reportlab==5.0.0
+pillow==12.3.0
+charset-normalizer==3.4.9

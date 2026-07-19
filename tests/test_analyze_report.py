@@ -12,15 +12,165 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
-from tests.helpers import PROFILE_SENTINEL, create_synthetic_extraction, read_csv_rows
+from tests.helpers import (
+    PROFILE_SENTINEL,
+    create_synthetic_extraction,
+    read_csv_rows,
+    refresh_synthetic_source_snapshot,
+)
 from tvtime_extractor.analyze import analyze_extraction, latest_watch_events, readonly_sqlite
+from tvtime_extractor.display_text import has_display_text, normalize_display_text
 from tvtime_extractor.errors import TVTimeError, UserInputError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
 from tvtime_extractor.report import build_report, decode_tvtime_image_url
 
 
+def mutate_cache_payload(
+    extraction: Path,
+    *,
+    key: str,
+    subkey: str,
+    mutate,
+) -> None:
+    cache = extraction / "raw" / PRIMARY_DOMAIN / "Documents" / "DioCache.db"
+    with closing(sqlite3.connect(cache)) as connection:
+        row = connection.execute(
+            "SELECT content FROM cache_dio WHERE key = ? AND subKey = ?",
+            (key, subkey),
+        ).fetchone()
+        if row is None:
+            raise AssertionError("Synthetic cache row was missing")
+        payload = json.loads(row[0])
+        mutate(payload)
+        connection.execute(
+            "UPDATE cache_dio SET content = ? WHERE key = ? AND subKey = ?",
+            (json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(), key, subkey),
+        )
+        connection.commit()
+    refresh_synthetic_source_snapshot(extraction)
+
+
 class AnalyzeAndReportTests(unittest.TestCase):
+    def test_invisible_movie_name_uses_placeholder_without_report_mismatch(self) -> None:
+        for invisible_name in (" \t\n ", "\u200b\u2060\u200e\ufe0f"):
+            with (
+                self.subTest(value=ascii(invisible_name)),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                extraction = create_synthetic_extraction(Path(temporary))
+
+                def replace_movie_name(
+                    payload: dict[str, object], replacement: str = invisible_name
+                ) -> None:
+                    data = payload["data"]
+                    assert isinstance(data, dict)
+                    objects = data["objects"]
+                    assert isinstance(objects, list)
+                    movie = objects[0]
+                    assert isinstance(movie, dict)
+                    meta = movie["meta"]
+                    assert isinstance(meta, dict)
+                    meta["name"] = replacement
+
+                mutate_cache_payload(
+                    extraction,
+                    key="https://api.example.invalid/library?account=synthetic",
+                    subkey="library",
+                    mutate=replace_movie_name,
+                )
+                summary = analyze_extraction(extraction_directory=extraction)
+                self.assertEqual(summary["watch_events_with_titles"], 0)
+
+                report_summary = build_report(extraction_directory=extraction)
+                self.assertEqual(report_summary["named_watch_events"], 0)
+                report = (extraction / "analysis" / "TVTime-Recovered-Data.md").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn(r"\[movie title not present in cache\]", report)
+                self.assertIn(r"\[title not present in cache\]", report)
+
+    def test_display_text_preserves_joiners_but_neutralizes_format_controls(self) -> None:
+        self.assertFalse(has_display_text("\u200b\u2060\u200e\ufe0f"))
+        self.assertEqual(
+            normalize_display_text("Safe\u202eTitle\u2066Name"),
+            "Safe Title Name",
+        )
+        self.assertEqual(normalize_display_text("👩\u200d💻"), "👩\u200d💻")
+
+    def test_distinct_episodes_without_ids_remain_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+
+            def replace_episodes(payload: dict[str, object]) -> None:
+                data = payload["data"]
+                assert isinstance(data, list)
+                first = dict(data[0])
+                first.pop("id", None)
+                show = dict(first["show"])
+                show["id"] = ""
+                first["show"] = show
+                first["number"] = 2
+                first["name"] = "No-ID Episode Two"
+                second = dict(first)
+                second["show"] = dict(show)
+                second["number"] = 3
+                second["name"] = "No-ID Episode Three"
+                second["air_date"] = "2025-03-08T00:00:00Z"
+                payload["data"] = [first, dict(first), second]
+
+            mutate_cache_payload(
+                extraction,
+                key="https://api.example.invalid/episodes",
+                subkey="series",
+                mutate=replace_episodes,
+            )
+            summary = analyze_extraction(extraction_directory=extraction)
+            self.assertEqual(summary["episode_cache_unique"], 2)
+            rows = read_csv_rows(extraction / "analysis" / "episode_cache_unique.csv")
+            self.assertEqual(
+                {row["episode_name"] for row in rows},
+                {"No-ID Episode Two", "No-ID Episode Three"},
+            )
+            build_report(extraction_directory=extraction)
+            report = (extraction / "analysis" / "TVTime-Recovered-Data.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(report.count("No-ID Episode Two"), 1)
+            self.assertEqual(report.count("No-ID Episode Three"), 1)
+
+    def test_renamed_favorite_with_stable_id_is_one_latest_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+
+            def add_renamed_favorite(payload: dict[str, object]) -> None:
+                data = payload["data"]
+                assert isinstance(data, dict)
+                objects = data["objects"]
+                assert isinstance(objects, list)
+                renamed = dict(objects[0])
+                renamed["name"] = "Renamed Favorite Movie"
+                renamed["updated_at"] = "2026-01-10T00:00:00Z"
+                objects.append(renamed)
+
+            mutate_cache_payload(
+                extraction,
+                key="https://api.example.invalid/favorites",
+                subkey="movies",
+                mutate=add_renamed_favorite,
+            )
+            summary = analyze_extraction(extraction_directory=extraction)
+            self.assertEqual(summary["favorite_movies"], 1)
+            rows = read_csv_rows(extraction / "analysis" / "favorite_movies.csv")
+            self.assertEqual([row["name"] for row in rows], ["Renamed Favorite Movie"])
+            build_report(extraction_directory=extraction)
+            report = (extraction / "analysis" / "TVTime-Recovered-Data.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(report.count("Renamed Favorite Movie"), 1)
+            self.assertNotIn("Favorite Example Movie", report)
+
     def test_image_url_decoder_keeps_only_safe_relative_source_references(self) -> None:
         safe_payload = {
             "key": "episodes/screens/synthetic.jpg",
@@ -44,6 +194,7 @@ class AnalyzeAndReportTests(unittest.TestCase):
         )
         self.assertEqual(source, f"https://images.example.invalid/image/raw/{unsafe_token}")
 
+    @unittest.skipIf(os.name == "nt", "Windows mutation lock rejects an active SQLite writer")
     def test_readonly_sqlite_includes_committed_wal_rows_without_modifying_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "synthetic.db"
@@ -74,6 +225,38 @@ class AnalyzeAndReportTests(unittest.TestCase):
                 self.assertEqual(after, before)
             finally:
                 writer.close()
+
+    def test_readonly_sqlite_supports_builds_without_extension_loading_api(self) -> None:
+        class ConnectionWithoutExtensionAPI:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+                self.closed = False
+
+            def execute(self, statement: str):
+                self.statements.append(statement)
+                return self
+
+            def close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "synthetic.db"
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute("CREATE TABLE records (value TEXT)")
+            replacement = ConnectionWithoutExtensionAPI()
+            with (
+                mock.patch(
+                    "tvtime_extractor.analyze.sqlite3.connect",
+                    return_value=replacement,
+                ),
+                readonly_sqlite(database) as connection,
+            ):
+                self.assertIs(connection, replacement)
+            self.assertEqual(
+                replacement.statements[:2],
+                ["PRAGMA query_only = ON", "PRAGMA trusted_schema = OFF"],
+            )
+            self.assertTrue(replacement.closed)
 
     def test_watch_event_identity_retains_rewatches_and_removes_page_duplicates(self) -> None:
         first = {
@@ -221,6 +404,7 @@ class AnalyzeAndReportTests(unittest.TestCase):
                 connection.execute("DROP TABLE cache_dio")
                 connection.execute("CREATE TABLE cache_dio (key TEXT, items BLOB)")
                 connection.commit()
+            refresh_synthetic_source_snapshot(extraction)
 
             with self.assertRaisesRegex(TVTimeError, "unsupported cache_dio schema"):
                 analyze_extraction(extraction_directory=extraction)
@@ -242,6 +426,7 @@ class AnalyzeAndReportTests(unittest.TestCase):
                     ),
                 )
                 connection.commit()
+            refresh_synthetic_source_snapshot(extraction)
 
             with self.assertRaisesRegex(TVTimeError, "no supported TV Time payloads"):
                 analyze_extraction(extraction_directory=extraction)

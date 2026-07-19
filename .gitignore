@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.codex/
 
 # Python
 __pycache__/
@@ -17,7 +18,11 @@ coverage.xml
 htmlcov/
 build/
 dist/
+tmp/
 *.whl
+.build-tools/
+.swiftpm/
+macos/.build/
 
 # Editors and operating systems
 .DS_Store
@@ -43,5 +48,35 @@ cache_responses/
 *.sqlite
 *.sqlite3
 *.plist
+!macos/Bundle/Info.plist
+!macos/Bundle/TVTimeHelper-Info.plist
 profile_and_settings.json
 TVTime-Validation-Full-List.md
+
+# Canonical private recovery/export artifacts and macOS captures
+**/TVTime-Recovered-Data.*
+**/TVTime-Recovery-*.zip
+SYNTHETIC-QA-FIXTURE-NOT-RECOVERED-USER-DATA.*
+*.dmg
+
+# Binary visual/media files are private by default. Public screenshots must be
+# reviewed and then added through an explicit narrow exception.
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+**/*.webp
+**/*.heic
+**/*.tif
+**/*.tiff
+**/*.pdf
+**/*.mov
+**/*.mp4
+**/*.m4v
+**/*.zip
+**/*.icns
+!macos/Bundle/AppIcon-1024.png
+!macos/Bundle/AppIcon.icns
+
+# Content-addressed payload files copied from an iOS backup shard
+**/[0-9a-fA-F][0-9a-fA-F]/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]

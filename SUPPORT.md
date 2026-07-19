@@ -1,20 +1,36 @@
 # Support
 
-This is a community, best-effort alpha project. It is not affiliated with TV Time or Apple, and it
-does not provide account recovery, password recovery, data restoration, or legal advice.
+This is a community, best-effort alpha project. It is not affiliated with TV Time or Apple and does
+not provide account recovery, password recovery, data restoration, or legal advice.
 
-Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md), and
-[troubleshooting guide](docs/troubleshooting.md). Search existing issues without pasting private data.
+The current supported development baseline is source version 0.2.0. A sandboxed native macOS app has
+been validated locally with an ad-hoc signature, but no downloadable, Developer ID-signed, notarized
+v0.2.0 DMG is currently offered. Do not request help bypassing Gatekeeper for an unofficial app.
+
+Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md),
+[output reference](docs/output-reference.md), and [troubleshooting guide](docs/troubleshooting.md).
+Search existing issues without pasting private data.
 
 A safe support request may include:
 
-- `tvtime-extractor --version` output;
-- operating system and Python version;
-- the subcommand and exit code;
-- a paraphrased error with all usernames, paths, IDs, titles, dates, URLs, hashes, and counts replaced
-  by clearly synthetic placeholders;
-- a reproduction created only from the repository's synthetic fixtures.
+- application or `tvtime-extractor --version` output;
+- operating system and Mac architecture, or Python version for CLI use;
+- the workflow stage or CLI subcommand and exit code;
+- whether the expected extraction/report completion marker was absent, incomplete, or complete,
+  without attaching the marker;
+- a paraphrased error with all usernames, paths, IDs, titles, dates, URLs, hashes, and real counts
+  replaced by clearly synthetic placeholders; and
+- a reproduction built only from the repository's invented fixtures.
 
 Never upload a backup or generated output. Maintainers will not request passwords, cookies,
-manifests, databases, raw cache payloads, account profiles, reports, or screenshots of viewing
-history. Security-boundary problems belong in the private process described in [SECURITY.md](SECURITY.md).
+manifests, databases, raw cache payloads, account profiles, reports, tables, markers, private logs, or
+screenshots of viewing history.
+
+Opening reports can add their private filenames to browser/viewer history or Recent Items. That is a
+local privacy consideration, not information to include in an issue. See
+[Reports, browsers, and Recent Items](docs/privacy.md#reports-browsers-and-recent-items).
+
+Security-boundary problems belong in the private process described in
+[SECURITY.md](SECURITY.md). Missing or unnamed local-cache data and PDF omission for character
+fidelity are compatibility/support topics unless they expose or corrupt data outside the documented
+boundary.
