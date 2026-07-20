@@ -4,11 +4,10 @@ The native app is the intended recovery experience for macOS 14 or later. It is 
 recovery engine, and does not require iMazing, Python, Homebrew, Git, GitHub CLI, or developer tools
 for end users.
 
-> **Current distribution status:** the controlled release pipeline has validated local Developer
-> ID-signed, notarized, stapled DMGs for Apple silicon and Intel, but no v0.2.0 tag, public release,
-> or downloadable artifact exists yet. The app bundle produced by `script/build_local_app.sh`
-> remains ad-hoc signed for contributor use. Until verified DMGs are published, use the
-> [Python CLI fallback](../README.md#python-cli-fallback) or build locally as a contributor.
+> **Current distribution status:** [v0.2.0 is published](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
+> with Developer ID-signed, notarized, stapled DMGs for Apple silicon and Intel. The app bundle
+> produced by `script/build_local_app.sh` remains ad-hoc signed for contributor use and is not a
+> substitute for the official release.
 
 Contributor app builds use exact CPython 3.13.12 plus a reviewed native-runtime license profile;
 the broader Python 3.10-through-3.13 range applies to the CLI, not native app packaging. See
@@ -106,9 +105,10 @@ from relying only on the initial manifest allowance.
 Filesystem allocation can exceed logical sizes, so leave additional room. A failed attempt is kept
 private and cannot be reused; allow room for a fresh retry until the first run is validated.
 
-## 4. Install a published app when available
+## 4. Install the published app
 
-Only follow these installation steps after the project publishes both the artifact and its checksum:
+Use only the DMG and checksum from the
+[official v0.2.0 release](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0):
 
 1. On an Apple silicon Mac, download the DMG labeled `Apple-Silicon-arm64`. On an Intel Mac,
    download `Intel-x86_64`.
@@ -209,9 +209,9 @@ database, marker, screenshot of recovered content, or backup to an issue.
 
 ## CLI fallback on macOS
 
-The free CLI supports Python 3.10 through 3.13. It remains available for automation and while no
-notarized app package has been published. Follow [Python CLI fallback](../README.md#python-cli-fallback)
-and use a fresh private output path.
+The free CLI supports Python 3.10 through 3.13. It remains available for automation, Linux, and
+source-based workflows. Follow [Python CLI fallback](../README.md#python-cli-fallback) and use a
+fresh private output path.
 
 If Terminal reports **Operation not permitted** when reading MobileSync, follow
 [macOS reports Operation not permitted](troubleshooting.md#macos-reports-operation-not-permitted).

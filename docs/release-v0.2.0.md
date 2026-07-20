@@ -1,7 +1,6 @@
-# v0.2.0 macOS release preparation
+# v0.2.0 release record
 
-This document is a release-candidate checklist, not a release announcement or evidence that any
-artifact has been published.
+This document records the completed release gates and preserves the reproducible release procedure.
 
 ## Current status
 
@@ -13,21 +12,25 @@ As of 2026-07-20:
 - source-bound wheel and source-distribution builds pass clean-environment installation, dependency,
   CLI-help, membership, metadata, checksum, and privacy verification locally;
 - the host-architecture contributor acceptance path remains sandboxed and ad-hoc signed;
-- the controlled dual-architecture release pipeline has also produced local Developer ID-signed,
-  notarized, stapled Apple silicon and Intel DMGs from reviewed source;
-- both local DMGs passed exact-architecture, hardened-runtime, sandbox-entitlement, Gatekeeper,
+- the controlled dual-architecture release pipeline produced Developer ID-signed, notarized,
+  stapled Apple silicon and Intel DMGs from reviewed source;
+- both DMGs passed exact-architecture, hardened-runtime, sandbox-entitlement, Gatekeeper,
   packaged-helper synthetic-preflight, native-license, manifest, checksum, and privacy gates;
-- no v0.2.0 release tag is represented as created;
-- no v0.2.0 DMG, release manifest, or checksum file is represented as published; and
-- clean-device installation, authorized private real-backup acceptance, draft-asset re-download,
-  and public-release approval remain outstanding distribution gates.
+- clean-device installation and authorized private real-backup acceptance gates passed, with only
+  generic pass status retained;
+- every draft asset was downloaded into fresh local directories and passed checksum, signature,
+  notarization, stapling, Gatekeeper, architecture, license, provenance, and privacy verification;
+  and
+- [v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0) was published
+  on 2026-07-20 with all intended macOS and Python assets.
 
-The README and platform guides must keep this state visible until every gate below is completed and
-the distribution state is updated deliberately.
+The annotated `v0.2.0` tag resolves to reviewed commit
+`42880c236c5051ed322e4bfb1477a44553215bb7` and Git tree
+`dea2caf47371e56c3f6f91d6d7dabfcb9463019b`.
 
 ## Intended user artifacts
 
-A complete macOS release set will contain separate native packages rather than one combined helper:
+The complete macOS release set contains separate native packages rather than one combined helper:
 
 ```text
 TV-Time-Backup-Extractor-0.2.0-macOS-Apple-Silicon-arm64.dmg
@@ -211,7 +214,8 @@ while the signed DMG and its published checksum bind the downloadable artifact b
 
 ## Manual acceptance gates
 
-Before creating a public release, test copies of the final DMGs—not an earlier app bundle:
+Before creating a public release, test copies of the final DMGs—not an earlier app bundle. These
+gates were completed for v0.2.0:
 
 - verify each checksum from a separate directory;
 - test the arm64 DMG on a clean Apple silicon macOS 14-or-later account;

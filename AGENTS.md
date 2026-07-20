@@ -23,13 +23,13 @@
 
 ## Product contract
 
-- macOS 14+ users receive a native SwiftUI workflow when an architecture-specific signed and
-  notarized DMG is published. End users must not need Python, iMazing, Homebrew, Git, or developer
-  tools.
+- macOS 14+ users receive the native SwiftUI workflow through the architecture-specific signed and
+  notarized DMGs published in the official v0.2.0 release. End users must not need Python, iMazing,
+  Homebrew, Git, or developer tools.
 - `script/build_local_app.sh` remains an ad-hoc, local-only acceptance path. The controlled release
-  pipeline has also produced Developer ID-signed, notarized, stapled local candidates for both
-  architectures, but no documentation, release note, or UI may imply that a tagged, published, or
-  downloadable v0.2.0 artifact exists until the public-release gates are completed.
+  pipeline produced and published Developer ID-signed, notarized, stapled v0.2.0 DMGs for both
+  architectures. Do not describe later local candidates as published until their own release gates
+  are completed.
 - The Python CLI remains the free fallback with Python 3.10 through 3.13. Full encrypted-backup
   recovery is supported on macOS and Linux; Windows supports analysis and report rebuilding from an
   existing completed extraction only in this baseline.
@@ -151,8 +151,9 @@ TypeScript and JavaScript gates are not applicable; the offline report contains 
 
 ## Release discipline
 
-- Version 0.2.0 is a development baseline until the release checklist is completed. Do not create a
-  tag, upload assets, or claim public availability based only on a successful local build or
+- Version 0.2.0 was published on 2026-07-20 from commit
+  `42880c236c5051ed322e4bfb1477a44553215bb7`. Future releases must complete the full checklist; do
+  not create a tag, upload assets, or claim availability based only on a successful local build or
   notarization run.
 - A distributable Mac release requires full Xcode, Swift 6.2-compatible tooling, an Apple Silicon
   build Mac with Rosetta for dual-architecture execution, the official python.org CPython 3.13.12

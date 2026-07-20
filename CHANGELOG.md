@@ -2,11 +2,12 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-07-20
 
-Version 0.2.0 is a source and local-acceptance baseline. Local Developer ID-signed, notarized,
-stapled Apple silicon and Intel candidates have passed the controlled release pipeline, but no
-v0.2.0 tag, downloadable DMG, or public release asset is represented by this entry.
+Version 0.2.0 is published with Developer ID-signed, notarized, stapled Apple silicon and Intel
+DMGs, release manifests and checksums, and verified Python wheel and source packages. The complete
+release is available from the
+[official v0.2.0 release](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0).
 
 ### Native macOS application
 
@@ -103,10 +104,10 @@ v0.2.0 tag, downloadable DMG, or public release asset is represented by this ent
 - The release pipeline performs no upload and cannot run without a real Developer ID Application
   identity, configured notarization profile, full Xcode, universal2 build Python, and dual-
   architecture execution support.
-- Validated that pipeline locally through signing, notarization, stapling, Gatekeeper,
+- Validated that pipeline through signing, notarization, stapling, Gatekeeper,
   architecture-specific packaged-helper smoke, mounted-DMG license verification, provenance
-  manifests, checksums, and privacy scans for both Apple silicon and Intel candidates. This is local
-  release-preparation evidence, not a claim that v0.2.0 has been tagged or published.
+  manifests, checksums, privacy scans, and fresh draft-asset re-download for both Apple silicon and
+  Intel packages before publishing v0.2.0.
 
 ### Tests and documentation
 
@@ -117,8 +118,8 @@ v0.2.0 tag, downloadable DMG, or public release asset is represented by this ent
   transitions, cancellation, and interruption races using fake helpers and synthetic output trees.
 - Added native macOS CI for format, debug/release tests, and optimized builds alongside full
   macOS/Linux Python recovery coverage and a Windows existing-extraction/fail-closed contract job.
-- Reworked user guidance around the app-first macOS experience, the still-unpublished distribution
-  state, CLI fallback, two-stage space model, source immutability, atomic markers, report fidelity,
+- Reworked user guidance around the app-first macOS experience, published distribution state, CLI
+  fallback, two-stage space model, source immutability, atomic markers, report fidelity,
   Recent Items, and safe support boundaries.
 
 ## 0.1.0 - 2026-07-18

@@ -8,16 +8,12 @@ human-readable reports plus detailed CSV tables.
 The project is free and open source. iMazing is not required. It does not modify the phone or source
 backup, contact TV Time, restore data to the app, or provide an official cloud-account export.
 
-> **Release status:** the source is at the v0.2.0 development baseline. The controlled macOS release
-> pipeline has produced and validated local Developer ID-signed, notarized, stapled candidates for
-> Apple silicon and Intel, but there is still no v0.2.0 tag, public release, or downloadable
-> artifact. Do not redistribute a local candidate as though it were published. The currently
-> published v0.1.0 prerelease is CLI-only: its
-> complete Markdown catalogue contains the actual recovered series, movie, favorite, episode, and
-> identifiable watch-event names rather than counts alone. The v0.2.0 source adds the shared offline
-> HTML/PDF views and native macOS result experience. For safety, use v0.1.0 only with Python 3.10
-> through 3.13, and do not use its fresh `extract` or `recover` commands on Windows; use Windows only
-> for `analyze` or `report` on an already completed extraction.
+> **Release status:** [v0.2.0 is published](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
+> with separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and Intel, plus
+> verified Python wheel and source packages. Download only from the official release and verify the
+> DMG against `SHA256SUMS`. Version 0.2.0 includes the complete Markdown catalogue, shared offline
+> HTML/PDF views, and native macOS recovery experience. The Python CLI supports Python 3.10 through
+> 3.13; on Windows, use only `analyze` or `report` with an already completed extraction.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
@@ -27,19 +23,19 @@ access, and comply with applicable law and service terms.
 
 | Route | Best for | Requirements |
 | --- | --- | --- |
-| Native macOS app | Most Mac users | macOS 14 or later and, once published, the DMG matching the Mac's architecture |
+| Native macOS app | Most Mac users | macOS 14 or later and the v0.2.0 DMG matching the Mac's architecture |
 | Python CLI recovery | macOS, Linux, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
 | Windows existing-extraction tools | Windows review of an already complete extraction | Python 3.10 through 3.13; fresh `extract` and `recover` fail closed |
 
-When signed and notarized DMGs are published, the native app will be the normal Mac installation:
+The published native app is the normal Mac installation:
 
 - Apple silicon Macs use the `Apple-Silicon-arm64` DMG;
 - Intel Macs use the `Intel-x86_64` DMG; and
 - end users need no Python, iMazing, Homebrew, Git, GitHub CLI, or Apple developer tools.
 
-Until those artifacts exist, use the source-based CLI or build the app locally for development. See
-the [macOS guide](docs/macos.md) for the distinction and the
-[v0.2.0 release-preparation record](docs/release-v0.2.0.md) for the remaining distribution gates.
+Download it from the [official v0.2.0 release](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0).
+See the [macOS guide](docs/macos.md) for installation and the
+[v0.2.0 release record](docs/release-v0.2.0.md) for the completed distribution gates.
 
 ## What every recovery needs
 
@@ -55,7 +51,7 @@ data to TV Time are not supported.
 
 ## Native macOS app workflow
 
-The app supports macOS 14 or later. Once a signed and notarized DMG is published:
+The published app supports macOS 14 or later:
 
 1. Download the DMG for **Apple silicon** or **Intel** from the project's release page and verify
    its published checksum.
@@ -159,7 +155,7 @@ The CLI is free and supports full recovery with Python 3.10, 3.11, 3.12, or 3.13
 Linux. Windows can install the CLI and safely run standalone `analyze` or `report` against an
 already complete extraction, but this release deliberately refuses fresh `extract` and `recover`:
 Python cannot atomically create and lock the new Windows plaintext root. The CLI remains the
-supported macOS route while no notarized DMG is published.
+supported source-based route when the native macOS app is not suitable.
 
 ### Install from a source checkout or ZIP
 

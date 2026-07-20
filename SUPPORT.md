@@ -3,9 +3,10 @@
 This is a community, best-effort alpha project. It is not affiliated with TV Time or Apple and does
 not provide account recovery, password recovery, data restoration, or legal advice.
 
-The current supported development baseline is source version 0.2.0. The controlled release pipeline
-has validated local Developer ID-signed, notarized, stapled macOS candidates for both architectures,
-but no v0.2.0 tag, public release, or downloadable DMG is currently offered. Do not request help
+The current supported release is
+[v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0). It provides
+Developer ID-signed, notarized, stapled macOS DMGs for Apple silicon and Intel, plus verified Python
+packages. Download only from the official release, verify `SHA256SUMS`, and do not request help
 bypassing Gatekeeper for an unofficial or locally shared app.
 
 Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md),
