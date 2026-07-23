@@ -21,6 +21,7 @@ from tvtime_extractor.safety import (
 
 
 class AnalyzerNoFollowTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Windows held readers deny visible replacement")
     def test_plist_parse_uses_one_held_identity_across_a_visible_swap_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -89,6 +90,7 @@ class AnalyzerNoFollowTests(unittest.TestCase):
             self.assertEqual(plistlib.loads(bytes(held_payload)), {"SyntheticFeatureEnabled": True})
             self.assertFalse((extraction / "analysis").exists())
 
+    @unittest.skipIf(os.name == "nt", "Windows held readers deny visible replacement")
     def test_sqlite_snapshot_rejects_boundary_swap_even_when_path_is_restored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -217,6 +219,7 @@ class AnalyzerNoFollowTests(unittest.TestCase):
             plist_loads.assert_not_called()
             self.assertFalse((extraction / "analysis").exists())
 
+    @unittest.skipIf(os.name == "nt", "Windows uses native CreateFile rather than os.open")
     def test_bounded_binary_readers_reject_preopen_replacement(self) -> None:
         readers = {
             "complete": lambda path: read_regular_bytes(

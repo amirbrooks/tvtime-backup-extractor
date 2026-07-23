@@ -82,6 +82,7 @@ class ProcessCleanupTests(unittest.TestCase):
 
 
 class StandaloneHelperSignatureTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "packaged macOS helper descriptors are POSIX-only")
     def test_smoke_maps_and_restores_reserved_destination_descriptor(self) -> None:
         try:
             before = os.fstat(smoke_packaged_helper.DESTINATION_PARENT_FILE_DESCRIPTOR)

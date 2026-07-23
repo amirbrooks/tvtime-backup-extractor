@@ -1274,21 +1274,43 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                 raise RuntimeError("synthetic body failure")
             self.assertEqual(closed, [101])
 
-    def test_windows_fresh_output_fails_before_create_or_handle_open(self) -> None:
+    def test_windows_fresh_output_is_atomically_created_and_held(self) -> None:
+        output = no_link_absolute_path(Path("C:/Synthetic/Private/fresh-output"))
+        identity = (7, 11)
+        closed: list[int] = []
         with (
             mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
             mock.patch("tvtime_extractor.safety.os.mkdir") as mkdir,
-            mock.patch("tvtime_extractor.safety._windows_open_locked_directory") as open_root,
-            self.assertRaisesRegex(UserInputError, "not supported on Windows"),
+            mock.patch("tvtime_extractor.safety.require_fresh_output_platform_support"),
+            mock.patch(
+                "tvtime_extractor.safety.require_bound_destination_parent",
+                return_value=output.parent,
+            ),
+            mock.patch("tvtime_extractor.safety._windows_native.require_private_ntfs_volume"),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.create_fresh_directory",
+                return_value=101,
+            ) as create,
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                return_value=identity,
+            ),
+            mock.patch("tvtime_extractor.safety._require_windows_visible_directory_identity"),
+            mock.patch("tvtime_extractor.safety._require_visible_output_identity"),
+            mock.patch(
+                "tvtime_extractor.safety._windows_close_handle",
+                side_effect=closed.append,
+            ),
             anchored_bound_output_root(
-                Path("/synthetic/private/fresh-output"),
+                output,
                 destination_parent_descriptor=99,
                 expected_parent_identity=(5, 6),
-            ),
+            ) as bound,
         ):
-            pass
+            self.assertEqual(bound, output)
         mkdir.assert_not_called()
-        open_root.assert_not_called()
+        create.assert_called_once_with(99, "fresh-output")
+        self.assertEqual(closed, [101])
 
     def test_windows_existing_root_is_held_validated_and_closed_on_body_failure(self) -> None:
         identity = (7, 11)

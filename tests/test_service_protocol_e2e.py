@@ -6,6 +6,7 @@ import os
 import plistlib
 import queue
 import shutil
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -92,15 +93,7 @@ class _FilePlist:
 
 class _Keybag:
     def unwrapKeyForClass(self, _protection_class: object, _wrapped: object) -> bytes:
-        return b"unwrapped"
-
-
-class _Connection:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
+        return b"K" * 32
 
 
 class _EndToEndBackup:
@@ -122,10 +115,11 @@ class _EndToEndBackup:
         self._manifest_plist = {"synthetic": True}
         self._temporary_folder = tempfile.mkdtemp(prefix="e2e-dependency-")
         self._temp_decrypted_manifest_db_path = str(Path(self._temporary_folder) / "Manifest.db")
-        Path(self._temp_decrypted_manifest_db_path).write_bytes(b"private manifest")
-        self.connection = _Connection()
-        self._temp_manifest_db_conn = self.connection
+        self._temp_manifest_db_conn = None
         self.cleanup_calls = 0
+
+    def _read_and_unlock_keybag(self) -> None:
+        self._manifest_plist = {"ManifestKey": struct.pack("<l", 1) + b"wrapped"}
 
     def test_decryption(self) -> None:
         return None
@@ -141,9 +135,7 @@ class _EndToEndBackup:
         file_plist: _FilePlist,
         output_filepath: str,
     ) -> None:
-        if key != b"unwrapped":
-            raise AssertionError("unexpected synthetic key")
-        Path(output_filepath).write_bytes(self.plaintext[file_id])
+        raise AssertionError("the dependency path-only writer must not be called")
 
     def _cleanup(self) -> None:
         self.cleanup_calls += 1
@@ -151,6 +143,8 @@ class _EndToEndBackup:
 
 
 def _write_completed_encrypted_backup(base: Path) -> Path:
+    from Crypto.Cipher import AES
+
     backup = base / "backup"
     backup.mkdir()
     with (backup / "Manifest.plist").open("wb") as handle:
@@ -158,7 +152,27 @@ def _write_completed_encrypted_backup(base: Path) -> Path:
             {"IsEncrypted": True, "Date": datetime(2025, 1, 1, tzinfo=timezone.utc)},
             handle,
         )
-    (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest")
+    plaintext_manifest = base / "synthetic-manifest.db"
+    connection = sqlite3.connect(plaintext_manifest)
+    try:
+        connection.execute(
+            "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+            "flags INTEGER, file BLOB)"
+        )
+        connection.execute(
+            "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+            ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    manifest_bytes = plaintext_manifest.read_bytes()
+    plaintext_manifest.unlink()
+    if len(manifest_bytes) % 16:
+        raise AssertionError("synthetic SQLite manifest was not block aligned")
+    (backup / "Manifest.db").write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(manifest_bytes)
+    )
     with (backup / "Status.plist").open("wb") as handle:
         plistlib.dump(
             {
@@ -196,6 +210,8 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
     def test_full_synthetic_recovery_runs_extraction_analysis_report_and_atomic_markers(
         self,
     ) -> None:
+        from Crypto.Cipher import AES
+
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             template = create_synthetic_extraction(base / "template")
@@ -219,7 +235,12 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
                 )
                 encrypted = backup / file_id[:2] / file_id
                 encrypted.parent.mkdir(exist_ok=True)
-                encrypted.write_bytes(b"synthetic encrypted payload")
+                padding_size = 16 - len(payload) % 16
+                encrypted.write_bytes(
+                    AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+                        payload + bytes([padding_size]) * padding_size
+                    )
+                )
 
             instances: list[_EndToEndBackup] = []
 
@@ -318,7 +339,7 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
             self.assertFalse((extraction / ".tmp").exists())
             self.assertFalse((extraction / ".analysis-incomplete").exists())
             self.assertFalse((extraction / ".report-incomplete").exists())
-            self.assertTrue(instances[0].connection.closed)
+            self.assertIsNone(instances[0]._temp_manifest_db_conn)
             self.assertEqual(instances[0].cleanup_calls, 1)
             completed_stages = [
                 event.stage.value for event in events if event.kind.value == "completed"
@@ -461,7 +482,12 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
 
                 def synthetic_extract(**kwargs: object) -> ExtractionResult:
                     source_descriptor = int(kwargs["source_root_descriptor"])
-                    self.assertTrue(stat.S_ISDIR(os.fstat(source_descriptor).st_mode))
+                    if os.name == "nt":
+                        from tvtime_extractor.windows_native import handle_information
+
+                        self.assertTrue(handle_information(source_descriptor).is_directory)
+                    else:
+                        self.assertTrue(stat.S_ISDIR(os.fstat(source_descriptor).st_mode))
                     captured.update(kwargs)
                     return ExtractionResult(
                         Path("TVTime-Extraction"),
@@ -658,6 +684,7 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
             )
             self.assertTrue(output.is_dir())
 
+    @unittest.skipIf(os.name == "nt", "Windows holds the source root without delete sharing")
     def test_source_root_swap_after_revalidation_stops_before_output_or_stages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

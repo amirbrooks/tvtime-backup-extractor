@@ -159,7 +159,7 @@ the successful result available rather than treating it as cancelled.
 The success screen appears only after the app reopens and validates the completed package. It shows
 the selected-source, completion-marker, copied-file, and sealed-artifact checks together with an
 aggregate chart, separate watched/saved movie and named/unnamed event counts, copied-file totals,
-byte-count differences, and aggregate media-reference counts. Validate those counts before opening
+strict declared-size validation, and aggregate media-reference counts. Validate those counts before opening
 private reports.
 
 The app offers:

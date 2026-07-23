@@ -50,8 +50,8 @@ jobs:
           tvtime-extractor analyze --help
           tvtime-extractor report --help
 
-  windows-existing-extraction:
-    name: Windows existing-extraction Python ${{ matrix.python-version }}
+  windows-recovery:
+    name: Windows full recovery Python ${{ matrix.python-version }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -74,16 +74,9 @@ jobs:
         run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-dev.lock"
       - name: Verify the installed dependency graph
         run: python -m pip check
-      - name: Test only supported Windows existing-extraction and fail-closed contracts
-        run: >-
-          python -m unittest -v
-          tests.test_analyze_report
-          tests.test_analysis_bounds_and_labels
-          tests.test_cancellation_and_reports
-          tests.test_recovery_output_validator
-          tests.test_safety.WindowsDirectoryHandleContractTests
-          tests.test_cli.CliTests.test_debug_help_warns_that_tracebacks_can_expose_secrets_and_must_not_be_shared
-      - name: Check installed review commands and documented refusal commands
+      - name: Run the complete synthetic Windows suite
+        run: python -m unittest discover -s tests -v
+      - name: Check installed recovery and review commands
         run: |
           tvtime-extractor --help
           tvtime-extractor recover --help

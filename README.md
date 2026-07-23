@@ -15,6 +15,10 @@ backup, contact TV Time, restore data to the app, or provide an official cloud-a
 > HTML/PDF views, and native macOS recovery experience. The Python CLI supports Python 3.10 through
 > 3.13; on Windows, use only `analyze` or `report` with an already completed extraction.
 
+The current unreleased source tree adds full Windows 11 x64 CLI recovery on local NTFS storage. It
+has not been published as a later release; Windows users evaluating the source implementation must
+follow the [Windows guide](docs/windows.md) and its BitLocker/private-storage requirements.
+
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
 access, and comply with applicable law and service terms.
@@ -24,8 +28,8 @@ access, and comply with applicable law and service terms.
 | Route | Best for | Requirements |
 | --- | --- | --- |
 | Native macOS app | Most Mac users | macOS 14 or later and the v0.2.0 DMG matching the Mac's architecture |
-| Python CLI recovery | macOS, Linux, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
-| Windows existing-extraction tools | Windows review of an already complete extraction | Python 3.10 through 3.13; fresh `extract` and `recover` fail closed |
+| Python CLI recovery | macOS, Linux, Windows 11 x64, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
+| Windows CLI recovery | Windows 11 x64 source candidate | 64-bit Python, local NTFS private output, and BitLocker or equivalent encryption |
 
 The published native app is the normal Mac installation:
 
@@ -86,7 +90,7 @@ The completed native result screen provides:
 - a verified-package panel confirming selected source stability, completion-marker consistency,
   copied-file integrity, and sealed report artifacts;
 - an aggregate bar chart and explicit watched/saved movie and named/unnamed event counts;
-- copied-file and byte-count-difference summaries;
+- copied-file summaries and fail-closed declared-size validation;
 - aggregate image, trailer, and media-URL reference counts;
 - a visual report, print-friendly PDF, and complete Markdown catalogue, with a clear explanation
   when the optional PDF is omitted; and
@@ -193,13 +197,21 @@ new one if the project moves.
 
 Use an individual backup folder and a destination run path that does not yet exist. The immediate
 encrypted output parent must already exist; the fresh run child itself must not exist. This
-parent-exists/child-does-not rule also applies when selecting paths on Windows, although Windows
-fresh recovery is refused in this release. On macOS or Linux:
+parent-exists/child-does-not rule applies on every supported platform. On macOS or Linux:
 
 ```text
 ./.venv/bin/python -m tvtime_extractor recover \
   --backup "/path/to/DEVICE_BACKUP" \
   --output "/path/to/PRIVATE_NEW_RUN" \
+  --acknowledge-sensitive-output
+```
+
+On supported Windows source builds, use Windows paths and PowerShell line continuations:
+
+```powershell
+.venv\Scripts\python.exe -m tvtime_extractor recover `
+  --backup "C:\Synthetic\DEVICE_BACKUP" `
+  --output "D:\Private\NEW_RUN" `
   --acknowledge-sensitive-output
 ```
 
@@ -215,9 +227,10 @@ in the command,
 environment, shell history, or a support request. The default terminal output is a concise readable
 summary; `--json` is an explicit private automation option and is not the default.
 
-On Windows, move or copy the intact encrypted backup to a private macOS/Linux system for extraction,
-or bring an already complete private extraction to Windows and use only `analyze`/`report`; see the
-[Windows guide](docs/windows.md).
+Windows recovery requires Windows 11 x64, 64-bit Python, and a local NTFS destination outside cloud
+sync, network, WSL, and reparse paths. BitLocker or equivalent encryption remains a user-verified
+requirement; see the [Windows guide](docs/windows.md). The published v0.2.0 packages still predate
+this source implementation.
 
 Linux accepts only a conservative set of ordinary local filesystem types. FUSE, network, shared,
 virtual-machine shared-folder, temporary, overlay, and unknown filesystem types are refused with no
@@ -257,6 +270,7 @@ backup until titles, favorites, episodes, watch events, and completion markers h
 - [macOS guide](docs/macos.md)
 - [Windows guide](docs/windows.md)
 - [Linux guide](docs/linux.md)
+- [Refract series import guide for Windows](docs/refract-import.md)
 - [Privacy and safe handling](docs/privacy.md)
 - [Output reference](docs/output-reference.md)
 - [Troubleshooting](docs/troubleshooting.md)

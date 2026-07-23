@@ -2,6 +2,29 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
+## Unreleased
+
+- Added a Windows 11 x64 native filesystem capability backend. It atomically creates a fresh NTFS
+  output root with `NtCreateFile`, applies and verifies a protected current-user-and-SYSTEM ACL,
+  holds source/output identities without delete sharing, rejects reparse traversal, and promotes
+  held files without replacement.
+- Added repository-owned descriptor decryption for the manifest and selected payloads, strict CBC
+  padding validation, explicit declared-size discrepancy recording, immutable read-only SQLite
+  manifest access, and held retained-manifest promotion. The path-only dependency plaintext writers
+  are no longer used.
+- Enabled Windows CLI `recover` and `extract`, including opt-in retained manifests, while retaining
+  fail-closed checks for unsupported Windows versions, architectures, filesystems, ACLs, and paths.
+- Added synthetic Windows NTFS, cryptographic boundary, collision, ACL, handle-locking, source
+  binding, full recovery, analysis, and report coverage. This source work is not a published release.
+- Added fixed, content-free categories to private selected-file failure rows while keeping terminal
+  output, public JSON, exit codes, completion markers, and successful-output contracts unchanged.
+- Restored compatible selected-file size warnings: valid padded plaintext is retained at its actual
+  length, discrepancies stay explicit, and full recovery still requires SQLite integrity checks.
+- Added an offline, Windows-friendly converter and private handling guide for turning recovered
+  series, cached episode, and favorite analysis tables into a TV-Time-Out/Refract series JSON. It
+  uses bounded no-follow input reads, recorded CSV escape metadata, fresh private output, and atomic
+  no-replace promotion without inventing missing episode history.
+
 ## 0.2.0 - 2026-07-20
 
 Version 0.2.0 is published with Developer ID-signed, notarized, stapled Apple silicon and Intel

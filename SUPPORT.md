@@ -9,6 +9,11 @@ Developer ID-signed, notarized, stapled macOS DMGs for Apple silicon and Intel, 
 packages. Download only from the official release, verify `SHA256SUMS`, and do not request help
 bypassing Gatekeeper for an unofficial or locally shared app.
 
+The current unreleased source tree contains a Windows 11 x64 CLI recovery backend. It is not part
+of the published v0.2.0 contract and must complete the full release checklist before it can be
+described as a distributed Windows release. Source evaluators should follow `docs/windows.md` and
+use only local NTFS private output protected by BitLocker or equivalent encryption.
+
 Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md),
 [output reference](docs/output-reference.md), and [troubleshooting guide](docs/troubleshooting.md).
 Search existing issues without pasting private data.
@@ -16,7 +21,7 @@ Search existing issues without pasting private data.
 A safe support request may include:
 
 - application or `tvtime-extractor --version` output;
-- operating system and Mac architecture, or Python version for CLI use;
+- operating system and architecture, plus Python version for CLI use;
 - the workflow stage or CLI subcommand and exit code;
 - whether the expected extraction/report completion marker was absent, incomplete, or complete,
   without attaching the marker;

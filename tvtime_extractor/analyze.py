@@ -28,6 +28,7 @@ from .integrity import reconcile_raw_tree, source_snapshot_from_mapping
 from .safety import (
     MAXIMUM_COMPLETION_MARKER_BYTES,
     anchored_existing_extraction_root,
+    create_private_file_descriptor,
     iter_regular_files,
     prepare_analysis_layout,
     private_source_id,
@@ -532,9 +533,6 @@ def _copy_sqlite_snapshot_file(
     remaining_total_bytes: int,
     require_private_source: bool,
 ) -> int:
-    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    destination_flags |= getattr(os, "O_BINARY", 0)
-    destination_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     destination_descriptor = -1
     total = 0
     try:
@@ -544,7 +542,10 @@ def _copy_sqlite_snapshot_file(
         ) as (source_handle, opened_source):
             if not _same_sqlite_source(source_before, opened_source):
                 raise TVTimeError("A recovered SQLite database changed while it was opened.")
-            destination_descriptor = os.open(destination, destination_flags, 0o600)
+            destination_descriptor = create_private_file_descriptor(
+                destination,
+                exclusive=True,
+            )
             if os.name != "nt":
                 os.fchmod(destination_descriptor, 0o600)
             require_private_descriptor(destination_descriptor, expected_type=stat.S_IFREG)

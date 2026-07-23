@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import select
@@ -7,6 +8,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable, Mapping
+from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, BinaryIO, TextIO
 
@@ -44,6 +46,49 @@ class ControlRequest:
     payload: dict[str, object]
 
 
+def _windows_stream_is_readable(stream: BinaryIO, wait_seconds: float) -> bool:
+    """Poll an anonymous/named pipe without using WinSock-only ``select``."""
+
+    try:
+        import msvcrt
+
+        handle = int(msvcrt.get_osfhandle(stream.fileno()))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_file_type = kernel32.GetFileType
+        get_file_type.argtypes = [wintypes.HANDLE]
+        get_file_type.restype = wintypes.DWORD
+        if int(get_file_type(wintypes.HANDLE(handle))) != 3:
+            return True
+        available = wintypes.DWORD()
+        peek = kernel32.PeekNamedPipe
+        peek.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        peek.restype = wintypes.BOOL
+        if peek(
+            wintypes.HANDLE(handle),
+            None,
+            0,
+            None,
+            ctypes.byref(available),
+            None,
+        ):
+            if available.value:
+                return True
+            time.sleep(min(wait_seconds, 0.01))
+            return False
+        if int(ctypes.get_last_error() or 0) in {109, 232, 233}:
+            return True
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        pass
+    raise ProtocolError("The helper could not monitor its local control pipe.")
+
+
 def _read_exact(
     stream: BinaryIO,
     length: int,
@@ -62,12 +107,16 @@ def _read_exact(
             wait_seconds = min(wait_seconds, max(0.0, deadline - time.monotonic()))
             if wait_seconds == 0.0:
                 raise ProtocolError("The helper timed out waiting for a complete local frame.")
-        try:
-            readable, _, _ = select.select([stream.fileno()], [], [], wait_seconds)
-        except (OSError, ValueError) as exc:
-            raise ProtocolError("The helper could not monitor its local control pipe.") from exc
-        if not readable:
-            continue
+        if os.name == "nt":
+            if not _windows_stream_is_readable(stream, wait_seconds):
+                continue
+        else:
+            try:
+                readable, _, _ = select.select([stream.fileno()], [], [], wait_seconds)
+            except (OSError, ValueError) as exc:
+                raise ProtocolError("The helper could not monitor its local control pipe.") from exc
+            if not readable:
+                continue
         try:
             chunk = os.read(stream.fileno(), remaining)
         except OSError as exc:

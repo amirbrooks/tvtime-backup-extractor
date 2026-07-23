@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,9 +23,10 @@ from tvtime_extractor.extract import extract_backup as real_extract_backup
 from tvtime_extractor.visual_report import HTML_REPORT_FILENAME, PDF_REPORT_FILENAME
 
 
-@unittest.skipIf(os.name == "nt", "Full encrypted-backup recovery is POSIX-only")
 class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
     def test_recover_runs_full_synthetic_pipeline_and_validates_output(self) -> None:
+        from Crypto.Cipher import AES
+
         with tempfile.TemporaryDirectory(prefix="tvtime-cli-e2e-") as temporary:
             base = Path(temporary)
             template = create_synthetic_extraction(base / "template")
@@ -39,18 +39,25 @@ class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
             ):
                 file_id = f"{index:040x}"
                 payload = source.read_bytes()
+                relative_path = source.relative_to(template_app).as_posix()
+                declared_size = len(payload) + (relative_path == "Documents/DioCache.db")
                 plaintext[file_id] = payload
                 rows.append(
                     (
                         file_id,
                         PRIMARY_DOMAIN,
-                        source.relative_to(template_app).as_posix(),
-                        {"filesize": len(payload)},
+                        relative_path,
+                        {"filesize": declared_size},
                     )
                 )
                 encrypted = backup / file_id[:2] / file_id
                 encrypted.parent.mkdir(exist_ok=True)
-                encrypted.write_bytes(b"synthetic encrypted payload")
+                padding_size = 16 - len(payload) % 16
+                encrypted.write_bytes(
+                    AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+                        payload + bytes([padding_size]) * padding_size
+                    )
+                )
 
             instances: list[_EndToEndBackup] = []
 
@@ -92,8 +99,9 @@ class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(exit_code, 0, stderr.getvalue())
             self.assertIn("TV Time extraction summary", stdout.getvalue())
+            self.assertIn("Size warnings: 1", stdout.getvalue())
             self.assertIn("TV Time analysis summary", stdout.getvalue())
             self.assertIn("Readable recovery report", stdout.getvalue())
             self.assertIn("Recovery completed successfully.", stderr.getvalue())
@@ -112,6 +120,7 @@ class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
             self.assertEqual(run_state["status"], "complete")
             self.assertEqual(run_state["files_expected"], len(rows))
             self.assertEqual(run_state["files_extracted"], len(rows))
+            self.assertEqual(run_state["size_discrepancy_count"], 1)
             self.assertEqual(recovery_state["status"], "complete")
             self.assertFalse((extraction / ".tmp").exists())
             self.assertFalse((extraction / ".analysis-incomplete").exists())
@@ -135,7 +144,7 @@ class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(len(instances), 1)
-            self.assertTrue(instances[0].connection.closed)
+            self.assertIsNone(instances[0]._temp_manifest_db_conn)
             self.assertEqual(instances[0].cleanup_calls, 1)
 
 
