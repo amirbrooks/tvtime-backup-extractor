@@ -46,6 +46,27 @@ it is not silently deduplicated by title. The readable report separately shows n
 records and the number of distinct named series titles. Synthetic QA fixtures use arbitrary record
 counts to exercise pagination and must not be compared with a real recovery.
 
+## Private extraction failure categories
+
+When one selected backup file cannot be copied, its private `metadata/summary.json` failure row
+retains the generic `error` text and adds one fixed `category` value:
+
+- `invalid_manifest_metadata`, `unsafe_path`, `source_unavailable`, or `source_changed`;
+- `missing_encryption_key` or `key_unwrap_failure`;
+- `ciphertext_invalid`, `padding_failure`, or `size_mismatch`; or
+- `staging_failure`, `promotion_failure`, or `unrecognized_failure`.
+
+These identifiers describe only the failed processing stage. They never contain exception text,
+operating-system errors, keys, hashes, sizes, or recovered content. The surrounding row still
+contains private backup identifiers and paths, so never attach, quote, upload, or paste the failure
+inventory. Normal terminal and `--json` summaries expose only the total failure count.
+
+A selected payload that has valid ciphertext, a valid key, and valid PKCS#7 padding is not a copy
+failure solely because its recovered length differs from the manifest declaration. The exact
+declared and actual lengths are retained privately in `size_discrepancies`; terminal and public JSON
+output expose only the warning count. The `size_mismatch` failure identifier remains part of the
+fixed internal vocabulary for exact-length decryption contexts and older incomplete summaries.
+
 ## Human-readable reports
 
 All three formats are generated from the same shared safe display model:

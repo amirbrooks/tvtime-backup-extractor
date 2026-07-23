@@ -5,7 +5,9 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -62,7 +64,7 @@ class _FakeKeybag:
     def unwrapKeyForClass(self, protection_class: object, encryption_key: object) -> bytes:
         if protection_class != 1 or encryption_key != b"wrapped-key":
             raise AssertionError("Unexpected synthetic key metadata")
-        return b"unwrapped-key"
+        return b"K" * 32
 
 
 class _FakeFilePlist:
@@ -71,14 +73,6 @@ class _FakeFilePlist:
         self.encryption_key = value["encryption_key"]
         self.protection_class = value["protection_class"]
         self.mtime = value["mtime"]
-
-
-class _FakeConnection:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class _FakeBackup:
@@ -102,8 +96,10 @@ class _FakeBackup:
         self._manifest_plist = {"synthetic": True}
         self._temporary_folder = tempfile.mkdtemp(prefix="dependency-private-")
         self._temp_decrypted_manifest_db_path = str(Path(self._temporary_folder) / "Manifest.db")
-        Path(self._temp_decrypted_manifest_db_path).write_bytes(b"private manifest")
-        self._temp_manifest_db_conn = _FakeConnection()
+        self._temp_manifest_db_conn = None
+
+    def _read_and_unlock_keybag(self) -> None:
+        self._manifest_plist = {"ManifestKey": struct.pack("<l", 1) + b"wrapped-key"}
 
     def test_decryption(self) -> None:
         return None
@@ -119,13 +115,10 @@ class _FakeBackup:
         file_plist: _FakeFilePlist,
         output_filepath: str,
     ) -> None:
-        if file_id != "a" * 40 or key != b"unwrapped-key":
-            raise AssertionError("Unexpected synthetic file metadata")
-        print(f"synthetic dependency warning for {output_filepath}")
-        Path(output_filepath).write_bytes(b"data")
+        raise AssertionError("the dependency path-only writer must not be called")
 
-    def save_manifest_file(self, output_path: str) -> None:
-        Path(output_path).write_bytes(b"synthetic decrypted manifest")
+    def save_manifest_file(self, _output_path: str) -> None:
+        raise AssertionError("the dependency path-only manifest writer must not be called")
 
     def _cleanup(self) -> None:
         print(f"synthetic dependency cleanup for {self._temp_decrypted_manifest_db_path}")
@@ -147,9 +140,41 @@ def _dependency_loader(
 
 
 def _write_selected_source_payload(backup: Path, file_id: str = "a" * 40) -> None:
+    from Crypto.Cipher import AES
+
     source = backup / file_id[:2] / file_id
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(b"synthetic encrypted payload")
+    plaintext = b"data"
+    padding_size = 16 - len(plaintext) % 16
+    source.write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding_size]) * padding_size
+        )
+    )
+
+
+def _write_synthetic_encrypted_manifest(path: Path) -> None:
+    from Crypto.Cipher import AES
+
+    plaintext = path.with_name("synthetic-manifest.db")
+    connection = sqlite3.connect(plaintext)
+    try:
+        connection.execute(
+            "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+            "flags INTEGER, file BLOB)"
+        )
+        connection.execute(
+            "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+            ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    payload = plaintext.read_bytes()
+    plaintext.unlink()
+    if len(payload) % 16:
+        raise AssertionError("synthetic SQLite manifest was not block aligned")
+    path.write_bytes(AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(payload))
 
 
 def _synthetic_preflight() -> PreflightResult:
@@ -166,6 +191,38 @@ def _synthetic_preflight() -> PreflightResult:
 
 
 class CliTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows capability preflight regression")
+    def test_windows_capability_failure_stops_before_password(self) -> None:
+        from tvtime_extractor import windows_native
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            args = build_parser().parse_args(
+                [
+                    "recover",
+                    "--backup",
+                    str(base / "synthetic-backup"),
+                    "--output",
+                    str(base / "fresh-output"),
+                    "--acknowledge-sensitive-output",
+                ]
+            )
+            with (
+                mock.patch.object(
+                    windows_native,
+                    "require_recovery_capabilities",
+                    side_effect=windows_native.WindowsUnsupportedError(
+                        "synthetic unsupported filesystem"
+                    ),
+                ),
+                mock.patch("tvtime_extractor.cli.RecoveryService") as service,
+                mock.patch("tvtime_extractor.cli.read_backup_password") as read_password,
+                self.assertRaisesRegex(UserInputError, "unsupported filesystem"),
+            ):
+                _run_recovery(args)
+            service.assert_not_called()
+            read_password.assert_not_called()
+
     @unittest.skipIf(os.name == "nt", "CLI directory-descriptor binding is POSIX-only")
     def test_recover_holds_one_parent_descriptor_across_preflight_password_and_recovery(
         self,
@@ -542,7 +599,7 @@ class CliTests(unittest.TestCase):
             backup.mkdir()
             manifest = backup / "Manifest.plist"
             manifest.write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             rows = [
                 (
@@ -614,7 +671,7 @@ class CliTests(unittest.TestCase):
             backup = base / "backup"
             backup.mkdir()
             (backup / "Manifest.plist").write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             rows = [
                 (
@@ -641,16 +698,17 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(result.summary["files_extracted"], 0)
             self.assertEqual(len(result.summary["failures"]), 1)
+            self.assertEqual(result.summary["failures"][0]["category"], "unsafe_path")
             self.assertFalse((base / "outside.txt").exists())
 
-    def test_dependency_copy_exception_text_is_not_persisted(self) -> None:
+    def test_dependency_path_writer_is_not_called_or_persisted(self) -> None:
         secret = "pass=do-not-leak /Users/private/Secret Show Title"
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             backup = base / "backup"
             backup.mkdir()
             (backup / "Manifest.plist").write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             rows = [
                 (
@@ -692,10 +750,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertNotIn(secret, persisted)
-            self.assertEqual(
-                result.summary["failures"][0]["error"],
-                "The selected backup file could not be copied safely.",
-            )
+            self.assertEqual(result.summary["failures"], [])
 
     def test_size_discrepancy_is_publicly_visible_without_leaking_dependency_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -703,7 +758,7 @@ class CliTests(unittest.TestCase):
             backup = base / "backup"
             backup.mkdir()
             (backup / "Manifest.plist").write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             rows = [
                 (
@@ -732,8 +787,31 @@ class CliTests(unittest.TestCase):
                 )
 
             self.assertEqual(dependency_output.getvalue(), "")
-            self.assertEqual(len(result.summary["size_discrepancies"]), 1)
+            self.assertEqual(result.summary["files_extracted"], 1)
+            self.assertEqual(result.summary["failures"], [])
+            self.assertEqual(
+                result.summary["size_discrepancies"],
+                [
+                    {
+                        "domain": PRIMARY_DOMAIN,
+                        "relative_path": "Documents/example.bin",
+                        "declared_size": 5,
+                        "actual_size": 4,
+                    }
+                ],
+            )
             self.assertEqual(public_summary(result)["size_discrepancy_count"], 1)
+            self.assertEqual(
+                (
+                    result.extraction_root / "raw" / PRIMARY_DOMAIN / "Documents" / "example.bin"
+                ).read_bytes(),
+                b"data",
+            )
+            run_state = json.loads(
+                (result.extraction_root / "metadata" / "run_state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(run_state["status"], "complete")
+            self.assertEqual(run_state["size_discrepancy_count"], 1)
 
     def test_dependency_failure_does_not_create_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -741,7 +819,7 @@ class CliTests(unittest.TestCase):
             backup = base / "backup"
             backup.mkdir()
             (backup / "Manifest.plist").write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             output = base / "private-output"
 
@@ -766,7 +844,7 @@ class CliTests(unittest.TestCase):
             backup = base / "backup"
             backup.mkdir()
             (backup / "Manifest.plist").write_bytes(b"synthetic source manifest")
-            (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest database")
+            _write_synthetic_encrypted_manifest(backup / "Manifest.db")
             write_finished_status(backup)
             output = base / "private-output"
 

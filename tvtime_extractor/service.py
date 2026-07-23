@@ -28,6 +28,7 @@ from .extract import (
     ExtractionResult,
     _held_backup_root,
     _require_bound_backup_root,
+    _windows_source_payload,
     extract_backup,
 )
 from .models import (
@@ -217,6 +218,38 @@ def _capture_backup_preflight_snapshot(
     *,
     cancellation: CancellationToken,
 ) -> tuple[BackupPreflightSnapshot, bytes, bytes]:
+    if os.name == "nt":
+        with _held_backup_root(backup) as (root_handle, root_identity, _visible):
+            manifest_plist, manifest_payload = _windows_source_payload(
+                Path("Manifest.plist"),
+                source_root_handle=root_handle,
+                maximum_bytes=MAXIMUM_MANIFEST_PLIST_BYTES,
+                retain_payload=True,
+            )
+            manifest_database, _ = _windows_source_payload(
+                Path("Manifest.db"),
+                source_root_handle=root_handle,
+            )
+            status_plist, status_payload = _windows_source_payload(
+                Path("Status.plist"),
+                source_root_handle=root_handle,
+                maximum_bytes=MAXIMUM_STATUS_PLIST_BYTES,
+                retain_payload=True,
+            )
+        if manifest_payload is None or status_payload is None:
+            raise TVTimeError("Required backup metadata could not be retained safely.")
+        return (
+            BackupPreflightSnapshot(
+                root_device=root_identity[0],
+                root_inode=root_identity[1],
+                manifest_plist=manifest_plist,
+                manifest_database=manifest_database,
+                status_plist=status_plist,
+            ),
+            manifest_payload,
+            status_payload,
+        )
+
     try:
         root_before = backup.lstat()
     except OSError as exc:

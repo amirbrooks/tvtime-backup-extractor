@@ -34,14 +34,16 @@ replacing the backup root or changing bound critical metadata or a displayed agg
 confirmation fails before output creation. Selected payload files are snapshot-verified during
 extraction and revalidated before extraction completion. The POSIX CLI consumes the same
 identity-bound receipt across its hidden password prompt and applies the same held-parent and
-held-output-root model. Windows fresh extraction and recovery fail closed because the supported
-Python APIs cannot atomically create and lock a new plaintext directory. There is no override.
-Windows standalone analysis and reporting can hold an already complete extraction root without
-delete sharing, reject reparse points, and require the same volume/file identity to remain visible
-at completion. These checks do not make a mounted plaintext destination encrypted or prove that
-custom sync is disabled. The full-recovery CLI cannot certify every storage stack and therefore
-requires an explicit encrypted-destination acknowledgement. Neither interface can certify ownership
-authorization, sync behavior, snapshots, or backup policy; the user must confirm those boundaries.
+held-output-root model. On supported Windows 11 x64 source builds, `NtCreateFile` atomically creates
+the fresh child relative to the held parent, applies a protected current-user-and-SYSTEM ACL, and
+returns the handle in the same operation. Windows keeps the source, parent, and output handles open
+without delete sharing, rejects reparse traversal, writes through exclusive descriptors, and
+revalidates native identities and visible paths. Unsupported Windows capabilities fail before
+password entry or plaintext creation. These checks do not make a mounted plaintext destination
+encrypted or prove that custom sync is disabled. The full-recovery CLI cannot certify BitLocker or
+every storage stack and therefore requires an explicit encrypted-destination acknowledgement.
+Neither interface can certify ownership authorization, sync behavior, snapshots, or backup policy;
+the user must confirm those boundaries.
 
 Linux FUSE destinations are refused because the same mechanism can expose local, network, cloud, or
 shared storage. There is no override. Linux accepts only a conservative allowlist of ordinary local

@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import json
 import os
 import plistlib
 import shutil
+import sqlite3
+import struct
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 from tvtime_extractor.errors import (
     BackupUnfinishedError,
+    InsufficientSpaceError,
     SourceChangedError,
     TVTimeError,
     UnsafePathError,
@@ -23,13 +28,20 @@ from tvtime_extractor.errors import (
 from tvtime_extractor.extract import (
     PRIMARY_DOMAIN,
     _bounded_manifest_rows,
+    _close_repository_manifest,
     _create_private_staging_descriptor,
+    _decrypt_cbc_to_descriptor,
+    _DescriptorDecryptionFailure,
     _finished_status_state,
     _harden_private_staging_descriptor,
+    _prepare_repository_owned_manifest,
+    _SelectedFileCopyFailure,
+    _SelectedFileFailureCategory,
     _sha256_staging_descriptor,
     _source_payload_state,
     _verified_dependency_output_alias,
     extract_backup,
+    public_summary_json,
 )
 from tvtime_extractor.report import read_csv
 from tvtime_extractor.safety import (
@@ -41,11 +53,13 @@ from tvtime_extractor.safety import (
 
 
 class _Connection:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, delegate: sqlite3.Connection, *, fail: bool = False) -> None:
+        self.delegate = delegate
         self.fail = fail
         self.closed = False
 
     def close(self) -> None:
+        self.delegate.close()
         self.closed = True
         if self.fail:
             raise OSError("synthetic close failure")
@@ -53,7 +67,7 @@ class _Connection:
 
 class _Keybag:
     def unwrapKeyForClass(self, _protection_class: object, _wrapped_key: object) -> bytes:
-        return b"synthetic-unwrapped-key"
+        return b"K" * 32
 
 
 class _FilePlist:
@@ -123,15 +137,21 @@ class _CleanupBackup:
         self._manifest_plist = {"private": True}
         self._temporary_folder = tempfile.mkdtemp(prefix="dependency-private-")
         self._temp_decrypted_manifest_db_path = str(Path(self._temporary_folder) / "Manifest.db")
-        Path(self._temp_decrypted_manifest_db_path).write_bytes(b"private manifest")
-        self.connection = _Connection(fail=close_fails)
-        self._temp_manifest_db_conn = self.connection
+        self.connection: _Connection | None = None
+        self._temp_manifest_db_conn = None
         self.cleanup_calls = 0
         self.run_state_at_cleanup = ""
-        self.decrypted_from_private_snapshot = False
+        self.path_writer_called = False
+
+    def _read_and_unlock_keybag(self) -> None:
+        self._manifest_plist = {"ManifestKey": struct.pack("<l", 1) + b"wrapped"}
 
     def test_decryption(self) -> None:
         print("dependency test private path", file=os.sys.stderr)
+        if self._temp_manifest_db_conn is None:
+            raise AssertionError("repository-owned manifest connection was unavailable")
+        self.connection = _Connection(self._temp_manifest_db_conn, fail=self.close_fails)
+        self._temp_manifest_db_conn = self.connection
         if self.decryption_fails:
             raise RuntimeError("original synthetic decryption failure")
 
@@ -146,21 +166,12 @@ class _CleanupBackup:
         file_plist: _FilePlist,
         output_filepath: str,
     ) -> None:
-        self.assert_key(key)
-        source = Path(self._backup_directory) / file_id[:2] / file_id
-        self.decrypted_from_private_snapshot = (
-            source.is_file()
-            and source.parent.parent != self.backup_directory
-            and source.read_bytes() == b"synthetic encrypted payload"
-        )
-        if not self.decrypted_from_private_snapshot:
-            raise AssertionError("decryption did not use the verified private source snapshot")
-        print(f"dependency output path: {output_filepath}")
-        Path(output_filepath).write_bytes(self.plaintext[file_id])
+        self.path_writer_called = True
+        raise AssertionError("the dependency path-only writer must not be called")
 
     @staticmethod
     def assert_key(key: bytes) -> None:
-        if key != b"synthetic-unwrapped-key":
+        if key != b"K" * 32:
             raise AssertionError("unexpected synthetic key")
 
     def _cleanup(self) -> None:
@@ -218,6 +229,206 @@ class ManifestBoundsTests(unittest.TestCase):
                         validate_row=lambda _row: None,
                     )
                 self.assertTrue(cursor.fetch_sizes)
+
+
+class DescriptorDecryptionTests(unittest.TestCase):
+    @staticmethod
+    def _encrypt(plaintext: bytes, *, key: bytes) -> bytes:
+        from Crypto.Cipher import AES
+
+        padding_size = 16 - len(plaintext) % 16
+        padded = plaintext + bytes([padding_size]) * padding_size
+        return AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(padded)
+
+    def test_chunked_cbc_decryption_matches_known_boundaries(self) -> None:
+        key = bytes(range(32))
+        for size in (0, 1, 15, 16, 17, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1):
+            with self.subTest(size=size), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                plaintext = bytes(index % 251 for index in range(size))
+                encrypted = root / "encrypted.bin"
+                encrypted.write_bytes(self._encrypt(plaintext, key=key))
+                encrypted.chmod(0o600)
+                output = root / "decrypted.partial"
+                descriptor = os.open(
+                    output,
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0),
+                    0o600,
+                )
+                try:
+                    _decrypt_cbc_to_descriptor(
+                        encrypted,
+                        descriptor,
+                        key=key,
+                        declared_size=size,
+                    )
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    actual = bytearray()
+                    while True:
+                        chunk = os.read(descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        actual.extend(chunk)
+                    self.assertEqual(len(actual), size)
+                    self.assertEqual(bytes(actual), plaintext)
+                finally:
+                    os.close(descriptor)
+
+    def test_repository_manifest_session_is_immutable_and_descriptor_locked(self) -> None:
+        from Crypto.Cipher import AES
+
+        key = b"M" * 32
+
+        class Keybag:
+            def unwrapKeyForClass(self, protection_class: object, wrapped: object) -> bytes:
+                if protection_class != 7 or wrapped != b"wrapped-manifest-key":
+                    raise AssertionError("unexpected synthetic manifest metadata")
+                return key
+
+        class Backup:
+            def __init__(self, manifest_path: Path) -> None:
+                self._manifest_plist: dict[str, object] | None = None
+                self._keybag: Keybag | None = None
+                self._temp_decrypted_manifest_db_path = str(manifest_path)
+                self._temp_manifest_db_conn = None
+
+            def _read_and_unlock_keybag(self) -> None:
+                self._manifest_plist = {
+                    "ManifestKey": struct.pack("<l", 7) + b"wrapped-manifest-key"
+                }
+                self._keybag = Keybag()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plaintext = root / "plaintext.db"
+            connection = sqlite3.connect(plaintext)
+            connection.execute(
+                "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+                "flags INTEGER, file BLOB)"
+            )
+            connection.execute(
+                "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+                ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+            )
+            connection.commit()
+            connection.close()
+            plaintext_bytes = plaintext.read_bytes()
+            self.assertEqual(len(plaintext_bytes) % 16, 0)
+            encrypted = root / "Manifest.encrypted.db"
+            encrypted.write_bytes(
+                AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(plaintext_bytes)
+            )
+            encrypted.chmod(0o600)
+            temp_root = root / "private-temp"
+            temp_root.mkdir(mode=0o700)
+            manifest_path = temp_root / "Manifest.db"
+            backup = Backup(manifest_path)
+
+            _prepare_repository_owned_manifest(
+                backup,
+                encrypted_manifest=encrypted,
+                temp_root=temp_root,
+            )
+            assert backup._temp_manifest_db_conn is not None
+            self.assertEqual(
+                backup._temp_manifest_db_conn.execute("SELECT count(*) FROM Files").fetchone(),
+                (1,),
+            )
+            with self.assertRaises(sqlite3.OperationalError):
+                backup._temp_manifest_db_conn.execute("DELETE FROM Files")
+            if os.name == "nt":
+                with self.assertRaises(OSError):
+                    manifest_path.write_bytes(b"changed")
+            _close_repository_manifest(backup)
+
+    def test_chunked_cbc_decryption_records_fixed_validation_categories(self) -> None:
+        from Crypto.Cipher import AES
+
+        key = b"K" * 32
+        cases = (
+            (
+                AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(b"X" * 15 + b"\x00"),
+                key,
+                15,
+                _SelectedFileFailureCategory.PADDING_FAILURE,
+            ),
+            (
+                self._encrypt(b"synthetic", key=key),
+                key,
+                len(b"synthetic") + 1,
+                _SelectedFileFailureCategory.SIZE_MISMATCH,
+            ),
+            (
+                b"not-block-aligned",
+                key,
+                1,
+                _SelectedFileFailureCategory.CIPHERTEXT_INVALID,
+            ),
+            (
+                self._encrypt(b"synthetic", key=key),
+                b"invalid",
+                len(b"synthetic"),
+                _SelectedFileFailureCategory.KEY_UNWRAP_FAILURE,
+            ),
+        )
+        for encrypted_payload, selected_key, declared_size, expected_category in cases:
+            with (
+                self.subTest(category=expected_category.value),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                encrypted = root / "encrypted.bin"
+                encrypted.write_bytes(encrypted_payload)
+                encrypted.chmod(0o600)
+                output = root / "decrypted.partial"
+                descriptor = os.open(
+                    output,
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0),
+                    0o600,
+                )
+                try:
+                    with self.assertRaises(_DescriptorDecryptionFailure) as raised:
+                        _decrypt_cbc_to_descriptor(
+                            encrypted,
+                            descriptor,
+                            key=selected_key,
+                            declared_size=declared_size,
+                        )
+                    self.assertEqual(raised.exception.category, expected_category)
+                    self.assertEqual(
+                        str(raised.exception),
+                        "The selected backup file could not be copied safely.",
+                    )
+                finally:
+                    os.close(descriptor)
+
+    def test_chunked_cbc_decryption_can_return_a_valid_size_warning(self) -> None:
+        key = b"K" * 32
+        plaintext = b"synthetic"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            encrypted = root / "encrypted.bin"
+            encrypted.write_bytes(self._encrypt(plaintext, key=key))
+            encrypted.chmod(0o600)
+            output = root / "decrypted.partial"
+            descriptor = os.open(
+                output,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            try:
+                written = _decrypt_cbc_to_descriptor(
+                    encrypted,
+                    descriptor,
+                    key=key,
+                    declared_size=len(plaintext) + 1,
+                    allow_size_mismatch=True,
+                )
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                self.assertEqual(written, len(plaintext))
+                self.assertEqual(os.read(descriptor, len(plaintext)), plaintext)
+            finally:
+                os.close(descriptor)
 
 
 @unittest.skipUnless(
@@ -321,10 +532,32 @@ class DependencyDescriptorBindingTests(unittest.TestCase):
 
 
 def _write_backup(base: Path, *, snapshot_state: str = "finished") -> Path:
+    from Crypto.Cipher import AES
+
     backup = base / "backup"
     backup.mkdir()
     (backup / "Manifest.plist").write_bytes(b"synthetic manifest")
-    (backup / "Manifest.db").write_bytes(b"synthetic encrypted manifest")
+    plaintext_manifest = base / "synthetic-manifest.db"
+    connection = sqlite3.connect(plaintext_manifest)
+    try:
+        connection.execute(
+            "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+            "flags INTEGER, file BLOB)"
+        )
+        connection.execute(
+            "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+            ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    manifest_bytes = plaintext_manifest.read_bytes()
+    plaintext_manifest.unlink()
+    if len(manifest_bytes) % 16:
+        raise AssertionError("synthetic SQLite manifest was not block aligned")
+    (backup / "Manifest.db").write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(manifest_bytes)
+    )
     with (backup / "Status.plist").open("wb") as handle:
         plistlib.dump({"SnapshotState": snapshot_state}, handle)
     return backup
@@ -333,10 +566,17 @@ def _write_backup(base: Path, *, snapshot_state: str = "finished") -> Path:
 def _row(
     backup: Path, *, plaintext: bytes = b"recovered"
 ) -> tuple[list[tuple[Any, ...]], dict[str, bytes]]:
+    from Crypto.Cipher import AES
+
     file_id = "a" * 40
     encrypted = backup / file_id[:2] / file_id
     encrypted.parent.mkdir()
-    encrypted.write_bytes(b"synthetic encrypted payload")
+    padding_size = 16 - len(plaintext) % 16
+    encrypted.write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding_size]) * padding_size
+        )
+    )
     return (
         [
             (
@@ -355,6 +595,7 @@ def _loader(
     *,
     rows: list[tuple[Any, ...]],
     plaintext: dict[str, bytes],
+    file_plist_factory: type[_FilePlist] | Any = _FilePlist,
     close_fails: bool = False,
     cleanup_fails: bool = False,
     decryption_fails: bool = False,
@@ -375,7 +616,7 @@ def _loader(
             instances.append(instance)
             return instance
 
-        return factory, _FilePlist
+        return factory, file_plist_factory
 
     return load
 
@@ -446,6 +687,321 @@ class AtomicAndInputSafetyTests(unittest.TestCase):
 
 
 class ExtractionLifecycleSecurityTests(unittest.TestCase):
+    @staticmethod
+    def _single_failure_category(result: Any) -> str:
+        summary = result.summary
+        failures = summary["failures"]
+        if not isinstance(failures, list) or len(failures) != 1:
+            raise AssertionError("expected one synthetic selected-file failure")
+        return str(failures[0]["category"])
+
+    def test_private_failure_inventory_serializes_every_fixed_category(self) -> None:
+        for category in _SelectedFileFailureCategory:
+            with self.subTest(category=category.value), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                backup = _write_backup(base)
+                rows, plaintext = _row(backup)
+                with mock.patch(
+                    "tvtime_extractor.extract._extract_one_file",
+                    side_effect=_SelectedFileCopyFailure(category),
+                ):
+                    result = extract_backup(
+                        backup_directory=backup,
+                        output_directory=base / "output",
+                        passphrase="synthetic password",
+                        dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                    )
+
+                failure = result.summary["failures"][0]
+                self.assertEqual(
+                    set(failure),
+                    {"file_id", "domain", "relative_path", "error", "category"},
+                )
+                self.assertEqual(failure["category"], category.value)
+                self.assertEqual(
+                    failure["error"],
+                    "The selected backup file could not be copied safely.",
+                )
+                self.assertNotIn(category.value, public_summary_json(result))
+                marker = read_json_regular(result.extraction_root / "metadata" / "run_state.json")
+                self.assertEqual(marker["status"], "incomplete")
+                self.assertEqual(
+                    [
+                        path
+                        for path in (result.extraction_root / "raw").rglob("*")
+                        if path.is_file()
+                    ],
+                    [],
+                )
+
+    def test_missing_key_and_invalid_metadata_are_classified(self) -> None:
+        class MissingKeyPlist(_FilePlist):
+            def __init__(self, value: dict[str, Any]) -> None:
+                super().__init__(value)
+                self.encryption_key = None
+
+        cases: list[tuple[str, Any]] = [
+            ("missing_encryption_key", MissingKeyPlist),
+        ]
+
+        calls = 0
+
+        def changing_plist(value: dict[str, Any]) -> _FilePlist:
+            nonlocal calls
+            calls += 1
+            parsed = _FilePlist(value)
+            if calls > 1:
+                parsed.filesize = "synthetic-invalid-size"
+            return parsed
+
+        cases.append(("invalid_manifest_metadata", changing_plist))
+        for expected, factory in cases:
+            with self.subTest(category=expected), tempfile.TemporaryDirectory() as temporary:
+                calls = 0
+                base = Path(temporary)
+                backup = _write_backup(base)
+                rows, plaintext = _row(backup)
+                result = extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "output",
+                    passphrase="synthetic password",
+                    dependency_loader=_loader(
+                        [],
+                        rows=rows,
+                        plaintext=plaintext,
+                        file_plist_factory=factory,
+                    ),
+                )
+                self.assertEqual(self._single_failure_category(result), expected)
+
+    def test_key_unwrap_failure_discards_dependency_output_and_exception_details(self) -> None:
+        secret = "synthetic-secret password title path"
+        calls = 0
+
+        def unwrap(_keybag: object, _protection_class: object, _wrapped: object) -> bytes:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return b"K" * 32
+            print(secret)
+            print(secret, file=sys.stderr)
+            raise RuntimeError(secret)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            backup = _write_backup(base)
+            rows, plaintext = _row(backup)
+            captured = io.StringIO()
+            with (
+                mock.patch.object(_Keybag, "unwrapKeyForClass", new=unwrap),
+                contextlib.redirect_stdout(captured),
+                contextlib.redirect_stderr(captured),
+            ):
+                result = extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "output",
+                    passphrase="synthetic password",
+                    dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                )
+            private_summary = (result.extraction_root / "metadata" / "summary.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(self._single_failure_category(result), "key_unwrap_failure")
+            self.assertNotIn(secret, private_summary)
+            self.assertNotIn(secret, public_summary_json(result))
+            self.assertNotIn(secret, captured.getvalue())
+
+    def test_source_snapshot_failures_are_classified_without_promoting_plaintext(self) -> None:
+        real_source_state = _source_payload_state
+        for expected in ("source_unavailable", "source_changed"):
+            with self.subTest(category=expected), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                backup = _write_backup(base)
+                rows, plaintext = _row(backup)
+
+                def source_state(
+                    path: Path,
+                    expected_category: str = expected,
+                    **kwargs: Any,
+                ) -> object:
+                    result = real_source_state(path, **kwargs)
+                    destination = kwargs.get("snapshot_destination")
+                    if destination is not None and "encrypted-source" in Path(destination).parts:
+                        if expected_category == "source_unavailable":
+                            raise OSError(errno.EIO, "synthetic private source detail")
+                        return replace(result, sha256="0" * 64)
+                    return result
+
+                with mock.patch(
+                    "tvtime_extractor.extract._source_payload_state",
+                    side_effect=source_state,
+                ):
+                    result = extract_backup(
+                        backup_directory=backup,
+                        output_directory=base / "output",
+                        passphrase="synthetic password",
+                        dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                    )
+                self.assertEqual(self._single_failure_category(result), expected)
+                self.assertEqual(
+                    [
+                        path
+                        for path in (result.extraction_root / "raw").rglob("*")
+                        if path.is_file()
+                    ],
+                    [],
+                )
+
+    def test_staging_promotion_and_unrecognized_failures_are_classified(self) -> None:
+        real_create = _create_private_staging_descriptor
+        real_decrypt = _decrypt_cbc_to_descriptor
+
+        def fail_staging(path: Path) -> tuple[int, tuple[int, int]]:
+            if path.name.endswith(".partial"):
+                raise OSError(errno.EIO, "synthetic private staging detail")
+            return real_create(path)
+
+        def fail_selected_decryption(*args: Any, **kwargs: Any) -> None:
+            if kwargs.get("strip_padding") is False:
+                real_decrypt(*args, **kwargs)
+                return
+            raise RuntimeError("synthetic private unknown detail")
+
+        cases = (
+            (
+                "staging_failure",
+                mock.patch(
+                    "tvtime_extractor.extract._create_private_staging_descriptor",
+                    side_effect=fail_staging,
+                ),
+            ),
+            (
+                "promotion_failure",
+                mock.patch(
+                    "tvtime_extractor.extract.promote_open_file_no_replace_atomic",
+                    side_effect=OSError(errno.EIO, "synthetic private promotion detail"),
+                ),
+            ),
+            (
+                "unrecognized_failure",
+                mock.patch(
+                    "tvtime_extractor.extract._decrypt_cbc_to_descriptor",
+                    side_effect=fail_selected_decryption,
+                ),
+            ),
+        )
+        for expected, patcher in cases:
+            with (
+                self.subTest(category=expected),
+                tempfile.TemporaryDirectory() as temporary,
+                patcher,
+            ):
+                base = Path(temporary)
+                backup = _write_backup(base)
+                rows, plaintext = _row(backup)
+                result = extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "output",
+                    passphrase="synthetic password",
+                    dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                )
+                self.assertEqual(self._single_failure_category(result), expected)
+
+    def test_disk_exhaustion_remains_a_global_failure(self) -> None:
+        real_create = _create_private_staging_descriptor
+
+        def exhaust_staging(path: Path) -> tuple[int, tuple[int, int]]:
+            if path.name.endswith(".partial"):
+                raise OSError(errno.ENOSPC, "synthetic full destination")
+            return real_create(path)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            backup = _write_backup(base)
+            rows, plaintext = _row(backup)
+            with (
+                mock.patch(
+                    "tvtime_extractor.extract._create_private_staging_descriptor",
+                    side_effect=exhaust_staging,
+                ),
+                self.assertRaises(InsufficientSpaceError),
+            ):
+                extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "output",
+                    passphrase="synthetic password",
+                    dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                )
+
+    def test_invalid_padding_remains_a_failure_and_is_never_promoted(self) -> None:
+        from Crypto.Cipher import AES
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            backup = _write_backup(base)
+            rows, plaintext = _row(backup)
+            file_id = str(rows[0][0])
+            (backup / file_id[:2] / file_id).write_bytes(
+                AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(b"X" * 15 + b"\x00")
+            )
+            result = extract_backup(
+                backup_directory=backup,
+                output_directory=base / "output",
+                passphrase="synthetic password",
+                dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+            )
+
+            self.assertEqual(self._single_failure_category(result), "padding_failure")
+            self.assertFalse(
+                (
+                    result.extraction_root / "raw" / PRIMARY_DOMAIN / "Documents" / "recovered.bin"
+                ).exists()
+            )
+
+    def test_space_preflight_uses_ciphertext_as_the_output_upper_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            backup = _write_backup(base)
+            rows, plaintext = _row(backup)
+            file_id, domain, relative_path, metadata = rows[0]
+            rows[0] = (file_id, domain, relative_path, {**metadata, "filesize": 1})
+            minimum_headroom = 64 * 1024 * 1024
+            with (
+                mock.patch(
+                    "tvtime_extractor.extract.shutil.disk_usage",
+                    side_effect=(
+                        mock.Mock(free=1024 * 1024 * 1024),
+                        mock.Mock(free=minimum_headroom + 24),
+                    ),
+                ),
+                self.assertRaises(InsufficientSpaceError),
+            ):
+                extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "output",
+                    passphrase="synthetic password",
+                    dependency_loader=_loader([], rows=rows, plaintext=plaintext),
+                )
+
+    def test_retained_manifest_is_promoted_from_a_held_private_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            backup = _write_backup(base)
+            result = extract_backup(
+                backup_directory=backup,
+                output_directory=base / "output",
+                passphrase="synthetic password",
+                include_decrypted_manifest=True,
+                dependency_loader=_loader([], rows=[], plaintext={}),
+            )
+            retained = result.extraction_root / "manifest" / "Manifest.decrypted.db"
+            retained_bytes = retained.read_bytes()
+            self.assertTrue(retained_bytes.startswith(b"SQLite format 3\x00"))
+            self.assertEqual(
+                result.summary["manifest_sha256"],
+                hashlib.sha256(retained_bytes).hexdigest(),
+            )
+
     def test_direct_extract_status_is_byte_bounded_before_output_creation(self) -> None:
         def finished_payload(byte_size: int) -> bytes:
             base = plistlib.dumps({"SnapshotState": "finished"}, fmt=plistlib.FMT_XML)
@@ -519,9 +1075,17 @@ class ExtractionLifecycleSecurityTests(unittest.TestCase):
             marker = read_json_regular(result.extraction_root / "metadata" / "run_state.json")
             self.assertEqual(marker["status"], "complete")
             self.assertEqual(instance.run_state_at_cleanup, "incomplete")
+            self.assertIsNotNone(instance.connection)
+            assert instance.connection is not None
             self.assertTrue(instance.connection.closed)
             self.assertEqual(instance.cleanup_calls, 1)
-            self.assertTrue(instance.decrypted_from_private_snapshot)
+            self.assertFalse(instance.path_writer_called)
+            self.assertEqual(
+                (
+                    result.extraction_root / "raw" / PRIMARY_DOMAIN / "Documents" / "recovered.bin"
+                ).read_bytes(),
+                b"recovered",
+            )
             self.assertIsNone(instance._passphrase)
             self.assertIsNone(instance._keybag)
             self.assertFalse((result.extraction_root / ".tmp").exists())
@@ -568,6 +1132,8 @@ class ExtractionLifecycleSecurityTests(unittest.TestCase):
             self.assertEqual(marker["status"], "incomplete")
             self.assertEqual(list((extraction / "raw").rglob("*")), [])
             self.assertEqual(len(instances), 1)
+            self.assertIsNotNone(instances[0].connection)
+            assert instances[0].connection is not None
             self.assertTrue(instances[0].connection.closed)
 
     def test_non_integer_declared_sizes_are_rejected_without_coercion(self) -> None:
@@ -616,6 +1182,7 @@ class ExtractionLifecycleSecurityTests(unittest.TestCase):
                         ),
                     )
 
+    @unittest.skipIf(os.name == "nt", "Windows source handles deny concurrent mutation")
     def test_source_hashing_detects_in_place_race_even_when_size_and_mtime_are_restored(
         self,
     ) -> None:

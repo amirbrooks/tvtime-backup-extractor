@@ -65,6 +65,7 @@ class RawChainIntegrityTests(unittest.TestCase):
                     analyze_extraction(extraction_directory=extraction)
                 self.assertFalse((extraction / "analysis").exists())
 
+    @unittest.skipIf(os.name == "nt", "Windows source handles deny concurrent mutation")
     def test_descriptor_bound_raw_hashing_rejects_an_in_place_race(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             extraction = create_synthetic_extraction(Path(temporary))

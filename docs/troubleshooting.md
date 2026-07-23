@@ -106,7 +106,7 @@ The extractor refuses a destination that:
 - is or traverses an unsafe symbolic link or reparse point; or
 - is on a nonlocal volume, is an ubiquitous item, is under a known cloud/File Provider or shared
   root, or uses FUSE, an unknown filesystem, or an ambiguous stacked Linux mount; or
-- does not have a safe existing immediate parent (required by the POSIX CLI's held-directory check).
+- does not have a safe existing immediate parent (required by every CLI recovery backend).
 
 The native macOS app prepares a new owner-only child in its private local container automatically;
 start over so it can recheck that location. The CLI still requires a new child path on private
@@ -116,6 +116,11 @@ On Linux, FUSE, network, shared-folder, overlay, temporary, unknown, and ambiguo
 are refused with no override. Use a directly mounted, locally encrypted filesystem supported by the
 [Linux guide](linux.md#destination-filesystem-checks). Do not share `mountinfo` or mount-command
 output; it can contain private paths.
+
+On Windows, recovery additionally requires Windows 11 x64, 64-bit Python, local NTFS with persistent
+ACLs, and a non-reparse destination outside UNC, network, cloud-sync, and WSL paths. ReFS, FAT, and
+exFAT are refused. Use BitLocker or equivalent private storage; the CLI cannot certify BitLocker
+state automatically. See the [Windows guide](windows.md).
 
 ## The app says there is not enough free space
 
@@ -143,6 +148,9 @@ ls -lh "$BACKUP/Manifest.db"
 df -h "/path/to/private/destination-parent"
 ```
 
+On Windows, use private local properties dialogs to inspect free space. Do not paste filesystem or
+volume output into a support request because it can expose private paths and labels.
+
 After a disk-full failure, preserve the partial run privately, free space without touching the
 backup, and retry into a new output folder.
 
@@ -169,7 +177,10 @@ not become a cancellation.
 ## Extraction stopped or finished with copy failures
 
 Analysis does not proceed when a selected file could not be copied. The private
-`metadata/summary.json` records the failure inventory. Do not attach or quote it in an issue.
+`metadata/summary.json` records the failure inventory. Each row has a fixed content-free `category`
+such as `missing_encryption_key`, `key_unwrap_failure`, `ciphertext_invalid`, or `padding_failure`.
+Categories identify the processing stage without recording the underlying exception, but the rest
+of each row remains private. Do not attach, quote, upload, or paste the inventory in an issue.
 
 Every started extraction has `metadata/run_state.json`, initially marked `incomplete`. It becomes
 `complete` only after source revalidation and safe extraction cleanup. A wrong password,
@@ -192,16 +203,18 @@ hand. Retry into a new destination.
 Standalone `extract` intentionally produces only `run_state.json`; it does not constitute a full
 recovery report.
 
-## The result reports byte-count differences
+## Extraction reports a declared-size warning
 
-The decryption dependency can return a file length different from the length declared in backup
-metadata. The extractor records every mismatch privately, suppresses dependency output that could
-expose absolute paths, and continues only when every selected file was copied. The analyzer then
-requires the primary recovered database to pass SQLite integrity checks.
+After valid CBC decryption and strict PKCS#7 padding validation, the recovered byte count can differ
+from the size declared in backup metadata. The extractor preserves the complete recovered bytes,
+records the difference privately, and reports only the warning count in terminal and public JSON
+output. It does not truncate or extend the file to force a match. Dependency output that could
+expose absolute paths remains suppressed.
 
-Keep the source and output. Validate the readable titles and counts, copied-file total, completion
-markers, and private discrepancy records. A difference is an explicit salvage warning: it is neither
-silently discarded nor automatically proof of an unusable recovery.
+Full recovery continues through the normal schema and SQLite integrity checks. If the required
+database is not structurally usable, analysis fails and the full recovery remains incomplete. Keep
+all warning details and recovered files private; the discrepancy rows contain paths and exact sizes
+and must not be pasted into an issue.
 
 ## The PDF was not created
 

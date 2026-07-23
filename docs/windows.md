@@ -1,18 +1,29 @@
 # Windows guide
 
-Windows can create the encrypted Apple backup and can inspect an already complete private
-extraction. Fresh `extract` and `recover` are deliberately unsupported in this release. iMazing is
-not required.
+The current source tree supports full command-line recovery on Windows 11 x64 with 64-bit Python
+3.10 through 3.13. The published v0.2.0 packages predate this work and still support only
+`analyze` and `report` on Windows; do not treat a local source checkout as a published Windows
+release. iMazing is not required.
 
-## 1. Make a completed encrypted backup
+## 1. Requirements
 
-Use Apple Devices on current Windows systems, or iTunes where Apple Devices is unavailable.
-Connect the iPhone or iPad, select a local backup, enable backup encryption, choose and save a unique
-password, and wait for the latest-backup time to update. Confirm the completed backup appears as
-encrypted in Apple's backup-management screen.
+- Windows 11 on x64 with 64-bit Python 3.10, 3.11, 3.12, or 3.13.
+- A completed encrypted backup created by Apple Devices or iTunes.
+- A local NTFS output volume with persistent ACL support. ReFS, FAT, exFAT, UNC/network paths,
+  cloud-sync roots, WSL paths, and reparse-point destinations are rejected.
+- A private destination protected by BitLocker or equivalent full-volume encryption. The tool
+  cannot reliably verify BitLocker state, so the sensitive-output acknowledgement remains required.
+- The immediate output parent must already exist and the selected run child must not exist.
 
-Eject the device in Apple software, wait for it to disappear, and disconnect it. Do not move,
-rename, edit, or clean the backup while Apple software is using it.
+Windows ARM64, 32-bit Python, Windows 10, containers, WSL recovery, and a native Windows GUI are not
+supported by this initial backend.
+
+## 2. Make and locate a completed encrypted backup
+
+In Apple Devices, select a local backup, enable backup encryption, save its password, and wait for
+the latest-backup time to update. Confirm the backup appears as encrypted, eject the device in Apple
+software, wait for it to disappear, and disconnect it. Do not move, rename, edit, or clean the
+backup while Apple software is using it.
 
 Common backup-parent locations are:
 
@@ -21,38 +32,34 @@ Common backup-parent locations are:
 %APPDATA%\Apple Computer\MobileSync\Backup
 ```
 
-The individual backup is the child folder that directly contains `Manifest.plist`, `Manifest.db`,
-and `Status.plist`, not the parent `Backup` folder.
+Select the individual child folder that directly contains `Manifest.plist`, `Manifest.db`, and
+`Status.plist`, not the parent `Backup` folder.
 
-## 2. Why Windows fresh recovery fails closed
+## 3. Why native Windows recovery is now possible
 
-Recovery must create a brand-new directory and bind that exact filesystem object before any
-plaintext can be written. Python's supported Windows APIs cannot atomically create a directory and
-open its protective non-delete-sharing handle. Creating by pathname and opening afterward leaves a
-substitution interval, so this release refuses Windows `extract` and `recover` before creating the
-run directory, loading the decryption dependency, or writing plaintext.
+The earlier limitation correctly described `CreateDirectoryW`: it creates a directory but does not
+return a handle, so opening it afterward leaves a substitution interval. The new backend does not
+use that two-step sequence. It calls the documented Windows `NtCreateFile` API with `FILE_CREATE`,
+`FILE_DIRECTORY_FILE`, `FILE_OPEN_REPARSE_POINT`, and the already-held parent as `RootDirectory`.
+That one operation creates the fresh directory, applies a protected ACL, and returns its handle.
 
-There is no unsafe override. A future Windows recovery path requires a reviewed native atomic design.
-The package therefore does not advertise a general Windows operating-system classifier.
+The backend then keeps the source root, destination parent, and output root open without delete
+sharing; creates descendants relative to those handles; rejects reparse components; decrypts into
+exclusive held staging descriptors; and atomically promotes completed files with
+`SetFileInformationByHandle`. It validates native volume/file identities and the visible paths
+before and after recovery. The protected output ACL grants full control only to the current user and
+SYSTEM.
 
-## 3. Safe recovery route
+Capability checks run before password entry. Unsupported Windows versions, architectures,
+filesystems, ACLs, paths, or unavailable native APIs fail before plaintext creation.
 
-Copy the intact encrypted backup to private storage on macOS or Linux and run recovery there. Keep
-the original encrypted backup until the result is validated. If transferring a completed extraction
-back to Windows, protect it with BitLocker and treat every title and history row as private.
+## 4. Install from this source checkout
 
-For any fresh run path, the encrypted immediate parent must already exist and the proposed run child
-must not exist. This parent-exists/child-does-not rule applies on every platform; it does not enable
-Windows fresh recovery.
+Install an explicitly selected 64-bit Python 3.10 through 3.13 from python.org or another trusted
+managed source. From the project folder in PowerShell:
 
-## 4. Install the supported Windows review tools
-
-Install an explicitly selected Python 3.10 through 3.13 from python.org or another trusted managed
-source. The examples prefer 3.13 so `py` cannot silently select unsupported Python 3.14. From the
-project folder in PowerShell:
-
-```text
-py -3.13 -m venv .venv
+```powershell
+py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: --requirement requirements.lock
 .venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: --requirement requirements-source-build.lock
 .venv\Scripts\python.exe -m pip install --no-index --no-build-isolation --no-deps .
@@ -60,34 +67,55 @@ py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m tvtime_extractor --version
 ```
 
-You may substitute an explicit `py -3.10`, `-3.11`, or `-3.12`. Do not use an unqualified `py -3`
-when it could select 3.14.
+You may substitute an explicit `py -3.10`, `-3.11`, or `-3.13`. Do not use an unqualified `py -3`
+when it could select unsupported Python 3.14. Confirm the selected interpreter is 64-bit:
 
-## 5. Analyze or report an existing complete extraction
+```powershell
+.venv\Scripts\python.exe -c "import struct; print(struct.calcsize('P') * 8)"
+```
 
-Use only an extraction that already has a valid complete extraction marker:
+The result must be `64`.
 
-```text
+## 5. Run recovery
+
+Create a private parent on a BitLocker-protected local NTFS volume. Choose a new child name that
+does not exist, then run:
+
+```powershell
+.venv\Scripts\python.exe -m tvtime_extractor recover `
+  --backup "C:\Synthetic\DEVICE_BACKUP" `
+  --output "D:\Private\NEW_RUN" `
+  --acknowledge-sensitive-output
+```
+
+The CLI completes preflight before prompting securely for the backup password. Keep Apple Devices
+and iTunes closed and do not reconnect the phone during recovery. `extract` has the same Windows
+support, including the advanced `--include-decrypted-manifest` option; retained manifests are
+especially sensitive and remain opt-in.
+
+Do not put the password in the command, an environment variable, shell history, or a support
+request. An interrupted or failed run remains private and marked incomplete; retry into a different
+fresh child instead of reusing it.
+
+## 6. Analyze or rebuild reports
+
+Successful `recover` already runs analysis and reporting. The standalone commands remain available
+for a completed extraction:
+
+```powershell
 .venv\Scripts\python.exe -m tvtime_extractor analyze --extraction "D:\Private\TVTime-Extraction"
 .venv\Scripts\python.exe -m tvtime_extractor report --extraction "D:\Private\TVTime-Extraction"
 ```
 
-These standalone commands open the selected existing root without delete sharing, reject reparse
-points, compare its volume/file identity with the visible path, keep the handle open, and validate
-the identity again at completion. They never unlock an iOS backup.
+Opening private reports can add their filenames to browser or viewer history and Windows Recent
+Items. Close those windows after validation and keep the output off cloud-sync and shared storage.
 
-Running `extract` or `recover` on Windows returns a fixed unsupported-platform error. It must not
-prompt for the password or create the proposed output child.
+## 7. Private diagnostics
 
-## 6. Private diagnostics and validation
-
-The normal CLI error is deliberately sanitized. `--debug` can expose backup paths, dependency
-details, recovered names, or password text in a chained third-party exception. Use it only in a
-private local terminal and never paste or share its traceback.
-
-For an existing complete extraction, confirm both `metadata\run_state.json` and
-`analysis\recovery_state.json` say `complete`. Never upload the extraction, reports, screenshots, or
-debug output.
+Normal CLI errors are deliberately sanitized. `--debug` can expose paths, dependency details,
+recovered names, or password text in a chained exception. Use it only in a private local terminal
+and never paste or share its traceback. Never upload a backup, extraction, report, database,
+completion marker, screenshot, or recovered title list.
 
 See the [output reference](output-reference.md), [privacy guide](privacy.md), and
 [troubleshooting guide](troubleshooting.md).

@@ -331,6 +331,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         self.assertEqual(self._staging_members(output), [])
         self.assertEqual(_tree_snapshot(output), before)
 
+    @unittest.skipIf(os.name == "nt", "symbolic-link creation varies on Windows")
     def test_sqlite_snapshot_rejects_linked_sidecar_without_traversal(self) -> None:
         if not hasattr(os, "symlink"):
             self.skipTest("Symbolic links are unavailable")
