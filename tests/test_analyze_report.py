@@ -290,6 +290,14 @@ class AnalyzeAndReportTests(unittest.TestCase):
 
             analysis = extraction / "analysis"
             self.assertFalse((analysis / "cache_responses").exists())
+            movies = {row["name"]: row for row in read_csv_rows(analysis / "movie_library.csv")}
+            self.assertEqual(movies["Example Movie"]["tvdb_id"], "700001")
+            self.assertEqual(movies["Example Movie"]["rewatch_count"], "2")
+            series = read_csv_rows(analysis / "series_library.csv")
+            self.assertEqual(series[0]["watched_episode_count"], "1")
+            self.assertEqual(series[0]["aired_episode_count"], "2")
+            episodes = read_csv_rows(analysis / "episode_cache_unique.csv")
+            self.assertEqual(episodes[0]["is_special"], "False")
             cache_index = read_csv_rows(analysis / "cache_index.csv")
             self.assertEqual(len(cache_index), 8)
             self.assertEqual(

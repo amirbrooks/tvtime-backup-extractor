@@ -281,6 +281,14 @@ enum TestFixtures {
       Data("<!doctype html><title>Recovered data</title>\n".utf8),
       at: root.appendingPathComponent(summary.artifacts.visualReport)
     )
+    try writePrivate(
+      Data([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      at: analysis.appendingPathComponent("Suite-TV-Liberator-confirmed.zip")
+    )
+    try writePrivate(
+      Data([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      at: analysis.appendingPathComponent("Suite-TV-Liberator-estimated-progress.zip")
+    )
     if let pdfReport = summary.artifacts.pdfReport {
       try writePrivate(Data("%PDF-1.4\n".utf8), at: root.appendingPathComponent(pdfReport))
     }
@@ -396,6 +404,11 @@ enum TestFixtures {
     ("trailer_references", "analysis/trailer_references.csv"),
     ("media_url_inventory", "analysis/media_url_inventory.csv"),
     ("image_cache_references", "analysis/image_cache_references.csv"),
+    ("suite_tv_liberator_confirmed", "analysis/Suite-TV-Liberator-confirmed.zip"),
+    (
+      "suite_tv_liberator_estimated_progress",
+      "analysis/Suite-TV-Liberator-estimated-progress.zip"
+    ),
     ("markdown_report", "analysis/TVTime-Recovered-Data.md"),
     ("html_report", "analysis/TVTime-Recovered-Data.html"),
   ]
@@ -407,7 +420,7 @@ enum TestFixtures {
     ),
     (
       "movie_library.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "watch_events.csv",
@@ -415,21 +428,21 @@ enum TestFixtures {
     ),
     (
       "episode_cache.csv",
-      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
     ),
     ("sqlite_integrity.csv", "relative_path,bytes,quick_check,schema_objects"),
     ("plist_key_inventory.csv", "relative_path,format,top_level_keys"),
     (
       "series_library.csv",
-      "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,created_at,updated_at"
+      "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,watched_episode_count,aired_episode_count,created_at,updated_at"
     ),
     (
       "watched_movies.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "movie_watchlist.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "favorite_shows.csv",
@@ -441,7 +454,7 @@ enum TestFixtures {
     ),
     (
       "episode_cache_unique.csv",
-      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
     ),
     (
       "watch_events_named.csv",

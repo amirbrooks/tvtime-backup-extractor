@@ -711,6 +711,21 @@ def _integer(value: object) -> int:
         return 0
 
 
+def _external_source_id(meta: Mapping[str, object], source_name: str) -> str:
+    sources = meta.get("external_sources")
+    if not isinstance(sources, list):
+        return ""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if str(source.get("source") or "").casefold() != source_name.casefold():
+            continue
+        external_id = _integer(source.get("id"))
+        if external_id > 0:
+            return str(external_id)
+    return ""
+
+
 def unique_favorites(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     selected: dict[tuple[str, ...], dict[str, Any]] = {}
     for item in items:
@@ -1077,6 +1092,7 @@ def _analyze_extraction(
                         "air_date": item.get("air_date", ""),
                         "seen": item.get("seen", ""),
                         "seen_date": item.get("seen_date", ""),
+                        "is_special": item.get("is_special", ""),
                         "is_watched": item.get("is_watched", ""),
                         "runtime": item.get("runtime", ""),
                     }
@@ -1113,6 +1129,7 @@ def _analyze_extraction(
                     "uuid": item.get("uuid", ""),
                     "name": meta.get("name", ""),
                     "imdb_id": meta.get("imdb_id", ""),
+                    "tvdb_id": _external_source_id(meta, "tvdb"),
                     "first_release_date": meta.get("first_release_date", ""),
                     "library_status": "watched"
                     if watched_at
@@ -1123,11 +1140,18 @@ def _analyze_extraction(
                     "genres": " | ".join(str(value) for value in meta.get("genres") or []),
                     "filters": " | ".join(filters),
                     "is_watched": extended.get("is_watched", ""),
+                    "rewatch_count": item.get(
+                        "rewatch_count",
+                        extended.get("rewatch_count", ""),
+                    ),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
             )
         elif item.get("entity_type") == "series":
+            watch_status = (
+                item.get("watch_status") if isinstance(item.get("watch_status"), dict) else {}
+            )
             series_library.append(
                 {
                     "uuid": item.get("uuid", ""),
@@ -1138,6 +1162,8 @@ def _analyze_extraction(
                     "followed_at": sorting_value(item, "follow_date"),
                     "last_watch_date": sorting_value(item, "watch_date", "watched_date"),
                     "filters": " | ".join(filters),
+                    "watched_episode_count": watch_status.get("watched_episode_count", ""),
+                    "aired_episode_count": watch_status.get("aired_episode_count", ""),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
@@ -1170,6 +1196,7 @@ def _analyze_extraction(
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -1178,6 +1205,7 @@ def _analyze_extraction(
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ]
@@ -1208,6 +1236,8 @@ def _analyze_extraction(
             "followed_at",
             "last_watch_date",
             "filters",
+            "watched_episode_count",
+            "aired_episode_count",
             "created_at",
             "updated_at",
         ],
@@ -1237,6 +1267,7 @@ def _analyze_extraction(
         "air_date",
         "seen",
         "seen_date",
+        "is_special",
         "is_watched",
         "runtime",
     ]

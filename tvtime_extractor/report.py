@@ -80,6 +80,7 @@ from .safety import (
     write_json_private_atomic,
     write_text_private,
 )
+from .suite_tv import build_liberator_files, write_suite_tv_zip
 from .visual_report import (
     HTML_REPORT_FILENAME,
     PDF_REPORT_FILENAME,
@@ -213,6 +214,11 @@ _BOUND_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("trailer_references", "analysis/trailer_references.csv"),
     ("media_url_inventory", "analysis/media_url_inventory.csv"),
     ("image_cache_references", "analysis/image_cache_references.csv"),
+    ("suite_tv_liberator_confirmed", "analysis/Suite-TV-Liberator-confirmed.zip"),
+    (
+        "suite_tv_liberator_estimated_progress",
+        "analysis/Suite-TV-Liberator-estimated-progress.zip",
+    ),
     ("markdown_report", "analysis/TVTime-Recovered-Data.md"),
     ("html_report", f"analysis/{HTML_REPORT_FILENAME}"),
 )
@@ -262,6 +268,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -270,6 +277,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ),
@@ -293,6 +301,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "air_date",
         "seen",
         "seen_date",
+        "is_special",
         "is_watched",
         "runtime",
     ),
@@ -307,6 +316,8 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "followed_at",
         "last_watch_date",
         "filters",
+        "watched_episode_count",
+        "aired_episode_count",
         "created_at",
         "updated_at",
     ),
@@ -314,6 +325,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -322,6 +334,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ),
@@ -329,6 +342,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -337,6 +351,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ),
@@ -375,6 +390,7 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "air_date",
         "seen",
         "seen_date",
+        "is_special",
         "is_watched",
         "runtime",
     ),
@@ -1700,6 +1716,8 @@ def _build_report(
         "trailer_references.csv",
         "media_url_inventory.csv",
         "image_cache_references.csv",
+        "Suite-TV-Liberator-confirmed.zip",
+        "Suite-TV-Liberator-estimated-progress.zip",
         "TVTime-Recovered-Data.md",
         HTML_REPORT_FILENAME,
         PDF_REPORT_FILENAME,
@@ -1765,6 +1783,33 @@ def _build_report(
     favorite_movies = read_analysis_csv("favorite_movies.csv")
     episodes = read_analysis_csv("episode_cache_unique.csv")
     watch_events = read_analysis_csv("watch_events_named.csv")
+    suite_tv_inputs = {
+        "series": series,
+        "movies": [*watched_movies, *movie_watchlist],
+        "favorites": {
+            "shows": favorite_shows,
+            "movies": favorite_movies,
+        },
+        "episodes": episodes,
+    }
+    confirmed_suite_tv = analysis / "Suite-TV-Liberator-confirmed.zip"
+    estimated_suite_tv = analysis / "Suite-TV-Liberator-estimated-progress.zip"
+    write_suite_tv_zip(
+        confirmed_suite_tv,
+        build_liberator_files(
+            **suite_tv_inputs,
+            estimate_progress=False,
+        ),
+    )
+    write_suite_tv_zip(
+        estimated_suite_tv,
+        build_liberator_files(
+            **suite_tv_inputs,
+            estimate_progress=True,
+        ),
+    )
+    _validate_report_artifact(confirmed_suite_tv, label="confirmed Suite TV archive")
+    _validate_report_artifact(estimated_suite_tv, label="estimated Suite TV archive")
     try:
         inventory_path = safe_join(extraction, "metadata", "inventory.csv")
     except ValueError as exc:

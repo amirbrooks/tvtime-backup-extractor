@@ -2,6 +2,16 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
+## Unreleased
+
+### Reports and recovery usability
+
+- Added sealed, owner-only TV Time Liberator ZIP exports for direct Suite TV import, with separate
+  exact confirmed state and explicitly bounded estimated-progress variants generated entirely
+  offline.
+- Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
+  in normalized tables, with independent archive validation in Python and the native app.
+
 ## 0.2.0 - 2026-07-20
 
 Version 0.2.0 is published with Developer ID-signed, notarized, stapled Apple silicon and Intel

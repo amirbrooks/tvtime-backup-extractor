@@ -105,6 +105,9 @@ A successful full recovery creates these primary reports under
   semantic tables; it works offline, contains no script, and does not request remote media
 - `TVTime-Recovered-Data.pdf`: optional print-friendly companion generated from the same report
   model; use the HTML report for tagged semantic structure with assistive technology
+- `Suite-TV-Liberator-confirmed.zip`: Suite TV import containing only exact recovered watch state
+- `Suite-TV-Liberator-estimated-progress.zip`: alternate Suite TV import that fills missing
+  per-episode state up to recovered aggregate series counts
 
 Markdown, HTML, and PDF are rendered from one shared safe display model, including identical
 missing-title placeholders and a copy-size-differences section when backup metadata and copied byte
@@ -116,6 +119,13 @@ The PDF is deliberately omitted when the available embedded font or shaping supp
 faithfully render every recovered character. This is a fidelity safeguard, not a failed recovery:
 the Markdown and offline HTML remain complete. Normalized CSV tables preserve the detailed private
 data used by the reports, including titles, favorites, episodes, and exact watch events.
+
+For Suite TV, prefer `Suite-TV-Liberator-confirmed.zip` when exactness matters. The estimated archive
+preserves every exact recovered watch and never estimates specials, but fills the oldest remaining
+regular episodes until each recovered aggregate watched count is reached. It cannot reconstruct
+which skipped, out-of-order, or repeatedly watched episodes produced that count. Both archives use
+the five-file TV Time Liberator layout and are created entirely offline; movies without a recovered
+positive TVDB identifier are omitted because Suite TV cannot identify them safely.
 
 Successful full recovery has two versioned machine-readable checkpoints:
 

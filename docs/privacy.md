@@ -75,8 +75,10 @@ By default:
 - readable reports omit stable UUIDs and shorten recognized timestamps to calendar dates; and
 - visual reports show media-reference counts without embedding or fetching remote media.
 
-The normalized CSV files still contain private identifiers and exact timestamps where needed for a
-faithful archive. The readable reports are safer to inspect, not safe to publish.
+The normalized CSV files and Suite TV import ZIPs still contain private identifiers and exact
+timestamps where needed for a faithful archive. The readable reports are safer to inspect, not safe
+to publish. Creating the Suite TV archives is offline, but importing one hands its contents to Suite
+TV and whatever local storage, backup, or sync behavior that app uses.
 
 The advanced `extract --include-decrypted-manifest` and `analyze --include-raw-cache` CLI options
 can expose much more device or account information. They are intentionally unavailable in the
@@ -107,7 +109,8 @@ Do not attach, commit, publish, or send any of the following, even to a private 
 
 - an iOS or iPadOS backup, `Manifest.plist`, `Status.plist`, or decrypted manifest;
 - `TVTime-Extraction`, `raw`, `metadata`, `analysis`, or `cache_responses`;
-- SQLite databases, property lists, cookies, profile payloads, completion markers, reports, or CSVs;
+- SQLite databases, property lists, cookies, profile payloads, completion markers, reports, CSVs, or
+  Suite TV import ZIPs;
 - backup passwords, device IDs, stable user IDs, hashes, private URLs, or local paths; or
 - screenshots, screen recordings, PDFs, or previews containing recovered titles or history.
 
