@@ -739,6 +739,27 @@ final class RecoveryOutputValidatorTests {
   }
 
   @Test
+  func testRejectsResealedSuiteTVArchiveWithWrongSignature() throws {
+    let summary = TestFixtures.summary()
+    let root = try makeOutput(summary: summary)
+    let archive = root.appendingPathComponent(
+      "TVTime-Extraction/analysis/Suite-TV-Liberator-confirmed.zip"
+    )
+    let original = try Data(contentsOf: archive)
+    var corrupted = Data("NOPE".utf8)
+    corrupted.append(Data(repeating: 0x20, count: original.count - corrupted.count))
+    try TestFixtures.writePrivate(corrupted, at: archive)
+    try TestFixtures.refreshArtifactBinding(
+      beneath: root,
+      id: "suite_tv_liberator_confirmed"
+    )
+
+    assertValidationError(.artifactIntegrityFailure) {
+      try RecoveryOutputValidator.validate(summary, beneath: root)
+    }
+  }
+
+  @Test
   func testRejectsMarkerHashSizeCountPDFAndArtifactSetMismatches() throws {
     let summary = TestFixtures.summary()
     let badHash = try makeOutput(summary: summary)

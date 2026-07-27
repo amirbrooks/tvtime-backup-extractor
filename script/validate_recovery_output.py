@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
@@ -43,6 +44,7 @@ from tvtime_extractor.analyze import (  # noqa: E402
     MAXIMUM_TOTAL_CACHE_PAYLOAD_BYTES,
     _bounded_utf8_length,
     _cache_content_bytes,
+    _external_source_id,
     _favorite_rows,
     _filters,
     _integer,
@@ -124,6 +126,7 @@ from tvtime_extractor.safety import (  # noqa: E402
     sanitize_public_url,
     validate_file_id,
 )
+from tvtime_extractor.suite_tv import LIBERATOR_FILENAMES  # noqa: E402
 from tvtime_extractor.visual_report import (  # noqa: E402
     HTML_REPORT_FILENAME,
     PDF_FIDELITY_WARNING,
@@ -187,6 +190,7 @@ CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -195,6 +199,7 @@ CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ),
@@ -218,6 +223,7 @@ CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "air_date",
         "seen",
         "seen_date",
+        "is_special",
         "is_watched",
         "runtime",
     ),
@@ -232,6 +238,8 @@ CSV_FIELDS: dict[str, tuple[str, ...]] = {
         "followed_at",
         "last_watch_date",
         "filters",
+        "watched_episode_count",
+        "aired_episode_count",
         "created_at",
         "updated_at",
     ),
@@ -1010,6 +1018,41 @@ def _source_integrity(state: _State) -> None:
         _fail()
 
 
+def _validate_suite_tv_archive(path: Path) -> None:
+    payload = _read_bytes(path, maximum_bytes=MAXIMUM_REPORT_BYTES)
+    if not payload.startswith(b"PK\x03\x04"):
+        _fail()
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            entries = archive.infolist()
+            if tuple(entry.filename for entry in entries) != LIBERATOR_FILENAMES:
+                _fail()
+            total_uncompressed = 0
+            for entry in entries:
+                if (
+                    entry.is_dir()
+                    or "/" in entry.filename
+                    or "\\" in entry.filename
+                    or entry.flag_bits & 0x1
+                    or entry.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+                    or entry.file_size <= 0
+                    or entry.file_size > MAXIMUM_REPORT_BYTES
+                    or entry.compress_size <= 0
+                    or entry.compress_size > MAXIMUM_REPORT_BYTES
+                    or ((entry.external_attr >> 16) & 0o777) != EXPECTED_FILE_MODE
+                ):
+                    _fail()
+                total_uncompressed += entry.file_size
+                if total_uncompressed > MAXIMUM_REPORT_BYTES:
+                    _fail()
+            for entry in entries:
+                content = archive.read(entry)
+                if len(content) != entry.file_size:
+                    _fail()
+    except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+        _fail()
+
+
 def _artifact_bindings(state: _State) -> None:
     pdf_status = state.recovery_state["pdf"]["status"]
     expected = list(_BOUND_ARTIFACTS)
@@ -1033,6 +1076,11 @@ def _artifact_bindings(state: _State) -> None:
         )
         if observed != binding:
             _fail()
+        if artifact_id in {
+            "suite_tv_liberator_confirmed",
+            "suite_tv_liberator_estimated_progress",
+        }:
+            _validate_suite_tv_archive(state.extraction / Path(relative_path))
     state.artifact_bindings = list(bindings)
 
 
@@ -1503,6 +1551,7 @@ def _expected_core_tables(
                         "air_date": item.get("air_date", ""),
                         "seen": item.get("seen", ""),
                         "seen_date": item.get("seen_date", ""),
+                        "is_special": item.get("is_special", ""),
                         "is_watched": item.get("is_watched", ""),
                         "runtime": item.get("runtime", ""),
                     }
@@ -1549,6 +1598,7 @@ def _expected_core_tables(
                     "uuid": item.get("uuid", ""),
                     "name": meta.get("name", ""),
                     "imdb_id": meta.get("imdb_id", ""),
+                    "tvdb_id": _external_source_id(meta, "tvdb"),
                     "first_release_date": meta.get("first_release_date", ""),
                     "library_status": (
                         "watched" if is_watched else (filters[0] if filters else "saved")
@@ -1559,11 +1609,18 @@ def _expected_core_tables(
                     "genres": " | ".join(str(value) for value in meta.get("genres") or []),
                     "filters": " | ".join(filters),
                     "is_watched": is_watched,
+                    "rewatch_count": item.get(
+                        "rewatch_count",
+                        extended.get("rewatch_count", ""),
+                    ),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
             )
         elif item.get("entity_type") == "series":
+            watch_status = (
+                item.get("watch_status") if isinstance(item.get("watch_status"), dict) else {}
+            )
             series_library.append(
                 {
                     "uuid": item.get("uuid", ""),
@@ -1574,6 +1631,8 @@ def _expected_core_tables(
                     "followed_at": sorting_value(item, "follow_date"),
                     "last_watch_date": sorting_value(item, "watch_date", "watched_date"),
                     "filters": " | ".join(filters),
+                    "watched_episode_count": watch_status.get("watched_episode_count", ""),
+                    "aired_episode_count": watch_status.get("aired_episode_count", ""),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }

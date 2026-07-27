@@ -20,6 +20,10 @@ All notable changes are documented here. The project follows semantic versioning
   closed.
 - Added bounded offline recovery from supported legacy `NSKeyedArchiver` URL-cache files when
   records are no longer present in `DioCache.db`.
+- Added sealed owner-only TV Time Liberator ZIP exports with separate confirmed-state and explicitly
+  estimated-progress variants generated offline.
+- Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
+  in normalized tables.
 - This candidate is local and private. It has not been tagged, uploaded, published, or represented
   as a successor release to v0.2.0.
 

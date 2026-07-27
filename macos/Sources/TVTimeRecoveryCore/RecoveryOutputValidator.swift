@@ -728,6 +728,7 @@ enum RecoveryOutputValidator {
     case markdown
     case html
     case pdf
+    case zip
   }
 
   private struct ExpectedArtifact {
@@ -785,7 +786,7 @@ enum RecoveryOutputValidator {
       csvArtifact(
         "movie_library",
         "movie_library.csv",
-        "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+        "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
       ),
       csvArtifact(
         "watch_events",
@@ -795,7 +796,7 @@ enum RecoveryOutputValidator {
       csvArtifact(
         "episode_cache",
         "episode_cache.csv",
-        "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+        "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
       ),
       csvArtifact(
         "sqlite_integrity",
@@ -810,17 +811,17 @@ enum RecoveryOutputValidator {
       csvArtifact(
         "series_library",
         "series_library.csv",
-        "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,created_at,updated_at"
+        "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,watched_episode_count,aired_episode_count,created_at,updated_at"
       ),
       csvArtifact(
         "watched_movies",
         "watched_movies.csv",
-        "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+        "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
       ),
       csvArtifact(
         "movie_watchlist",
         "movie_watchlist.csv",
-        "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+        "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
       ),
       csvArtifact(
         "favorite_shows",
@@ -835,7 +836,7 @@ enum RecoveryOutputValidator {
       csvArtifact(
         "episode_cache_unique",
         "episode_cache_unique.csv",
-        "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+        "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
       ),
       csvArtifact(
         "watch_events_named",
@@ -856,6 +857,20 @@ enum RecoveryOutputValidator {
         "image_cache_references",
         "image_cache_references.csv",
         "cache_id,category,intended_filename,declared_bytes,width,height,source_url,cached_request_url,valid_till,touched"
+      ),
+      ExpectedArtifact(
+        id: "suite_tv_liberator_confirmed",
+        relativePath: "analysis/Suite-TV-Liberator-confirmed.zip",
+        maximumBytes: maximumArtifactBytes,
+        format: .zip,
+        captureAll: false
+      ),
+      ExpectedArtifact(
+        id: "suite_tv_liberator_estimated_progress",
+        relativePath: "analysis/Suite-TV-Liberator-estimated-progress.zip",
+        maximumBytes: maximumArtifactBytes,
+        format: .zip,
+        captureAll: false
       ),
       ExpectedArtifact(
         id: "markdown_report",
@@ -2361,6 +2376,8 @@ enum RecoveryOutputValidator {
         prefix.starts(with: Data("<!doctype html>".utf8))
       case .pdf:
         prefix.starts(with: Data("%PDF-".utf8))
+      case .zip:
+        prefix.starts(with: Data([0x50, 0x4B, 0x03, 0x04]))
       }
     guard valid else {
       throw RecoveryOutputValidationError.artifactIntegrityFailure

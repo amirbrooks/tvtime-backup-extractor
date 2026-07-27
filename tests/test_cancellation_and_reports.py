@@ -621,6 +621,8 @@ class CompletionContractTests(unittest.TestCase):
             "trailer_references",
             "media_url_inventory",
             "image_cache_references",
+            "suite_tv_liberator_confirmed",
+            "suite_tv_liberator_estimated_progress",
             "markdown_report",
             "html_report",
             "pdf_report",
