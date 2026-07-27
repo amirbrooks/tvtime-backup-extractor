@@ -247,10 +247,13 @@ the private output. It requires the primary TV Time domain
 selected regular file is copied below `TVTime-Extraction/raw/` with its domain and manifest-relative
 path preserved. File counts, sizes, and hashes are recorded privately before analysis.
 
-The primary parser reads the copied `Documents/DioCache.db`; an available image-cache database is
-catalogued as a bonus. Local caches can be incomplete, events can survive without names, and TV Time
-can change its schema. Missing data is stated rather than guessed. Retain the original encrypted
-backup until titles, favorites, episodes, watch events, and completion markers have been validated.
+The primary parser reads the copied `Documents/DioCache.db` and also recognizes supported legacy
+extensionless URL-cache archives in that same directory. Those old `NSKeyedArchiver` responses are
+decoded entirely offline; the extractor never replays their private request URLs. An available
+image-cache database is catalogued as a bonus. Local caches can be incomplete, events can survive
+without names, and TV Time can change its schema. Missing data is stated rather than guessed. Retain
+the original encrypted backup until titles, favorites, episodes, watch events, and completion
+markers have been validated.
 
 ## Read before using real data
 

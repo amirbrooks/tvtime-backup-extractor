@@ -32,9 +32,11 @@ from tvtime_extractor.analyze import (  # noqa: E402
     MAXIMUM_CACHE_JSON_DEPTH,
     MAXIMUM_CACHE_JSON_NODES,
     MAXIMUM_CACHE_JSON_STRING_BYTES,
+    MAXIMUM_CACHE_KEY_BYTES,
     MAXIMUM_CACHE_PAYLOAD_BYTES,
     MAXIMUM_CACHE_ROWS,
     MAXIMUM_DERIVED_ROWS_PER_TABLE,
+    MAXIMUM_PLIST_BYTES,
     MAXIMUM_SQLITE_SNAPSHOT_FILE_BYTES,
     MAXIMUM_SQLITE_SNAPSHOT_TOTAL_BYTES,
     MAXIMUM_TOTAL_CACHE_JSON_NODES,
@@ -69,6 +71,11 @@ from tvtime_extractor.integrity import (  # noqa: E402
     SourceSnapshot,
     reconcile_raw_tree,
     source_snapshot_from_mapping,
+)
+from tvtime_extractor.legacy_cache import (  # noqa: E402
+    LegacyCacheNodeLimitError,
+    decode_legacy_cache_archive,
+    normalize_legacy_archives,
 )
 from tvtime_extractor.report import (  # noqa: E402
     _BOUND_ARTIFACTS,
@@ -109,6 +116,7 @@ from tvtime_extractor.safety import (  # noqa: E402
     _windows_open_locked_directory,
     no_link_absolute_path,
     private_source_id,
+    regular_binary_reader,
     require_private_descriptor,
     require_private_path,
     safe_domain_component,
@@ -465,7 +473,7 @@ def _strict_json(path: Path, *, maximum_bytes: int = MAXIMUM_JSON_BYTES) -> dict
     return value
 
 
-def _validate_json_complexity(value: object) -> None:
+def _validate_json_complexity(value: object) -> int:
     """Bound already byte-limited JSON before recursive consumers inspect it."""
 
     pending: list[tuple[object, int]] = [(value, 0)]
@@ -492,6 +500,7 @@ def _validate_json_complexity(value: object) -> None:
                 pending.append((child, depth + 1))
         elif isinstance(item, (list, tuple)):
             pending.extend((child, depth + 1) for child in item)
+    return visited
 
 
 def _require_directory(path: Path) -> None:
@@ -1248,9 +1257,12 @@ def _raw_cache_index(
     state: _State,
 ) -> tuple[list[dict[str, str]], list[tuple[str, object]]]:
     database = state.raw / PRIMARY_DOMAIN / "Documents" / "DioCache.db"
+    documents = database.parent
     rows: list[dict[str, str]] = []
     payload_records: list[tuple[str, object]] = []
     unique_hashes: dict[str, str] = {}
+    total_payload_bytes = 0
+    total_json_nodes = 0
     with _sqlite_snapshot(state, database) as connection:
         if str(connection.execute("PRAGMA quick_check").fetchone()[0]) != "ok":
             _fail()
@@ -1268,8 +1280,6 @@ def _raw_cache_index(
                 "SELECT key, subKey, content, statusCode FROM cache_dio ORDER BY key, subKey"
             )
         ) as records:
-            total_payload_bytes = 0
-            total_json_nodes = 0
             for row_number, (key, subkey, content, status_code) in enumerate(records, 1):
                 if row_number > MAXIMUM_SQLITE_ROWS:
                     _fail()
@@ -1323,6 +1333,93 @@ def _raw_cache_index(
                         "exported_file": "",
                     }
                 )
+    legacy_archives = []
+    with os.scandir(documents) as entries:
+        candidates = sorted(entries, key=lambda entry: entry.name)
+    for entry in candidates:
+        path = documents / entry.name
+        metadata = entry.stat(follow_symlinks=False)
+        if path == database or path.suffix or not stat.S_ISREG(metadata.st_mode):
+            continue
+        with regular_binary_reader(path, require_private=True) as (handle, metadata):
+            prefix = handle.read(8)
+            if prefix != b"bplist00":
+                continue
+            if metadata.st_size > MAXIMUM_PLIST_BYTES:
+                _fail()
+            archive_bytes = bytearray(prefix)
+            while len(archive_bytes) < metadata.st_size:
+                chunk = handle.read(min(1024 * 1024, metadata.st_size - len(archive_bytes)))
+                if not chunk:
+                    break
+                archive_bytes.extend(chunk)
+            if len(archive_bytes) != metadata.st_size:
+                _fail()
+        source_id = private_source_id(
+            "legacy-url-cache",
+            str(path.relative_to(documents)),
+        )
+        try:
+            archive = decode_legacy_cache_archive(
+                bytes(archive_bytes),
+                source_id=source_id,
+                observed_mtime_ns=metadata.st_mtime_ns,
+                maximum_nodes=MAXIMUM_CACHE_JSON_NODES,
+            )
+        except LegacyCacheNodeLimitError:
+            _fail()
+        if archive is None:
+            continue
+        try:
+            _bounded_utf8_length(
+                archive.url,
+                subject="legacy URL-cache request URL byte size",
+                maximum_bytes=MAXIMUM_CACHE_KEY_BYTES,
+            )
+        except UnsupportedSchemaError:
+            _fail()
+        node_count = _validate_json_complexity(archive.payload)
+        total_json_nodes += node_count
+        if total_json_nodes > MAXIMUM_TOTAL_CACHE_JSON_NODES:
+            _fail()
+        total_payload_bytes += len(archive.payload_bytes)
+        if total_payload_bytes > MAXIMUM_TOTAL_CACHE_PAYLOAD_BYTES:
+            _fail()
+        digest = hashlib.sha256(archive.payload_bytes).hexdigest()
+        duplicate_of = unique_hashes.get(digest, "")
+        unique_hashes.setdefault(digest, source_id)
+        data = _payload_data(archive.payload)
+        if isinstance(data, dict):
+            shape = "object"
+            data_type = str(data.get("type") or "")
+            objects = data.get("objects")
+            object_count: int | str = len(objects) if isinstance(objects, list) else ""
+        elif isinstance(data, list):
+            shape = "array"
+            data_type = ""
+            object_count = len(data)
+        else:
+            shape = type(data).__name__
+            data_type = ""
+            object_count = ""
+        if len(rows) >= MAXIMUM_SQLITE_ROWS:
+            _fail()
+        rows.append(
+            {
+                "source_id": source_id,
+                "status_code": "",
+                "bytes": str(len(archive.payload_bytes)),
+                "sha256": digest,
+                "duplicate_of": duplicate_of,
+                "json_valid": str(True),
+                "shape": shape,
+                "data_type": data_type,
+                "object_count": str(object_count),
+                "exported_file": "",
+            }
+        )
+        legacy_archives.append(archive)
+    payload_records.extend(normalize_legacy_archives(legacy_archives))
     return rows, payload_records
 
 
@@ -1436,22 +1533,32 @@ def _expected_core_tables(
         extended = item.get("extended") if isinstance(item.get("extended"), dict) else {}
         filters = _filters(item.get("filter"))
         if item.get("entity_type") == "movie":
-            watched_at = item.get("watched_at") or sorting_value(item, "watched_date", "watch_date")
+            raw_watched_at = item.get("watched_at") or sorting_value(
+                item,
+                "watched_date",
+                "watch_date",
+            )
+            watched_at = (
+                ""
+                if isinstance(raw_watched_at, str) and raw_watched_at.startswith("0001-01-01")
+                else raw_watched_at
+            )
+            is_watched = bool(extended.get("is_watched") or raw_watched_at)
             movie_library.append(
                 {
                     "uuid": item.get("uuid", ""),
                     "name": meta.get("name", ""),
                     "imdb_id": meta.get("imdb_id", ""),
                     "first_release_date": meta.get("first_release_date", ""),
-                    "library_status": "watched"
-                    if watched_at
-                    else (filters[0] if filters else "saved"),
+                    "library_status": (
+                        "watched" if is_watched else (filters[0] if filters else "saved")
+                    ),
                     "watched_at": watched_at,
                     "followed_at": sorting_value(item, "follow_date"),
                     "runtime_seconds": meta.get("runtime", ""),
                     "genres": " | ".join(str(value) for value in meta.get("genres") or []),
                     "filters": " | ".join(filters),
-                    "is_watched": extended.get("is_watched", ""),
+                    "is_watched": is_watched,
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
@@ -1472,8 +1579,8 @@ def _expected_core_tables(
                 }
             )
 
-    watched_movies = [row for row in movie_library if row["watched_at"]]
-    movie_watchlist = [row for row in movie_library if not row["watched_at"]]
+    watched_movies = [row for row in movie_library if row["is_watched"]]
+    movie_watchlist = [row for row in movie_library if not row["is_watched"]]
     movie_by_uuid = {str(row["uuid"]): row for row in movie_library}
     named_watch_events = [
         {**event, "movie_name": movie_by_uuid.get(str(event.get("uuid")), {}).get("name", "")}

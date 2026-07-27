@@ -38,6 +38,27 @@ def _json_bytes(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
+def write_legacy_archive(
+    path: Path,
+    *,
+    url: str,
+    payload: object,
+) -> None:
+    archive = {
+        "$archiver": "NSKeyedArchiver",
+        "$objects": [
+            "$null",
+            {"data": plistlib.UID(2), "response": plistlib.UID(3)},
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            url,
+        ],
+        "$top": {"root": plistlib.UID(1)},
+        "$version": 100_000,
+    }
+    path.write_bytes(plistlib.dumps(archive, fmt=plistlib.FMT_BINARY))
+    secure_file(path)
+
+
 def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
     library = {
         "data": {

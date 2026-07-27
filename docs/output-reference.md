@@ -19,7 +19,7 @@ TVTime-Extraction/
     ├── TVTime-Recovered-Data.pdf      optional faithful printable report
     ├── recovery_state.json            full-recovery/report checkpoint
     ├── analysis_summary.json          parser, integrity, and table counts
-    ├── cache_index.csv                 opaque cache-source index
+    ├── cache_index.csv                 opaque database/legacy cache-source index
     ├── movie_library.csv               watched and saved movies
     ├── watched_movies.csv
     ├── movie_watchlist.csv
@@ -40,6 +40,12 @@ TVTime-Extraction/
 Exact rows depend on what remains in the local app cache. Empty tables, unnamed watch events, and
 missing image references are possible. Counts are not a guarantee of account completeness because
 this is local-backup recovery, not an official TV Time export.
+
+When present, compatible extensionless `NSKeyedArchiver` responses from the primary app's
+`Documents` directory contribute through the same normalized tables. Their filenames, request URLs,
+and account identifiers are not copied into those tables; `cache_index.csv` uses opaque source IDs.
+Series-like entries from old social-following payloads are accepted only when a recovered episode
+catalogue ties the same numeric series ID to actual episodes.
 
 **How to read the series count:** `Recovered series records` counts the recovered cache rows exactly;
 it is not silently deduplicated by title. The readable report separately shows named versus unnamed

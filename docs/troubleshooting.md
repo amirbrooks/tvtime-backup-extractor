@@ -249,9 +249,11 @@ completed encrypted backup, eject the device, and retry from that new backup.
 
 ## `DioCache.db` is missing or unsupported
 
-The current parser expects the copied primary app-domain file `Documents/DioCache.db`. A newer TV
-Time version may have changed its storage format, or the local cache may not include the database or
-recognized payloads.
+The current parser expects the copied primary app-domain file `Documents/DioCache.db`. When that
+database exists but no longer retains the library, analysis also checks compatible legacy
+extensionless URL-cache archives beside it. Those archives are decoded locally and never replayed
+over the network. A missing `DioCache.db` still stops this release, and a newer TV Time version may
+use an unsupported storage format.
 
 Preserve the private extraction. Report only the version, platform, parser status, and a synthetic or
 abstract description. Do not upload the database or cache.

@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
+## Unreleased
+
+- Recover supported series, movies, favorites, watch events, and catalogue episodes from legacy
+  extensionless `NSKeyedArchiver` URL-cache files when those records are no longer present in
+  `DioCache.db`. The decoder remains offline, bounded, and excludes social-profile entries that
+  cannot be tied to a recovered episode catalogue.
+
 ## 0.2.0 - 2026-07-20
 
 Version 0.2.0 is published with Developer ID-signed, notarized, stapled Apple silicon and Intel
