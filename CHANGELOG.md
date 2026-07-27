@@ -18,6 +18,8 @@ All notable changes are documented here. The project follows semantic versioning
 - Added privacy-safe Android capability probing and explicitly acknowledged legacy-device capture.
   Modern release apps, disabled backup policy, multiple devices, and unauthorized devices fail
   closed.
+- Added bounded offline recovery from supported legacy `NSKeyedArchiver` URL-cache files when
+  records are no longer present in `DioCache.db`.
 - This candidate is local and private. It has not been tagged, uploaded, published, or represented
   as a successor release to v0.2.0.
 

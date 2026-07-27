@@ -37,7 +37,11 @@ from script.validate_recovery_output import (
     _validate_json_complexity,
     validate_recovery_output,
 )
-from tests.helpers import create_synthetic_extraction, refresh_synthetic_source_snapshot
+from tests.helpers import (
+    create_synthetic_extraction,
+    refresh_synthetic_source_snapshot,
+    write_legacy_archive,
+)
 from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import UnsafePathError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
@@ -244,6 +248,51 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         refresh_synthetic_source_snapshot(extraction)
         analyze_extraction(extraction_directory=extraction)
         build_report(extraction_directory=extraction)
+        result = validate_recovery_output(output)
+        self.assertIn("data_parity", result.gates)
+
+    def test_legacy_zero_timestamp_matches_analyzer_and_validator_semantics(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output = Path(temporary.name) / "legacy-cache-output"
+        output.mkdir(mode=0o700)
+        extraction = create_synthetic_extraction(output)
+        documents = extraction / "raw" / PRIMARY_DOMAIN / "Documents"
+        with closing(sqlite3.connect(documents / "DioCache.db")) as connection:
+            connection.execute("DELETE FROM cache_dio")
+            connection.commit()
+        write_legacy_archive(
+            documents / "synthetic-legacy-movie-cache",
+            url=(
+                "https://api.example.invalid/prod/v1/tracking/cgw/follows/user/"
+                "900000002?entity_type=movie"
+            ),
+            payload={
+                "data": {
+                    "type": "list",
+                    "objects": [
+                        {
+                            "uuid": "40000000-0000-4000-8000-000000000001",
+                            "entity_type": "movie",
+                            "type": "follow",
+                            "created_at": "2020-01-01T00:00:00Z",
+                            "updated_at": "2020-01-02T00:00:00Z",
+                            "watched_at": "0001-01-01T00:00:00Z",
+                            "extended": {"is_watched": False},
+                            "filter": ["watched"],
+                            "meta": {"name": "Synthetic Sentinel Movie"},
+                        }
+                    ],
+                }
+            },
+        )
+        refresh_synthetic_source_snapshot(extraction)
+
+        summary = analyze_extraction(extraction_directory=extraction)
+        self.assertEqual(summary["watched_movies"], 1)
+        self.assertEqual(summary["movie_watchlist"], 0)
+        build_report(extraction_directory=extraction)
+
         result = validate_recovery_output(output)
         self.assertIn("data_parity", result.gates)
 
