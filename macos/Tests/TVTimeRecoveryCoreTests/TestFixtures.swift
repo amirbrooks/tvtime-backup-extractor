@@ -282,11 +282,11 @@ enum TestFixtures {
       at: root.appendingPathComponent(summary.artifacts.visualReport)
     )
     try writePrivate(
-      Data([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      try suiteTVArchive(),
       at: analysis.appendingPathComponent("Suite-TV-Liberator-confirmed.zip")
     )
     try writePrivate(
-      Data([0x50, 0x4B, 0x03, 0x04, 0x00]),
+      try suiteTVArchive(),
       at: analysis.appendingPathComponent("Suite-TV-Liberator-estimated-progress.zip")
     )
     if let pdfReport = summary.artifacts.pdfReport {
@@ -374,6 +374,161 @@ enum TestFixtures {
   static func writePrivate(_ data: Data, at url: URL) throws {
     try data.write(to: url, options: .atomic)
     try setMode(0o600, at: url)
+  }
+
+  static func suiteTVArchive(
+    showTVDBID: Int = 101,
+    favoritesPublic: Bool = false
+  ) throws -> Data {
+    let show: [String: Any] = [
+      "id": ["tvdb": showTVDBID, "imdb": "-1"],
+      "uuid": "30000000-0000-4000-8000-000000000001",
+      "title": "Synthetic Suite Series",
+      "status": "not_started_yet",
+      "seasons": [
+        [
+          "number": 1,
+          "episodes": [
+            [
+              "number": 1,
+              "special": false,
+              "id": ["tvdb": 1001, "imdb": "-1"],
+              "rating": NSNull(),
+              "is_watched": false,
+            ]
+          ],
+        ]
+      ],
+      "created_at": "2020-01-01T00:00:00Z",
+    ]
+    let favorites: [String: Any] = [
+      "name": "Favorites",
+      "description": "Your favorite movies and shows.",
+      "is_public": favoritesPublic,
+      "movies": [],
+      "shows": [],
+    ]
+    let activity = [
+      "imdb_id,tvdb_id,type,title,season,episode,is_special,is_watched,watched_at,status,is_watchlisted,rating",
+      "-1,\(showTVDBID),show,Synthetic Suite Series,,,,,,not_started_yet,true,",
+      "",
+    ].joined(separator: "\r\n")
+    let files: [(String, Data)] = [
+      (
+        "shows.json",
+        try JSONSerialization.data(withJSONObject: [show], options: [.prettyPrinted, .sortedKeys])
+      ),
+      (
+        "movies.json",
+        try JSONSerialization.data(withJSONObject: [], options: [.prettyPrinted, .sortedKeys])
+      ),
+      (
+        "favorites.json",
+        try JSONSerialization.data(
+          withJSONObject: favorites,
+          options: [.prettyPrinted, .sortedKeys]
+        )
+      ),
+      (
+        "lists.json",
+        try JSONSerialization.data(withJSONObject: [], options: [.prettyPrinted, .sortedKeys])
+      ),
+      ("activity_history.csv", Data(activity.utf8)),
+    ]
+    return storedZip(files)
+  }
+
+  private struct StoredZipRecord {
+    let name: Data
+    let checksum: UInt32
+    let byteCount: UInt32
+    let localOffset: UInt32
+  }
+
+  private static func storedZip(_ files: [(String, Data)]) -> Data {
+    var archive = Data()
+    var records: [StoredZipRecord] = []
+    for (name, payload) in files {
+      let nameData = Data(name.utf8)
+      let checksum = zipCRC32(payload)
+      let localOffset = UInt32(archive.count)
+      appendZipUInt32(0x0403_4B50, to: &archive)
+      appendZipUInt16(20, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(checksum, to: &archive)
+      appendZipUInt32(UInt32(payload.count), to: &archive)
+      appendZipUInt32(UInt32(payload.count), to: &archive)
+      appendZipUInt16(UInt16(nameData.count), to: &archive)
+      appendZipUInt16(0, to: &archive)
+      archive.append(nameData)
+      archive.append(payload)
+      records.append(
+        StoredZipRecord(
+          name: nameData,
+          checksum: checksum,
+          byteCount: UInt32(payload.count),
+          localOffset: localOffset
+        )
+      )
+    }
+
+    let centralOffset = UInt32(archive.count)
+    for record in records {
+      appendZipUInt32(0x0201_4B50, to: &archive)
+      appendZipUInt16(0x0314, to: &archive)
+      appendZipUInt16(20, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(record.checksum, to: &archive)
+      appendZipUInt32(record.byteCount, to: &archive)
+      appendZipUInt32(record.byteCount, to: &archive)
+      appendZipUInt16(UInt16(record.name.count), to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(0o100600 << 16, to: &archive)
+      appendZipUInt32(record.localOffset, to: &archive)
+      archive.append(record.name)
+    }
+    let centralBytes = UInt32(archive.count) - centralOffset
+    appendZipUInt32(0x0605_4B50, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    appendZipUInt16(UInt16(records.count), to: &archive)
+    appendZipUInt16(UInt16(records.count), to: &archive)
+    appendZipUInt32(centralBytes, to: &archive)
+    appendZipUInt32(centralOffset, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    return archive
+  }
+
+  private static func appendZipUInt16(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(truncatingIfNeeded: value))
+    data.append(UInt8(truncatingIfNeeded: value >> 8))
+  }
+
+  private static func appendZipUInt32(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(truncatingIfNeeded: value))
+    data.append(UInt8(truncatingIfNeeded: value >> 8))
+    data.append(UInt8(truncatingIfNeeded: value >> 16))
+    data.append(UInt8(truncatingIfNeeded: value >> 24))
+  }
+
+  private static func zipCRC32(_ data: Data) -> UInt32 {
+    var checksum = UInt32.max
+    for byte in data {
+      checksum ^= UInt32(byte)
+      for _ in 0..<8 {
+        checksum = (checksum >> 1) ^ (0xEDB8_8320 & (0 &- (checksum & 1)))
+      }
+    }
+    return checksum ^ UInt32.max
   }
 
   static func setMode(_ mode: mode_t, at url: URL) throws {

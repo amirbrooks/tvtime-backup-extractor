@@ -78,7 +78,8 @@ By default:
 The normalized CSV files and Suite TV import ZIPs still contain private identifiers and exact
 timestamps where needed for a faithful archive. The readable reports are safer to inspect, not safe
 to publish. Creating the Suite TV archives is offline, but importing one hands its contents to Suite
-TV and whatever local storage, backup, or sync behavior that app uses.
+TV and whatever local storage, backup, or sync behavior that app uses. The generated Favorites list
+is marked private.
 
 The advanced `extract --include-decrypted-manifest` and `analyze --include-raw-cache` CLI options
 can expose much more device or account information. They are intentionally unavailable in the

@@ -126,7 +126,10 @@ from tvtime_extractor.safety import (  # noqa: E402
     sanitize_public_url,
     validate_file_id,
 )
-from tvtime_extractor.suite_tv import LIBERATOR_FILENAMES  # noqa: E402
+from tvtime_extractor.suite_tv import (  # noqa: E402
+    LIBERATOR_FILENAMES,
+    validate_liberator_files,
+)
 from tvtime_extractor.visual_report import (  # noqa: E402
     HTML_REPORT_FILENAME,
     PDF_FIDELITY_WARNING,
@@ -1045,10 +1048,13 @@ def _validate_suite_tv_archive(path: Path) -> None:
                 total_uncompressed += entry.file_size
                 if total_uncompressed > MAXIMUM_REPORT_BYTES:
                     _fail()
+            files: dict[str, bytes] = {}
             for entry in entries:
                 content = archive.read(entry)
                 if len(content) != entry.file_size:
                     _fail()
+                files[entry.filename] = content
+            validate_liberator_files(files)
     except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
         _fail()
 

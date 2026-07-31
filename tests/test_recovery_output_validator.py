@@ -196,6 +196,39 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
             validate_recovery_output(output)
         self.assertEqual(raised.exception.gate, "artifact_bindings")
 
+    def test_resealed_suite_tv_archive_with_false_semantics_is_rejected(self) -> None:
+        output = self._copy_fixture()
+        archive_path = (
+            output / "TVTime-Extraction" / "analysis" / "Suite-TV-Liberator-confirmed.zip"
+        )
+        with zipfile.ZipFile(archive_path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        favorites = json.loads(files["favorites.json"])
+        favorites["is_public"] = True
+        files["favorites.json"] = json.dumps(favorites).encode("utf-8")
+        with zipfile.ZipFile(
+            archive_path,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            for name in LIBERATOR_FILENAMES:
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = 0o100600 << 16
+                archive.writestr(info, files[name])
+        if os.name != "nt":
+            archive_path.chmod(0o600)
+        self._reseal_artifact(
+            output,
+            "suite_tv_liberator_confirmed",
+            archive_path,
+        )
+
+        with self.assertRaises(ValidationFailure) as raised:
+            validate_recovery_output(output)
+        self.assertEqual(raised.exception.gate, "artifact_bindings")
+
     def test_extra_output_root_member_fails_closed(self) -> None:
         output = self._copy_fixture()
         extra = output / "unexpected.txt"

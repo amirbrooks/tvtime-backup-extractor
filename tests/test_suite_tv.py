@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import stat
@@ -12,6 +13,7 @@ from pathlib import Path
 from tvtime_extractor.suite_tv import (
     LIBERATOR_FILENAMES,
     build_liberator_files,
+    validate_liberator_files,
     write_suite_tv_zip,
 )
 
@@ -163,6 +165,7 @@ class SuiteTVLiberatorTests(unittest.TestCase):
         self.assertFalse(episodes[1003]["is_watched"])
 
         self.assertEqual(favorites["name"], "Favorites")
+        self.assertFalse(favorites["is_public"])
         self.assertEqual(
             favorites["movies"],
             [
@@ -212,6 +215,105 @@ class SuiteTVLiberatorTests(unittest.TestCase):
         self.assertEqual(episodes[1002]["watched_at"], "2020-03-02T01:02:03Z")
         self.assertFalse(episodes[1003]["is_watched"])
 
+    def test_invalid_series_identifier_is_omitted(self) -> None:
+        files = build_liberator_files(
+            series=[{**SERIES[0], "series_id": "0"}],
+            movies=MOVIES,
+            favorites=FAVORITES,
+            episodes=EPISODES,
+            estimate_progress=False,
+        )
+
+        self.assertEqual(json.loads(files["shows.json"]), [])
+
+    def test_recovered_stopped_status_is_preserved_and_invalid_episodes_are_omitted(self) -> None:
+        files = build_liberator_files(
+            series=[{**SERIES[0], "filters": "followed | stopped"}],
+            movies=MOVIES,
+            favorites=FAVORITES,
+            episodes=[
+                *EPISODES,
+                {
+                    "episode_id": "1004",
+                    "show_id": "101",
+                    "season": "1",
+                    "episode": "0",
+                    "is_watched": "True",
+                },
+            ],
+            estimate_progress=False,
+        )
+
+        shows = json.loads(files["shows.json"])
+        self.assertEqual(shows[0]["status"], "stopped")
+        self.assertNotIn(
+            1004,
+            {
+                episode["id"]["tvdb"]
+                for season in shows[0]["seasons"]
+                for episode in season["episodes"]
+            },
+        )
+
+    def test_semantic_validator_rejects_resealed_false_data(self) -> None:
+        files = build_liberator_files(
+            series=SERIES,
+            movies=MOVIES,
+            favorites=FAVORITES,
+            episodes=EPISODES,
+            estimate_progress=False,
+        )
+        corruptions = []
+
+        invalid_show = dict(files)
+        shows = json.loads(invalid_show["shows.json"])
+        shows[0]["id"]["tvdb"] = 0
+        invalid_show["shows.json"] = json.dumps(shows).encode("utf-8")
+        corruptions.append(invalid_show)
+
+        public_favorites = dict(files)
+        favorites = json.loads(public_favorites["favorites.json"])
+        favorites["is_public"] = True
+        public_favorites["favorites.json"] = json.dumps(favorites).encode("utf-8")
+        corruptions.append(public_favorites)
+
+        wrong_activity = dict(files)
+        wrong_activity["activity_history.csv"] += b"synthetic,false,row\r\n"
+        corruptions.append(wrong_activity)
+
+        for corrupted in corruptions:
+            with (
+                self.subTest(
+                    filename=next(name for name in files if files[name] != corrupted[name])
+                ),
+                self.assertRaises(ValueError),
+            ):
+                validate_liberator_files(corrupted)
+
+    def test_synthetic_compatibility_fixture_pins_exact_bytes(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "suite_tv_liberator_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        files = build_liberator_files(
+            series=SERIES,
+            movies=MOVIES,
+            favorites=FAVORITES,
+            episodes=EPISODES,
+            estimate_progress=False,
+        )
+
+        self.assertEqual(fixture["contract"], "suite-tv-liberator-v1")
+        self.assertEqual(
+            fixture["upstream_commit"],
+            "a18caa46fbf8d611cc60f048c480e8981d7e6c05",
+        )
+        self.assertEqual(
+            fixture["sha256"],
+            {name: hashlib.sha256(payload).hexdigest() for name, payload in files.items()},
+        )
+
     def test_zip_has_exact_root_members_and_private_permissions(self) -> None:
         files = build_liberator_files(
             series=SERIES,
@@ -229,6 +331,9 @@ class SuiteTVLiberatorTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertEqual(tuple(archive.namelist()), LIBERATOR_FILENAMES)
                 self.assertTrue(all("/" not in name for name in archive.namelist()))
+                self.assertTrue(
+                    all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
+                )
                 self.assertTrue(
                     all((info.external_attr >> 16) & 0o777 == 0o600 for info in archive.infolist())
                 )

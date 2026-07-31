@@ -58,6 +58,16 @@ def _csv_boolean(value: bool) -> str:
 
 
 def _show_status(row: Mapping[str, object]) -> str:
+    recovered_statuses = [
+        value.strip() for value in str(row.get("filters") or "").split("|") if value.strip()
+    ]
+    if recovered_statuses and recovered_statuses[-1] in {
+        "stopped",
+        "continuing",
+        "up_to_date",
+        "not_started_yet",
+    }:
+        return recovered_statuses[-1]
     watched = _integer(row.get("watched_episode_count"))
     aired = _integer(row.get("aired_episode_count"))
     if watched <= 0:
@@ -108,12 +118,16 @@ def _build_shows(
     for episode in episode_rows:
         show_id = _integer(episode.get("show_id"))
         episode_id = _integer(episode.get("episode_id"))
-        if show_id > 0 and episode_id > 0:
+        season_number = _integer(episode.get("season"), default=-1)
+        episode_number = _integer(episode.get("episode"), default=-1)
+        if show_id > 0 and episode_id > 0 and season_number >= 0 and episode_number > 0:
             episodes_by_show.setdefault(show_id, []).append(episode)
 
     shows: list[dict[str, Any]] = []
     for row in series_rows:
         tvdb_id = _integer(row.get("series_id") or row.get("show_id"))
+        if tvdb_id <= 0:
+            continue
         source_episodes = episodes_by_show.get(tvdb_id, [])
         seasons: dict[int, list[dict[str, Any]]] = {}
         exact_regular_watches = 0
@@ -229,7 +243,7 @@ def _build_favorites(
     return {
         "name": "Favorites",
         "description": "Your favorite movies and shows.",
-        "is_public": True,
+        "is_public": False,
         "movies": favorite_movies,
         "shows": favorite_shows,
     }
@@ -311,6 +325,203 @@ def _json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+def _exact_keys(value: Mapping[str, object], expected: set[str]) -> None:
+    if set(value) != expected:
+        raise ValueError("Suite TV export data had an unsupported object shape")
+
+
+def _positive_identifier(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("Suite TV export data had an invalid identifier")
+    return value
+
+
+def _string(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Suite TV export data had an invalid text field")
+    return value
+
+
+def _parse_json_document(payload: bytes) -> object:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Suite TV export data contained a duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("Suite TV export data was not valid JSON") from exc
+
+
+def _validate_id(value: object) -> tuple[int, str]:
+    if not isinstance(value, dict):
+        raise ValueError("Suite TV export data had an invalid identifier object")
+    _exact_keys(value, {"tvdb", "imdb"})
+    return _positive_identifier(value["tvdb"]), _string(value["imdb"])
+
+
+def _validate_episode(value: object) -> tuple[int, int]:
+    if not isinstance(value, dict):
+        raise ValueError("Suite TV export data had an invalid episode")
+    required = {"number", "special", "id", "rating", "is_watched"}
+    if "watched_at" in value:
+        required.add("watched_at")
+        _string(value["watched_at"])
+    _exact_keys(value, required)
+    episode_id, _imdb_id = _validate_id(value["id"])
+    number = value["number"]
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        raise ValueError("Suite TV export data had an invalid episode number")
+    if not isinstance(value["special"], bool) or not isinstance(value["is_watched"], bool):
+        raise ValueError("Suite TV export data had an invalid episode state")
+    if value["rating"] is not None:
+        raise ValueError("Suite TV export data had an unsupported episode rating")
+    return episode_id, number
+
+
+def _validate_show(value: object) -> tuple[int, str]:
+    if not isinstance(value, dict):
+        raise ValueError("Suite TV export data had an invalid show")
+    _exact_keys(value, {"id", "uuid", "title", "status", "seasons", "created_at"})
+    show_id, _imdb_id = _validate_id(value["id"])
+    uuid = _string(value["uuid"])
+    _string(value["title"])
+    _string(value["created_at"])
+    if value["status"] not in {"stopped", "not_started_yet", "up_to_date", "continuing"}:
+        raise ValueError("Suite TV export data had an invalid show status")
+    if not isinstance(value["seasons"], list):
+        raise ValueError("Suite TV export data had invalid show seasons")
+    episode_ids: set[int] = set()
+    for season in value["seasons"]:
+        if not isinstance(season, dict):
+            raise ValueError("Suite TV export data had an invalid season")
+        _exact_keys(season, {"number", "episodes"})
+        season_number = season["number"]
+        if (
+            not isinstance(season_number, int)
+            or isinstance(season_number, bool)
+            or season_number < 0
+            or not isinstance(season["episodes"], list)
+        ):
+            raise ValueError("Suite TV export data had an invalid season")
+        for episode in season["episodes"]:
+            episode_id, _episode_number = _validate_episode(episode)
+            if episode_id in episode_ids:
+                raise ValueError("Suite TV export data had a duplicate episode identifier")
+            episode_ids.add(episode_id)
+    return show_id, uuid
+
+
+def _validate_movie(value: object) -> tuple[int, str]:
+    if not isinstance(value, dict):
+        raise ValueError("Suite TV export data had an invalid movie")
+    required = {"id", "uuid", "title", "created_at", "rating", "is_watched", "rewatch_count"}
+    if "watched_at" in value:
+        required.add("watched_at")
+        _string(value["watched_at"])
+    _exact_keys(value, required)
+    movie_id, _imdb_id = _validate_id(value["id"])
+    uuid = _string(value["uuid"])
+    _string(value["title"])
+    _string(value["created_at"])
+    if value["rating"] is not None or not isinstance(value["is_watched"], bool):
+        raise ValueError("Suite TV export data had an invalid movie state")
+    rewatch_count = value["rewatch_count"]
+    if not isinstance(rewatch_count, int) or isinstance(rewatch_count, bool) or rewatch_count < 0:
+        raise ValueError("Suite TV export data had an invalid movie rewatch count")
+    return movie_id, uuid
+
+
+def validate_liberator_files(files: Mapping[str, bytes]) -> None:
+    if tuple(files) != LIBERATOR_FILENAMES or any(
+        not isinstance(files[name], bytes) or not files[name] for name in LIBERATOR_FILENAMES
+    ):
+        raise ValueError("Suite TV export files do not match the Liberator schema")
+
+    shows = _parse_json_document(files["shows.json"])
+    movies = _parse_json_document(files["movies.json"])
+    favorites = _parse_json_document(files["favorites.json"])
+    lists = _parse_json_document(files["lists.json"])
+    if not isinstance(shows, list) or not isinstance(movies, list) or lists != []:
+        raise ValueError("Suite TV export data had an unsupported root shape")
+
+    shows_by_key: dict[tuple[int, str], Mapping[str, object]] = {}
+    for show in shows:
+        show_id, uuid = _validate_show(show)
+        key = (show_id, uuid)
+        if key in shows_by_key:
+            raise ValueError("Suite TV export data had a duplicate show")
+        shows_by_key[key] = show
+
+    movies_by_key: dict[tuple[int, str], Mapping[str, object]] = {}
+    for movie in movies:
+        movie_id, uuid = _validate_movie(movie)
+        key = (movie_id, uuid)
+        if key in movies_by_key:
+            raise ValueError("Suite TV export data had a duplicate movie")
+        movies_by_key[key] = movie
+
+    if not isinstance(favorites, dict):
+        raise ValueError("Suite TV export data had invalid favorites")
+    _exact_keys(
+        favorites,
+        {"name", "description", "is_public", "movies", "shows"},
+    )
+    if (
+        favorites["name"] != "Favorites"
+        or not isinstance(favorites["description"], str)
+        or favorites["is_public"] is not False
+        or not isinstance(favorites["movies"], list)
+        or not isinstance(favorites["shows"], list)
+    ):
+        raise ValueError("Suite TV export data had invalid favorites")
+
+    for favorite in favorites["movies"]:
+        if not isinstance(favorite, dict):
+            raise ValueError("Suite TV export data had an invalid favorite movie")
+        _exact_keys(
+            favorite,
+            {"id", "uuid", "title", "created_at", "rating", "added_at"},
+        )
+        movie_id, _imdb_id = _validate_id(favorite["id"])
+        uuid = _string(favorite["uuid"])
+        source = movies_by_key.get((movie_id, uuid))
+        if (
+            source is None
+            or favorite["title"] != source["title"]
+            or favorite["created_at"] != source["created_at"]
+            or favorite["rating"] != source["rating"]
+            or not isinstance(favorite["added_at"], str)
+        ):
+            raise ValueError("Suite TV export data had an unbound favorite movie")
+
+    for favorite in favorites["shows"]:
+        if not isinstance(favorite, dict):
+            raise ValueError("Suite TV export data had an invalid favorite show")
+        _exact_keys(
+            favorite,
+            {"id", "uuid", "title", "seasons", "created_at", "added_at"},
+        )
+        show_id, _imdb_id = _validate_id(favorite["id"])
+        uuid = _string(favorite["uuid"])
+        source = shows_by_key.get((show_id, uuid))
+        if (
+            source is None
+            or favorite["title"] != source["title"]
+            or favorite["seasons"] != source["seasons"]
+            or favorite["created_at"] != source["created_at"]
+            or not isinstance(favorite["added_at"], str)
+        ):
+            raise ValueError("Suite TV export data had an unbound favorite show")
+
+    if files["activity_history.csv"] != _activity_csv(shows, movies):
+        raise ValueError("Suite TV export activity history did not match its JSON records")
+
+
 def build_liberator_files(
     *,
     series: Iterable[Mapping[str, object]],
@@ -330,18 +541,19 @@ def build_liberator_files(
         shows=show_values,
         movies=movie_values,
     )
-    return {
+    files = {
         "shows.json": _json_bytes(show_values),
         "movies.json": _json_bytes(movie_values),
         "favorites.json": _json_bytes(favorite_values),
         "lists.json": _json_bytes([]),
         "activity_history.csv": _activity_csv(show_values, movie_values),
     }
+    validate_liberator_files(files)
+    return files
 
 
 def write_suite_tv_zip(path: Path, files: Mapping[str, bytes]) -> None:
-    if tuple(files) != LIBERATOR_FILENAMES:
-        raise ValueError("Suite TV export files do not match the Liberator schema")
+    validate_liberator_files(files)
 
     descriptor = os.open(
         path,
@@ -358,12 +570,12 @@ def write_suite_tv_zip(path: Path, files: Mapping[str, bytes]) -> None:
             with zipfile.ZipFile(
                 output,
                 "w",
-                compression=zipfile.ZIP_DEFLATED,
+                compression=zipfile.ZIP_STORED,
             ) as archive:
                 for name in LIBERATOR_FILENAMES:
                     info = zipfile.ZipInfo(name)
                     info.create_system = 3
-                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.compress_type = zipfile.ZIP_STORED
                     info.external_attr = (stat.S_IFREG | 0o600) << 16
                     archive.writestr(info, files[name])
     finally:

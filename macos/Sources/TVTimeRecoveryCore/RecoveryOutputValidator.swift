@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -18,6 +19,27 @@ enum RecoveryOutputValidator {
   private static let maximumCSVMetadataStringBytes = 1_024
   private static let sourceSnapshotContract = "tvtime-source-snapshot-v0.2"
   private static let rawTreeDigestPrefix = Data("tvtime-raw-tree-digest-v0.2\0".utf8)
+  private static let suiteTVFilenames = [
+    "shows.json",
+    "movies.json",
+    "favorites.json",
+    "lists.json",
+    "activity_history.csv",
+  ]
+  private static let suiteTVActivityHeader = [
+    "imdb_id",
+    "tvdb_id",
+    "type",
+    "title",
+    "season",
+    "episode",
+    "is_special",
+    "is_watched",
+    "watched_at",
+    "status",
+    "is_watchlisted",
+    "rating",
+  ]
   private static let trustedDarwinRootAliases = [
     (alias: "/etc", target: "/private/etc"),
     (alias: "/tmp", target: "/private/tmp"),
@@ -863,14 +885,14 @@ enum RecoveryOutputValidator {
         relativePath: "analysis/Suite-TV-Liberator-confirmed.zip",
         maximumBytes: maximumArtifactBytes,
         format: .zip,
-        captureAll: false
+        captureAll: true
       ),
       ExpectedArtifact(
         id: "suite_tv_liberator_estimated_progress",
         relativePath: "analysis/Suite-TV-Liberator-estimated-progress.zip",
         maximumBytes: maximumArtifactBytes,
         format: .zip,
-        captureAll: false
+        captureAll: true
       ),
       ExpectedArtifact(
         id: "markdown_report",
@@ -2360,6 +2382,10 @@ enum RecoveryOutputValidator {
   }
 
   private static func validateFormat(_ prefix: Data, expected: ArtifactFormat) throws {
+    if case .zip = expected {
+      try validateSuiteTVArchive(prefix)
+      return
+    }
     let valid: Bool =
       switch expected {
       case .json:
@@ -2377,11 +2403,525 @@ enum RecoveryOutputValidator {
       case .pdf:
         prefix.starts(with: Data("%PDF-".utf8))
       case .zip:
-        prefix.starts(with: Data([0x50, 0x4B, 0x03, 0x04]))
+        false
       }
     guard valid else {
       throw RecoveryOutputValidationError.artifactIntegrityFailure
     }
+  }
+
+  private struct SuiteTVZipEntry {
+    let name: String
+    let data: Data
+    let checksum: UInt32
+    let localOffset: Int
+  }
+
+  private static func validateSuiteTVArchive(_ archive: Data) throws {
+    var cursor = 0
+    var entries: [SuiteTVZipEntry] = []
+    for expectedName in suiteTVFilenames {
+      try Task.checkCancellation()
+      let localOffset = cursor
+      guard
+        try zipUInt32(archive, at: cursor) == 0x0403_4B50,
+        try zipUInt16(archive, at: cursor + 6) == 0,
+        try zipUInt16(archive, at: cursor + 8) == 0
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      let checksum = try zipUInt32(archive, at: cursor + 14)
+      let compressedBytes = try zipInteger(archive, at: cursor + 18, width: 4)
+      let uncompressedBytes = try zipInteger(archive, at: cursor + 22, width: 4)
+      let nameBytes = try zipInteger(archive, at: cursor + 26, width: 2)
+      let extraBytes = try zipInteger(archive, at: cursor + 28, width: 2)
+      guard compressedBytes == uncompressedBytes, uncompressedBytes > 0 else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      let nameStart = try checkedZipOffset(cursor, adding: 30)
+      let nameEnd = try checkedZipOffset(nameStart, adding: nameBytes)
+      let dataStart = try checkedZipOffset(nameEnd, adding: extraBytes)
+      let dataEnd = try checkedZipOffset(dataStart, adding: uncompressedBytes)
+      guard
+        dataEnd <= archive.count,
+        let name = String(data: archive[nameStart..<nameEnd], encoding: .utf8),
+        name == expectedName
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      let payload = Data(archive[dataStart..<dataEnd])
+      guard zipCRC32(payload) == checksum else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      entries.append(
+        SuiteTVZipEntry(
+          name: name,
+          data: payload,
+          checksum: checksum,
+          localOffset: localOffset
+        )
+      )
+      cursor = dataEnd
+    }
+
+    let centralStart = cursor
+    for (index, expectedName) in suiteTVFilenames.enumerated() {
+      try Task.checkCancellation()
+      guard
+        try zipUInt32(archive, at: cursor) == 0x0201_4B50,
+        try zipUInt16(archive, at: cursor + 8) == 0,
+        try zipUInt16(archive, at: cursor + 10) == 0
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      let checksum = try zipUInt32(archive, at: cursor + 16)
+      let compressedBytes = try zipInteger(archive, at: cursor + 20, width: 4)
+      let uncompressedBytes = try zipInteger(archive, at: cursor + 24, width: 4)
+      let nameBytes = try zipInteger(archive, at: cursor + 28, width: 2)
+      let extraBytes = try zipInteger(archive, at: cursor + 30, width: 2)
+      let commentBytes = try zipInteger(archive, at: cursor + 32, width: 2)
+      let diskNumber = try zipUInt16(archive, at: cursor + 34)
+      let localOffset = try zipInteger(archive, at: cursor + 42, width: 4)
+      let nameStart = try checkedZipOffset(cursor, adding: 46)
+      let nameEnd = try checkedZipOffset(nameStart, adding: nameBytes)
+      let entryEnd = try checkedZipOffset(
+        nameEnd,
+        adding: try checkedZipOffset(extraBytes, adding: commentBytes)
+      )
+      let local = entries[index]
+      guard
+        entryEnd <= archive.count,
+        diskNumber == 0,
+        checksum == local.checksum,
+        compressedBytes == local.data.count,
+        uncompressedBytes == local.data.count,
+        localOffset == local.localOffset,
+        let name = String(data: archive[nameStart..<nameEnd], encoding: .utf8),
+        name == expectedName,
+        name == local.name
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      cursor = entryEnd
+    }
+
+    let centralBytes = cursor - centralStart
+    guard
+      try zipUInt32(archive, at: cursor) == 0x0605_4B50,
+      try zipUInt16(archive, at: cursor + 4) == 0,
+      try zipUInt16(archive, at: cursor + 6) == 0,
+      try zipInteger(archive, at: cursor + 8, width: 2) == suiteTVFilenames.count,
+      try zipInteger(archive, at: cursor + 10, width: 2) == suiteTVFilenames.count,
+      try zipInteger(archive, at: cursor + 12, width: 4) == centralBytes,
+      try zipInteger(archive, at: cursor + 16, width: 4) == centralStart,
+      try zipUInt16(archive, at: cursor + 20) == 0,
+      try checkedZipOffset(cursor, adding: 22) == archive.count
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+
+    try validateSuiteTVFiles(
+      Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0.data) })
+    )
+  }
+
+  private static func validateSuiteTVFiles(_ files: [String: Data]) throws {
+    guard Set(files.keys) == Set(suiteTVFilenames) else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    let shows = try suiteTVJSONArray(files["shows.json"])
+    let movies = try suiteTVJSONArray(files["movies.json"])
+    let favorites = try suiteTVJSONObject(files["favorites.json"])
+    guard try suiteTVJSONArray(files["lists.json"]).isEmpty else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+
+    var showsByKey: [String: [String: Any]] = [:]
+    for value in shows {
+      let show = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "status", "seasons", "created_at"]
+      )
+      let id = try suiteTVIdentifier(show["id"])
+      let uuid = try suiteTVString(show["uuid"])
+      _ = try suiteTVString(show["title"])
+      _ = try suiteTVString(show["created_at"])
+      guard
+        let status = show["status"] as? String,
+        ["stopped", "not_started_yet", "up_to_date", "continuing"].contains(status),
+        let seasons = show["seasons"] as? [Any]
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      var episodeIDs: Set<Int64> = []
+      for seasonValue in seasons {
+        let season = try suiteTVObject(seasonValue, keys: ["number", "episodes"])
+        _ = try suiteTVInteger(season["number"], minimum: 0)
+        guard let episodes = season["episodes"] as? [Any] else {
+          throw RecoveryOutputValidationError.artifactIntegrityFailure
+        }
+        for episodeValue in episodes {
+          let episode = try suiteTVObject(
+            episodeValue,
+            keys: ["number", "special", "id", "rating", "is_watched"],
+            optionalKeys: ["watched_at"]
+          )
+          _ = try suiteTVInteger(episode["number"], minimum: 1)
+          let episodeID = try suiteTVIdentifier(episode["id"]).tvdb
+          guard
+            episodeIDs.insert(episodeID).inserted,
+            episode["special"] is Bool,
+            episode["is_watched"] is Bool,
+            episode["rating"] is NSNull
+          else {
+            throw RecoveryOutputValidationError.artifactIntegrityFailure
+          }
+          if let watchedAt = episode["watched_at"] {
+            _ = try suiteTVString(watchedAt)
+          }
+        }
+      }
+      let key = suiteTVKey(id: id.tvdb, uuid: uuid)
+      guard showsByKey.updateValue(show, forKey: key) == nil else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+    }
+
+    var moviesByKey: [String: [String: Any]] = [:]
+    for value in movies {
+      let movie = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "created_at", "rating", "is_watched", "rewatch_count"],
+        optionalKeys: ["watched_at"]
+      )
+      let id = try suiteTVIdentifier(movie["id"])
+      let uuid = try suiteTVString(movie["uuid"])
+      _ = try suiteTVString(movie["title"])
+      _ = try suiteTVString(movie["created_at"])
+      _ = try suiteTVInteger(movie["rewatch_count"], minimum: 0)
+      guard movie["rating"] is NSNull, movie["is_watched"] is Bool else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      if let watchedAt = movie["watched_at"] {
+        _ = try suiteTVString(watchedAt)
+      }
+      let key = suiteTVKey(id: id.tvdb, uuid: uuid)
+      guard moviesByKey.updateValue(movie, forKey: key) == nil else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+    }
+
+    guard
+      Set(favorites.keys) == ["name", "description", "is_public", "movies", "shows"],
+      favorites["name"] as? String == "Favorites",
+      favorites["description"] is String,
+      favorites["is_public"] as? Bool == false,
+      let favoriteMovies = favorites["movies"] as? [Any],
+      let favoriteShows = favorites["shows"] as? [Any]
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    for value in favoriteMovies {
+      let favorite = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "created_at", "rating", "added_at"]
+      )
+      let id = try suiteTVIdentifier(favorite["id"])
+      let uuid = try suiteTVString(favorite["uuid"])
+      _ = try suiteTVString(favorite["added_at"])
+      guard
+        let source = moviesByKey[suiteTVKey(id: id.tvdb, uuid: uuid)],
+        suiteTVEqual(favorite["title"], source["title"]),
+        suiteTVEqual(favorite["created_at"], source["created_at"]),
+        suiteTVEqual(favorite["rating"], source["rating"])
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+    }
+    for value in favoriteShows {
+      let favorite = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "seasons", "created_at", "added_at"]
+      )
+      let id = try suiteTVIdentifier(favorite["id"])
+      let uuid = try suiteTVString(favorite["uuid"])
+      _ = try suiteTVString(favorite["added_at"])
+      guard
+        let source = showsByKey[suiteTVKey(id: id.tvdb, uuid: uuid)],
+        suiteTVEqual(favorite["title"], source["title"]),
+        suiteTVEqual(favorite["seasons"], source["seasons"]),
+        suiteTVEqual(favorite["created_at"], source["created_at"])
+      else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+    }
+
+    let expectedActivity = try suiteTVActivityCSV(shows: shows, movies: movies)
+    guard files["activity_history.csv"] == expectedActivity else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+  }
+
+  private static func suiteTVActivityCSV(shows: [Any], movies: [Any]) throws -> Data {
+    var rows: [[String]] = [suiteTVActivityHeader]
+    for value in movies {
+      let movie = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "created_at", "rating", "is_watched", "rewatch_count"],
+        optionalKeys: ["watched_at"]
+      )
+      let id = try suiteTVIdentifier(movie["id"])
+      guard let watched = movie["is_watched"] as? Bool else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      let watchedAt = try movie["watched_at"].map(suiteTVString) ?? ""
+      rows.append([
+        id.imdb,
+        String(id.tvdb),
+        "movie",
+        try suiteTVString(movie["title"]),
+        "",
+        "",
+        "false",
+        watched ? "true" : "false",
+        watchedAt,
+        "",
+        watchedAt.isEmpty ? "true" : "false",
+        "",
+      ])
+    }
+    for value in shows {
+      let show = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "status", "seasons", "created_at"]
+      )
+      let title = try suiteTVString(show["title"])
+      let status = try suiteTVString(show["status"])
+      guard let seasons = show["seasons"] as? [Any] else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      for seasonValue in seasons {
+        let season = try suiteTVObject(seasonValue, keys: ["number", "episodes"])
+        let seasonNumber = try suiteTVInteger(season["number"], minimum: 0)
+        guard let episodes = season["episodes"] as? [Any] else {
+          throw RecoveryOutputValidationError.artifactIntegrityFailure
+        }
+        for episodeValue in episodes {
+          let episode = try suiteTVObject(
+            episodeValue,
+            keys: ["number", "special", "id", "rating", "is_watched"],
+            optionalKeys: ["watched_at"]
+          )
+          guard
+            let watched = episode["is_watched"] as? Bool,
+            let special = episode["special"] as? Bool
+          else {
+            throw RecoveryOutputValidationError.artifactIntegrityFailure
+          }
+          if !watched {
+            continue
+          }
+          let id = try suiteTVIdentifier(episode["id"])
+          let watchedAt = try episode["watched_at"].map(suiteTVString) ?? ""
+          rows.append([
+            id.imdb,
+            String(id.tvdb),
+            "episode",
+            title,
+            String(seasonNumber),
+            String(try suiteTVInteger(episode["number"], minimum: 1)),
+            special ? "true" : "false",
+            "true",
+            watchedAt,
+            status,
+            watchedAt.isEmpty ? "true" : "false",
+            "",
+          ])
+        }
+      }
+    }
+    for value in shows {
+      let show = try suiteTVObject(
+        value,
+        keys: ["id", "uuid", "title", "status", "seasons", "created_at"]
+      )
+      let id = try suiteTVIdentifier(show["id"])
+      guard let seasons = show["seasons"] as? [Any] else {
+        throw RecoveryOutputValidationError.artifactIntegrityFailure
+      }
+      var hasUnwatched = false
+      for seasonValue in seasons {
+        let season = try suiteTVObject(seasonValue, keys: ["number", "episodes"])
+        guard let episodes = season["episodes"] as? [Any] else {
+          throw RecoveryOutputValidationError.artifactIntegrityFailure
+        }
+        for episodeValue in episodes {
+          let episode = try suiteTVObject(
+            episodeValue,
+            keys: ["number", "special", "id", "rating", "is_watched"],
+            optionalKeys: ["watched_at"]
+          )
+          guard let watched = episode["is_watched"] as? Bool else {
+            throw RecoveryOutputValidationError.artifactIntegrityFailure
+          }
+          hasUnwatched = hasUnwatched || !watched
+        }
+      }
+      rows.append([
+        id.imdb,
+        String(id.tvdb),
+        "show",
+        try suiteTVString(show["title"]),
+        "",
+        "",
+        "",
+        "",
+        "",
+        try suiteTVString(show["status"]),
+        hasUnwatched ? "true" : "false",
+        "",
+      ])
+    }
+    return Data(
+      (rows.map { row in row.map(suiteTVCSVCell).joined(separator: ",") }
+        .joined(separator: "\r\n") + "\r\n").utf8
+    )
+  }
+
+  private static func suiteTVCSVCell(_ value: String) -> String {
+    guard value.contains(where: { $0 == "," || $0 == "\"" || $0 == "\r" || $0 == "\n" })
+    else {
+      return value
+    }
+    return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+  }
+
+  private static func suiteTVJSONArray(_ data: Data?) throws -> [Any] {
+    guard
+      let data,
+      let value = try? JSONSerialization.jsonObject(with: data),
+      let array = value as? [Any]
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return array
+  }
+
+  private static func suiteTVJSONObject(_ data: Data?) throws -> [String: Any] {
+    guard
+      let data,
+      let value = try? JSONSerialization.jsonObject(with: data),
+      let object = value as? [String: Any]
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return object
+  }
+
+  private static func suiteTVObject(
+    _ value: Any,
+    keys: Set<String>,
+    optionalKeys: Set<String> = []
+  ) throws -> [String: Any] {
+    guard let object = value as? [String: Any] else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    let observedKeys = Set(object.keys)
+    guard
+      observedKeys.isSuperset(of: keys),
+      observedKeys.isSubset(of: keys.union(optionalKeys))
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return object
+  }
+
+  private static func suiteTVIdentifier(_ value: Any?) throws -> (tvdb: Int64, imdb: String) {
+    let object = try suiteTVObject(value as Any, keys: ["tvdb", "imdb"])
+    return (
+      try suiteTVInteger(object["tvdb"], minimum: 1),
+      try suiteTVString(object["imdb"])
+    )
+  }
+
+  private static func suiteTVInteger(_ value: Any?, minimum: Int64) throws -> Int64 {
+    guard
+      let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      !["f", "d"].contains(String(cString: number.objCType)),
+      number.int64Value >= minimum
+    else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return number.int64Value
+  }
+
+  private static func suiteTVString(_ value: Any?) throws -> String {
+    guard let string = value as? String else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return string
+  }
+
+  private static func suiteTVKey(id: Int64, uuid: String) -> String {
+    "\(id)\u{0}\(uuid)"
+  }
+
+  private static func suiteTVEqual(_ left: Any?, _ right: Any?) -> Bool {
+    guard let left, let right else {
+      return left == nil && right == nil
+    }
+    return (left as AnyObject).isEqual(right)
+  }
+
+  private static func zipInteger(_ data: Data, at offset: Int, width: Int) throws -> Int {
+    switch width {
+    case 2:
+      return Int(try zipUInt16(data, at: offset))
+    case 4:
+      let value = try zipUInt32(data, at: offset)
+      return Int(value)
+    default:
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+  }
+
+  private static func zipUInt16(_ data: Data, at offset: Int) throws -> UInt16 {
+    guard offset >= 0, offset <= data.count - 2 else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    let start = data.startIndex + offset
+    return UInt16(data[start]) | (UInt16(data[start + 1]) << 8)
+  }
+
+  private static func zipUInt32(_ data: Data, at offset: Int) throws -> UInt32 {
+    guard offset >= 0, offset <= data.count - 4 else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    let start = data.startIndex + offset
+    return UInt32(data[start])
+      | (UInt32(data[start + 1]) << 8)
+      | (UInt32(data[start + 2]) << 16)
+      | (UInt32(data[start + 3]) << 24)
+  }
+
+  private static func checkedZipOffset(_ offset: Int, adding value: Int) throws -> Int {
+    let (result, overflow) = offset.addingReportingOverflow(value)
+    guard offset >= 0, value >= 0, !overflow else {
+      throw RecoveryOutputValidationError.artifactIntegrityFailure
+    }
+    return result
+  }
+
+  private static func zipCRC32(_ data: Data) -> UInt32 {
+    var checksum = UInt32.max
+    for byte in data {
+      checksum ^= UInt32(byte)
+      for _ in 0..<8 {
+        checksum = (checksum >> 1) ^ (0xEDB8_8320 & (0 &- (checksum & 1)))
+      }
+    }
+    return checksum ^ UInt32.max
   }
 
   private static func hasValidUTF8Lines(_ data: Data) -> Bool {

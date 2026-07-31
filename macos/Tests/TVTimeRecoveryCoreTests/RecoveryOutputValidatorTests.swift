@@ -760,6 +760,32 @@ final class RecoveryOutputValidatorTests {
   }
 
   @Test
+  func testRejectsResealedSuiteTVArchiveWithInvalidIdentifiersOrPublicFavorites() throws {
+    for (showTVDBID, favoritesPublic) in [(0, false), (101, true)] {
+      let summary = TestFixtures.summary()
+      let root = try makeOutput(summary: summary)
+      let archive = root.appendingPathComponent(
+        "TVTime-Extraction/analysis/Suite-TV-Liberator-confirmed.zip"
+      )
+      try TestFixtures.writePrivate(
+        try TestFixtures.suiteTVArchive(
+          showTVDBID: showTVDBID,
+          favoritesPublic: favoritesPublic
+        ),
+        at: archive
+      )
+      try TestFixtures.refreshArtifactBinding(
+        beneath: root,
+        id: "suite_tv_liberator_confirmed"
+      )
+
+      assertValidationError(.artifactIntegrityFailure) {
+        try RecoveryOutputValidator.validate(summary, beneath: root)
+      }
+    }
+  }
+
+  @Test
   func testRejectsMarkerHashSizeCountPDFAndArtifactSetMismatches() throws {
     let summary = TestFixtures.summary()
     let badHash = try makeOutput(summary: summary)

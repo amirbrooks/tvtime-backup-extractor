@@ -96,7 +96,9 @@ watch state was recovered directly. Use `Suite-TV-Liberator-estimated-progress.z
 preserving a recovered aggregate series count is more useful than exact episode selection. That
 archive retains exact watches, never estimates specials, and fills the oldest unwatched regular
 episodes until the aggregate count is reached. It cannot infer skipped or out-of-order episodes.
-Movies without a recovered positive TVDB identifier are omitted from both archives.
+Movies without a recovered positive TVDB identifier are omitted from both archives. The generated
+Favorites list is always private, even though the upstream Liberator currently labels that list
+public.
 
 ## Completion markers and atomic promotion
 
@@ -109,8 +111,8 @@ been revalidated.
 `analysis/recovery_state.json` uses the versioned v0.2 contract. It is written with
 `status: complete` in a private staging directory only
 after the Markdown, HTML, and Suite TV archives are complete and the PDF has either been generated
-faithfully or explicitly omitted. It binds an exact ordered artifact set—including
-`metadata/domains.txt`—with
+faithfully or explicitly omitted. It binds an exact ordered artifact set, including
+`metadata/domains.txt`, with
 byte sizes, lowercase SHA-256 digests, aggregate extraction/analysis/report counts, and PDF presence
 state. The exact bounded serialized marker bytes are read back after writing and again immediately
 before the entire staged analysis directory is promoted atomically.
