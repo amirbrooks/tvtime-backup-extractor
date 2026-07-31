@@ -1339,6 +1339,9 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                     return_value=(101, (7, 11)),
                 ),
                 mock.patch(
+                    "tvtime_extractor.safety._windows_native.require_recovery_capabilities"
+                ) as require_capabilities,
+                mock.patch(
                     "tvtime_extractor.safety.require_bound_destination_parent",
                     return_value=output.parent,
                 ),
@@ -1355,6 +1358,36 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                 )
                 self.assertEqual(closed, [])
                 raise RuntimeError("synthetic body failure")
+            require_capabilities.assert_called_once_with(101)
+            self.assertEqual(closed, [101])
+
+    def test_windows_parent_requires_acl_capabilities_before_binding_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "fresh-output"
+            closed: list[int] = []
+            with (
+                mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+                mock.patch(
+                    "tvtime_extractor.safety._windows_open_locked_directory",
+                    return_value=(101, (7, 11)),
+                ),
+                mock.patch(
+                    "tvtime_extractor.safety._windows_native.require_recovery_capabilities",
+                    side_effect=WindowsUnsupportedError("synthetic unsupported filesystem"),
+                ) as require_capabilities,
+                mock.patch(
+                    "tvtime_extractor.safety.require_bound_destination_parent"
+                ) as require_binding,
+                mock.patch(
+                    "tvtime_extractor.safety._windows_close_handle",
+                    side_effect=closed.append,
+                ),
+                self.assertRaisesRegex(UnsafePathError, "local NTFS destination"),
+                held_destination_parent(output),
+            ):
+                self.fail("unsupported Windows output must fail before entering the body")
+            require_capabilities.assert_called_once_with(101)
+            require_binding.assert_not_called()
             self.assertEqual(closed, [101])
 
     def test_windows_fresh_output_uses_atomic_relative_native_creation(self) -> None:

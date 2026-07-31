@@ -1531,6 +1531,13 @@ def held_destination_parent(
                 parent,
                 allow_child_creation=True,
             )
+            try:
+                _windows_native.require_recovery_capabilities(handle)
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "Windows recovery requires a local NTFS destination with persistent "
+                    "access controls."
+                ) from exc
         else:
             try:
                 handle = os.open(parent, _descriptor_flags(stat.S_IFDIR))
