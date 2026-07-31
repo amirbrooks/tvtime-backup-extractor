@@ -47,6 +47,7 @@ from tvtime_extractor.safety import (
     prepare_anchored_extraction_layout,
     prepare_extraction_layout,
     private_source_id,
+    private_temporary_directory,
     promote_directory_no_replace_atomic,
     promote_file_no_replace_atomic,
     read_regular_bytes,
@@ -1120,6 +1121,19 @@ class DestinationSafetyTests(unittest.TestCase):
 
 
 class WindowsDirectoryHandleContractTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "real Win32 temporary-capability regression")
+    def test_private_temporary_directory_releases_its_capability_before_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with anchored_existing_extraction_root(root):
+                with private_temporary_directory(
+                    parent=root,
+                    prefix=".tvtime-sqlite-",
+                ) as staging:
+                    staged_path = staging
+                    (staging / "synthetic.sqlite").write_bytes(b"synthetic")
+                self.assertFalse(staged_path.exists())
+
     def test_windows_ios_gate_requires_reviewed_runtime_before_password(self) -> None:
         with (
             mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),

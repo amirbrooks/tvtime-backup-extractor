@@ -1358,6 +1358,46 @@ def _windows_close_bound_descendant_directories(state: _WindowsBoundOutputState)
         raise validation_error
 
 
+def _windows_release_bound_descendant_directory(path: Path) -> None:
+    """Release one empty ephemeral directory before its scoped cleanup."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        return
+    candidate = no_link_absolute_path(path)
+    key = _casefolded_path(candidate)
+    entry = state.descendant_handles.get(key)
+    if entry is None:
+        return
+    for other_key, (
+        other_visible,
+        _other_handle,
+        _other_identity,
+    ) in state.descendant_handles.items():
+        if other_key != key and _is_within_casefolded(other_visible, candidate):
+            raise UnsafePathError(
+                "A temporary Windows recovery directory still retained a child capability."
+            )
+
+    visible, handle, identity = entry
+    validation_error: BaseException | None = None
+    try:
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+    except BaseException as exc:
+        validation_error = exc
+    finally:
+        state.descendant_handles.pop(key, None)
+        try:
+            _windows_close_handle(handle)
+        except BaseException as exc:
+            if validation_error is None:
+                validation_error = exc
+    if validation_error is not None:
+        raise validation_error
+
+
 def _windows_hold_existing_descendant_directories(root: Path) -> None:
     """Pin every existing directory in a selected private tree before traversal."""
 
@@ -2393,6 +2433,24 @@ def secure_directory(path: Path) -> Path:
         if _running_on_windows():
             _windows_hold_bound_descendant_directory(directory)
     return resolved
+
+
+@contextmanager
+def private_temporary_directory(
+    *,
+    parent: Path,
+    prefix: str,
+) -> Iterator[Path]:
+    """Create a private temporary directory with a bounded Windows capability lifetime."""
+
+    if not prefix or any(character in prefix for character in ("/", "\\", "\x00")):
+        raise ValueError("A private temporary-directory prefix must be one safe path component.")
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
+        directory = secure_directory(Path(temporary))
+        try:
+            yield directory
+        finally:
+            _windows_release_bound_descendant_directory(directory)
 
 
 def _is_link_or_reparse_point(path: Path) -> bool:

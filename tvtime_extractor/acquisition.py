@@ -108,7 +108,7 @@ class AndroidBackupEncryption(str, Enum):
     AES_256 = "AES-256"
 
 
-SourceIdentity = tuple[int, int]
+SourceIdentity = tuple[int, int, int, int]
 SourceFileReceipt = tuple[str, int, str, SourceIdentity]
 
 
@@ -178,11 +178,20 @@ def _source_file_snapshot(
             digest.update(chunk)
     if byte_count != opened.st_size:
         raise SourceChangedError("The selected Android source changed while it was inspected.")
-    return byte_count, digest.hexdigest(), (int(opened.st_dev), int(opened.st_ino))
+    return byte_count, digest.hexdigest(), _source_identity(opened)
+
+
+def _source_identity(metadata: os.stat_result) -> SourceIdentity:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
 
 
 def _require_source_identity(metadata: os.stat_result, expected: SourceIdentity | None) -> None:
-    if expected is not None and (int(metadata.st_dev), int(metadata.st_ino)) != expected:
+    if expected is not None and _source_identity(metadata) != expected:
         raise SourceChangedError("The selected source identity changed during acquisition.")
 
 
@@ -339,7 +348,7 @@ def inspect_android_backup_descriptor(
         header_bytes=header_bytes,
         byte_count=byte_count,
         digest=digest.hexdigest(),
-        identity=(int(before.st_dev), int(before.st_ino)),
+        identity=_source_identity(before),
     )
 
 
@@ -782,7 +791,7 @@ def inspect_android_snapshot(
     aggregate = hashlib.sha256()
     for filename, size, digest, identity in source_files:
         aggregate.update(f"{filename}\0{size}\0{digest}\n".encode("ascii"))
-        aggregate.update(f"{identity[0]}\0{identity[1]}\n".encode("ascii"))
+        aggregate.update(("\0".join(str(value) for value in identity) + "\n").encode("ascii"))
     return AcquisitionPreflight(
         source_kind=RecoverySourceKind.ANDROID_PRESERVED_SNAPSHOT,
         source_bytes=byte_count,
@@ -1193,7 +1202,10 @@ def _write_official_export_cache(
             expected_identity = (int(metadata.st_dev), int(metadata.st_ino))
         secure_file(target)
         with regular_binary_reader(target, require_private=True) as (reader, opened):
-            _require_source_identity(opened, expected_identity)
+            if (int(opened.st_dev), int(opened.st_ino)) != expected_identity:
+                raise SourceChangedError(
+                    "The normalized official export cache changed while it was sealed."
+                )
             digest = hashlib.sha256()
             byte_count = 0
             while True:

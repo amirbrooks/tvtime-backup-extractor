@@ -7,7 +7,6 @@ import os
 import plistlib
 import sqlite3
 import stat
-import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
@@ -36,6 +35,7 @@ from .safety import (
     iter_regular_files,
     prepare_analysis_layout,
     private_source_id,
+    private_temporary_directory,
     promote_directory_no_replace_atomic,
     read_json_regular,
     regular_binary_reader,
@@ -593,8 +593,10 @@ def readonly_sqlite(
     expected_main_metadata: os.stat_result | None = None,
     require_private_source: bool = False,
 ) -> Iterator[sqlite3.Connection]:
-    with tempfile.TemporaryDirectory(prefix=".tvtime-sqlite-", dir=path.parent) as temporary:
-        snapshot_directory = secure_directory(Path(temporary))
+    with private_temporary_directory(
+        prefix=".tvtime-sqlite-",
+        parent=path.parent,
+    ) as snapshot_directory:
         snapshot = snapshot_directory / path.name
 
         def copy_snapshot(held_metadata: os.stat_result) -> None:

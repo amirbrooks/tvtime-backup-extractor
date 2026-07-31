@@ -25,6 +25,8 @@ from tvtime_extractor.acquisition import (
     _BoundedDecompressingReader,
     _official_export_members,
     _read_official_export_payloads,
+    _require_source_identity,
+    _source_identity,
     _write_official_export_cache,
     inspect_android_backup,
     inspect_android_snapshot,
@@ -64,6 +66,27 @@ class AndroidBackupHeaderTests(unittest.TestCase):
 
 
 class AndroidAcquisitionTests(unittest.TestCase):
+    def test_source_identity_includes_change_and_write_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic-source"
+            source.write_bytes(b"synthetic")
+            metadata = source.stat()
+            identity = _source_identity(metadata)
+
+            self.assertEqual(
+                identity,
+                (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                ),
+            )
+            changed = list(identity)
+            changed[-1] += 1
+            with self.assertRaises(SourceChangedError):
+                _require_source_identity(metadata, tuple(changed))
+
     def test_destination_parent_is_held_during_source_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
