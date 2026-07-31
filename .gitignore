@@ -23,6 +23,14 @@ tmp/
 .build-tools/
 .swiftpm/
 macos/.build/
+dist-windows-private/
+windows/TVTimeRecovery.Windows/Assets/
+windows/TVTimeRecovery.Windows/Helpers/
+windows/TVTimeRecovery.Windows/Notices/
+windows/TVTimeRecovery.Windows/bin/
+windows/TVTimeRecovery.Windows/obj/
+windows/TVTimeRecovery.Windows.CompileCheck/bin/
+windows/TVTimeRecovery.Windows.CompileCheck/obj/
 
 # Editors and operating systems
 .DS_Store
