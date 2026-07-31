@@ -91,6 +91,28 @@ jobs:
           tvtime-extractor analyze --help
           tvtime-extractor report --help
 
+  windows-native-compile:
+    name: Native Windows compile and validator smoke
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: "8.0.423"
+      - name: Restore exact locked Windows dependencies
+        run: >-
+          dotnet restore
+          windows/TVTimeRecovery.Windows.CompileCheck/TVTimeRecovery.Windows.CompileCheck.csproj
+          --locked-mode
+      - name: Compile and run the synthetic native validator
+        run: >-
+          dotnet run
+          --project windows/TVTimeRecovery.Windows.CompileCheck/TVTimeRecovery.Windows.CompileCheck.csproj
+          --configuration Release
+          --no-restore
+
   macos-app:
     name: Native macOS app
     runs-on: macos-latest

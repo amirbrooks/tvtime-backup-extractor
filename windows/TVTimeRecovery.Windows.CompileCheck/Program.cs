@@ -14,12 +14,14 @@ internal static class CompileCheckProgram
         Directory.CreateDirectory(temporaryRoot);
         try
         {
+            RequireArtifactContractLimits();
             var output = CreateValidOutput(temporaryRoot);
             using (var accepted = RecoveryOutputValidator.ValidateCompletedOutput(output))
             {
                 Require(File.Exists(accepted.MarkdownReport));
                 Require(File.Exists(accepted.HtmlReport));
             }
+            RequireCancellation(output);
 
             var rejected = 0;
             var analysis = Path.Combine(output, "TVTime-Extraction", "analysis");
@@ -88,6 +90,27 @@ internal static class CompileCheckProgram
                     "tvtime-windows-validator-", StringComparison.Ordinal))
                 Directory.Delete(temporaryRoot, recursive: true);
         }
+    }
+
+    private static void RequireArtifactContractLimits()
+    {
+        Require(RecoveryArtifactContract.MaximumStateBytes == 64L * 1024);
+        Require(RecoveryArtifactContract.MaximumSummaryBytes == 16L * 1024 * 1024);
+        Require(RecoveryArtifactContract.MaximumGeneratedArtifactBytes == 64L * 1024 * 1024);
+        Require(RecoveryArtifactContract.MaximumInventoryBytes == 256L * 1024 * 1024);
+        Require(RecoveryArtifactContract.MaximumDomainsBytes == 32L * 1024);
+        Require(
+            RecoveryArtifactContract.MaximumBytesFor("extraction_run_state") ==
+            RecoveryArtifactContract.MaximumStateBytes);
+        Require(
+            RecoveryArtifactContract.MaximumBytesFor("extraction_inventory") ==
+            RecoveryArtifactContract.MaximumInventoryBytes);
+        Require(
+            RecoveryArtifactContract.MaximumBytesFor("analysis_summary") ==
+            RecoveryArtifactContract.MaximumSummaryBytes);
+        Require(
+            RecoveryArtifactContract.MaximumBytesFor("markdown_report") ==
+            RecoveryArtifactContract.MaximumGeneratedArtifactBytes);
     }
 
     private static string CreateValidOutput(string temporaryRoot)
@@ -220,6 +243,20 @@ internal static class CompileCheckProgram
         catch
         {
             return true;
+        }
+    }
+
+    private static void RequireCancellation(string output)
+    {
+        try
+        {
+            using var accepted = RecoveryOutputValidator.ValidateCompletedOutput(
+                output,
+                new CancellationToken(canceled: true));
+            throw new InvalidOperationException("A cancelled synthetic validation was accepted.");
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 

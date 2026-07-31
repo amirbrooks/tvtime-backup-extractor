@@ -180,7 +180,9 @@ internal sealed class RecoveryCoordinator
             await AcquireAsync(
                 helper, sourceKind, backup, output, parent, password, progress, cancellationToken);
         }
-        return RecoveryOutputValidator.ValidateCompletedOutput(output);
+        return await Task.Run(
+            () => RecoveryOutputValidator.ValidateCompletedOutput(output, cancellationToken),
+            cancellationToken);
     }
 
     private static async Task RecoverEncryptedIosAsync(

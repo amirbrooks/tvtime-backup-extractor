@@ -12,6 +12,7 @@ from tvtime_extractor.android_device import (
     AndroidPackageState,
     _bounded_execute,
     _CommandResult,
+    _package_backup_allowed,
     capture_legacy_android_backup,
     privacy_safe_probe_payload,
     probe_android_device,
@@ -33,6 +34,46 @@ def _response(returncode: int = 0, stdout: bytes = b"") -> _CommandResult:
 
 
 class AndroidCapabilityProbeTests(unittest.TestCase):
+    def test_backup_flag_parser_handles_android_property_spellings(self) -> None:
+        for spelling in ("allowBackup", "allow_backup"):
+            for separator in ("=", " : "):
+                with self.subTest(spelling=spelling, separator=separator, value="true"):
+                    self.assertIs(
+                        _package_backup_allowed(f"targetSdk=30 {spelling}{separator}true"),
+                        True,
+                    )
+                with self.subTest(spelling=spelling, separator=separator, value="false"):
+                    self.assertIs(
+                        _package_backup_allowed(f"targetSdk=30 {spelling}{separator}false"),
+                        False,
+                    )
+
+        for flag_list in (
+            "flags=[ HAS_CODE ALLOW_BACKUP ]",
+            "flags=[HAS_CODE,ALLOW_BACKUP]",
+            "pkgFlags=[ HAS_CODE ALLOW_BACKUP ]",
+        ):
+            with self.subTest(flag_list=flag_list):
+                self.assertIs(_package_backup_allowed(flag_list), True)
+
+        for malformed in (
+            "targetSdk=30",
+            "not_allow_backup=true",
+            "allow_backup=trueish",
+            "allow_backup=falseish",
+            "flags=[ HAS_CODE NOT_ALLOW_BACKUP ]",
+            "flags=[ HAS_CODE ALLOW_BACKUP_EXTRA ]",
+            "flags=[ HAS_CODE ALLOW_BACKUP=trueish ]",
+            "privatePkgFlags=[ HAS_CODE ALLOW_BACKUP ]",
+        ):
+            with self.subTest(malformed=malformed):
+                self.assertIsNone(_package_backup_allowed(malformed))
+
+        self.assertIs(
+            _package_backup_allowed("allowBackup=true backupDisabled=true"),
+            False,
+        )
+
     def test_command_output_is_killed_at_the_privacy_bound(self) -> None:
         with self.assertRaisesRegex(Exception, "oversized diagnostic response"):
             _bounded_execute(

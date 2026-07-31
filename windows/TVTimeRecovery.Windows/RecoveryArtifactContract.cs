@@ -2,6 +2,12 @@ namespace TVTimeRecovery.Windows;
 
 internal static class RecoveryArtifactContract
 {
+    internal const long MaximumStateBytes = 64L * 1024;
+    internal const long MaximumSummaryBytes = 16L * 1024 * 1024;
+    internal const long MaximumGeneratedArtifactBytes = 64L * 1024 * 1024;
+    internal const long MaximumInventoryBytes = 256L * 1024 * 1024;
+    internal const long MaximumDomainsBytes = 32L * 1024;
+
     internal static readonly IReadOnlyDictionary<string, string> RequiredArtifacts =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -33,4 +39,13 @@ internal static class RecoveryArtifactContract
             ["markdown_report"] = "analysis/TVTime-Recovered-Data.md",
             ["html_report"] = "analysis/TVTime-Recovered-Data.html",
         };
+
+    internal static long MaximumBytesFor(string identifier) => identifier switch
+    {
+        "extraction_run_state" => MaximumStateBytes,
+        "extraction_inventory" => MaximumInventoryBytes,
+        "extraction_summary" or "analysis_summary" => MaximumSummaryBytes,
+        "extraction_domains" => MaximumDomainsBytes,
+        _ => MaximumGeneratedArtifactBytes,
+    };
 }

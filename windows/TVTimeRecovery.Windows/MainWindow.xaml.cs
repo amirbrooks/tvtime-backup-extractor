@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -12,13 +13,41 @@ public sealed partial class MainWindow : Window
     private string? _backupPath;
     private string _sourceKind = "ios_encrypted_backup";
     private CancellationTokenSource? _cancellation;
+    private Task? _activeRecovery;
     private ValidatedRecoveryOutput? _completedOutput;
+    private bool _closePending;
+    private bool _allowClose;
 
     public MainWindow()
     {
         InitializeComponent();
         SourceKind.SelectedIndex = 0;
-        Closed += (_, _) => _completedOutput?.Dispose();
+        AppWindow.Closing += Window_Closing;
+    }
+
+    private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        var activeRecovery = _activeRecovery;
+        if (_allowClose || activeRecovery is null)
+        {
+            ClearCompletedOutput();
+            return;
+        }
+
+        args.Cancel = true;
+        if (_closePending) return;
+        _closePending = true;
+        _cancellation?.Cancel();
+        try
+        {
+            await activeRecovery;
+        }
+        finally
+        {
+            ClearCompletedOutput();
+            _allowClose = true;
+            Close();
+        }
     }
 
     private async void SelectBackup_Click(object sender, RoutedEventArgs e)
@@ -51,8 +80,7 @@ public sealed partial class MainWindow : Window
         if (SourceKind.SelectedItem is not ComboBoxItem item || item.Tag is not string kind) return;
         _sourceKind = kind;
         _backupPath = null;
-        _completedOutput?.Dispose();
-        _completedOutput = null;
+        ClearCompletedOutput();
         ResultActions.Visibility = Visibility.Collapsed;
         SelectionStatus.Text = "No source selected";
         RecoverButton.IsEnabled = false;
@@ -72,7 +100,8 @@ public sealed partial class MainWindow : Window
 
     private async void Recover_Click(object sender, RoutedEventArgs e)
     {
-        if (_backupPath is null ||
+        var backupPath = _backupPath;
+        if (backupPath is null ||
             SensitiveConfirmation.IsChecked != true ||
             (_sourceKind == "ios_encrypted_backup" && BackupPassword.Password.Length == 0))
         {
@@ -82,23 +111,38 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (_activeRecovery is not null) return;
+        var sourceKind = _sourceKind;
+        var password = BackupPassword.Password;
+        BackupPassword.Password = string.Empty;
+        var activeRecovery = RunRecoveryAsync(sourceKind, backupPath, password);
+        _activeRecovery = activeRecovery;
+        try
+        {
+            await activeRecovery;
+        }
+        finally
+        {
+            if (ReferenceEquals(_activeRecovery, activeRecovery)) _activeRecovery = null;
+        }
+    }
+
+    private async Task RunRecoveryAsync(string sourceKind, string backupPath, string password)
+    {
         RecoverButton.IsEnabled = false;
         SelectBackupButton.IsEnabled = false;
         CancelButton.IsEnabled = true;
-        _completedOutput?.Dispose();
-        _completedOutput = null;
+        ClearCompletedOutput();
         ResultActions.Visibility = Visibility.Collapsed;
         _cancellation = new CancellationTokenSource();
         try
         {
             var outputParent = PrivateRecoveryStore.RequireEncryptedParent();
             var output = PrivateRecoveryStore.FreshOutput(outputParent);
-            var password = BackupPassword.Password;
-            BackupPassword.Password = string.Empty;
             var recovery = new RecoveryCoordinator();
             _completedOutput = await recovery.RecoverAsync(
-                _sourceKind,
-                _backupPath,
+                sourceKind,
+                backupPath,
                 output,
                 password,
                 progress => DispatcherQueue.TryEnqueue(() =>
@@ -148,6 +192,12 @@ public sealed partial class MainWindow : Window
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
         _cancellation?.Cancel();
+    }
+
+    private void ClearCompletedOutput()
+    {
+        _completedOutput?.Dispose();
+        _completedOutput = null;
     }
 
     private async void OpenMarkdown_Click(object sender, RoutedEventArgs e)

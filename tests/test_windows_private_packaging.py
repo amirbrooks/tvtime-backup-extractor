@@ -5,7 +5,14 @@ import re
 import unittest
 from pathlib import Path
 
-from tvtime_extractor.report import _BOUND_ARTIFACTS
+from tvtime_extractor.analyze import MAXIMUM_ANALYSIS_SUMMARY_BYTES
+from tvtime_extractor.integrity import MAXIMUM_INVENTORY_BYTES
+from tvtime_extractor.report import (
+    _BOUND_ARTIFACTS,
+    MAXIMUM_DOMAINS_BYTES,
+    MAXIMUM_REPORT_ARTIFACT_BYTES,
+)
+from tvtime_extractor.safety import MAXIMUM_COMPLETION_MARKER_BYTES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -13,6 +20,21 @@ ROOT = Path(__file__).resolve().parents[1]
 class WindowsPrivatePackagingContractTests(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
+
+    def read_windows_validator(self) -> str:
+        source_root = ROOT / "windows" / "TVTimeRecovery.Windows"
+        return "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(source_root.glob("RecoveryOutputValidator*.cs"))
+        )
+
+    def csharp_long_constant(self, source: str, name: str) -> int:
+        match = re.search(rf"\b{name}\s*=\s*([0-9L *]+);", source)
+        self.assertIsNotNone(match, name)
+        value = 1
+        for factor in match.group(1).split("*"):
+            value *= int(factor.strip().removesuffix("L"))
+        return value
 
     def test_windows_artifact_contract_matches_report_producer(self) -> None:
         contract = self.read("windows/TVTimeRecovery.Windows/RecoveryArtifactContract.cs")
@@ -25,12 +47,41 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         expected = dict(_BOUND_ARTIFACTS)
         self.assertEqual(entries, expected)
 
-        validator = self.read("windows/TVTimeRecovery.Windows/RecoveryOutputValidator.cs")
+        validator = self.read_windows_validator()
         harness = self.read("windows/TVTimeRecovery.Windows.CompileCheck/Program.cs")
         self.assertNotIn("RequiredArtifacts =", validator)
         self.assertNotIn("RequiredArtifacts =", harness)
         self.assertIn("RecoveryArtifactContract.RequiredArtifacts", validator)
         self.assertIn("RecoveryArtifactContract.RequiredArtifacts", harness)
+
+    def test_windows_generated_artifact_limits_match_the_python_product_contract(self) -> None:
+        contract = self.read("windows/TVTimeRecovery.Windows/RecoveryArtifactContract.cs")
+        expected = {
+            "MaximumStateBytes": MAXIMUM_COMPLETION_MARKER_BYTES,
+            "MaximumSummaryBytes": MAXIMUM_ANALYSIS_SUMMARY_BYTES,
+            "MaximumGeneratedArtifactBytes": MAXIMUM_REPORT_ARTIFACT_BYTES,
+            "MaximumInventoryBytes": MAXIMUM_INVENTORY_BYTES,
+            "MaximumDomainsBytes": MAXIMUM_DOMAINS_BYTES,
+        }
+        for name, value in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.csharp_long_constant(contract, name), value)
+
+        artifacts = self.read("windows/TVTimeRecovery.Windows/RecoveryOutputValidator.Artifacts.cs")
+        bound_check = "expectedBytes > RecoveryArtifactContract.MaximumBytesFor(identifier)"
+        self.assertIn(bound_check, artifacts)
+        self.assertLess(
+            artifacts.index(bound_check),
+            artifacts.index("HashStream(stream, cancellationToken)"),
+        )
+        for identifier in (
+            "extraction_run_state",
+            "extraction_inventory",
+            "extraction_summary",
+            "analysis_summary",
+            "extraction_domains",
+        ):
+            self.assertIn(f'"{identifier}"', contract)
 
     def test_msix_is_x64_self_contained_with_only_required_full_trust(self) -> None:
         project = self.read("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj")
@@ -98,6 +149,19 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("ValidateCompletedOutput", harness)
         self.assertIn("7 tamper cases rejected", harness)
 
+        workflow = self.read(".github/workflows/ci.yml")
+        native_job = workflow.split("  windows-native-compile:", 1)[1]
+        native_job = native_job.split("\n  macos-app:", 1)[0]
+        self.assertIn(
+            "actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d",
+            native_job,
+        )
+        self.assertIn('dotnet-version: "8.0.423"', native_job)
+        self.assertIn("dotnet restore", native_job)
+        self.assertIn("--locked-mode", native_job)
+        self.assertIn("dotnet run", native_job)
+        self.assertIn("--no-restore", native_job)
+
     def test_helper_uses_explicit_handle_list_secret_pipe_and_job_object(self) -> None:
         source = self.read("windows/TVTimeRecovery.Windows/NativeHelperProcess.cs")
         for required in (
@@ -164,7 +228,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("browser or viewer history", xaml)
         self.assertIn("Windows Recent Items", xaml)
         coordinator = self.read("windows/TVTimeRecovery.Windows/RecoveryCoordinator.cs")
-        validator = self.read("windows/TVTimeRecovery.Windows/RecoveryOutputValidator.cs")
+        validator = self.read_windows_validator()
         pinned_file = self.read("windows/TVTimeRecovery.Windows/PinnedRecoveryFile.cs")
         self.assertIn("RequiredArtifacts", validator)
         self.assertIn("identifiers.SetEquals(expectedArtifacts.Keys)", validator)
@@ -201,6 +265,30 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             main_window.index("InitializeComponent();"),
             main_window.index("SourceKind.SelectedIndex = 0;"),
         )
+
+        closing = main_window.split("private async void Window_Closing", 1)[1]
+        closing = closing.split("private async void SelectBackup_Click", 1)[0]
+        self.assertIn("args.Cancel = true", closing)
+        self.assertIn("_cancellation?.Cancel();", closing)
+        self.assertIn("await activeRecovery;", closing)
+        self.assertIn("Close();", closing)
+        self.assertLess(
+            closing.index("_cancellation?.Cancel();"),
+            closing.index("await activeRecovery;"),
+        )
+        self.assertLess(closing.index("await activeRecovery;"), closing.index("Close();"))
+        self.assertIn("_activeRecovery = activeRecovery;", main_window)
+        self.assertNotIn("Closed +=", main_window)
+        self.assertIn("return await Task.Run(", coordinator)
+        self.assertIn(
+            "RecoveryOutputValidator.ValidateCompletedOutput(output, cancellationToken)",
+            coordinator,
+        )
+        self.assertGreaterEqual(
+            validator.count("cancellationToken.ThrowIfCancellationRequested()"),
+            8,
+        )
+        self.assertNotIn("SHA256.HashData(stream)", validator)
 
     def test_native_windows_app_has_no_network_client_or_elevation_request(self) -> None:
         source_root = ROOT / "windows/TVTimeRecovery.Windows"

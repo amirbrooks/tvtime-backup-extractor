@@ -32,6 +32,18 @@ ADB_MAXIMUM_BACKUP_BYTES = 4 * 1024 * 1024 * 1024
 ADB_PROBE_TIMEOUT_SECONDS = 15.0
 ADB_BACKUP_TIMEOUT_SECONDS = 30.0 * 60.0
 _TARGET_SDK_PATTERN = re.compile(r"(?:targetSdk|targetSdkVersion)\s*[=:]\s*(\d{1,3})")
+_BACKUP_ALLOWED_PATTERN = re.compile(
+    r"(?<![a-z0-9_])allow_?backup\s*[=:]\s*(true|false)(?![a-z0-9_])",
+    re.IGNORECASE,
+)
+_BACKUP_DISABLED_PATTERN = re.compile(
+    r"(?<![a-z0-9_])backup_?disabled\s*[=:]\s*true(?![a-z0-9_])",
+    re.IGNORECASE,
+)
+_PACKAGE_FLAGS_PATTERN = re.compile(
+    r"(?<![a-z0-9_])(?:pkg)?flags\s*=\s*\[([^\]\r\n]*)\]",
+    re.IGNORECASE,
+)
 
 
 class AndroidDeviceState(str, Enum):
@@ -328,11 +340,15 @@ def _target_sdk_band(package_dump: str) -> tuple[str, int | None]:
 
 
 def _package_backup_allowed(package_dump: str) -> bool | None:
-    normalized = package_dump.casefold()
-    if "allowbackup=false" in normalized or "backupdisabled=true" in normalized:
+    values = {match.group(1).casefold() for match in _BACKUP_ALLOWED_PATTERN.finditer(package_dump)}
+    if "false" in values or _BACKUP_DISABLED_PATTERN.search(package_dump) is not None:
         return False
-    if "allowbackup=true" in normalized or "allow_backup" in normalized:
+    if "true" in values:
         return True
+    for match in _PACKAGE_FLAGS_PATTERN.finditer(package_dump):
+        flags = {flag.casefold() for flag in re.split(r"[\s,]+", match.group(1)) if flag}
+        if "allow_backup" in flags:
+            return True
     return None
 
 
