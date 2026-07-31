@@ -22,16 +22,16 @@ from .errors import (
 from .safety import (
     anchored_bound_output_root,
     anchored_existing_extraction_root,
-    create_private_file_descriptor,
     harden_private_descriptor,
     held_destination_parent,
     is_within,
     nearest_git_root,
     no_link_absolute_path,
-    promote_open_file_no_replace_atomic,
+    promote_file_no_replace_atomic,
     read_json_regular,
     read_regular_bytes,
     require_private_local_destination,
+    windows_create_private_staging_descriptor,
 )
 
 MAXIMUM_ANALYSIS_CSV_BYTES = 64 * 1024 * 1024
@@ -50,6 +50,8 @@ SERIES_FIELDS = (
     "followed_at",
     "last_watch_date",
     "filters",
+    "watched_episode_count",
+    "aired_episode_count",
     "created_at",
     "updated_at",
 )
@@ -64,6 +66,7 @@ EPISODE_FIELDS = (
     "air_date",
     "seen",
     "seen_date",
+    "is_special",
     "is_watched",
     "runtime",
 )
@@ -133,6 +136,20 @@ def _nonnegative_integer(value: object) -> int | None:
 
 def _boolean(value: object) -> bool:
     return isinstance(value, str) and value.strip().casefold() in _TRUE_VALUES
+
+
+def _show_status(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    statuses = [part.strip() for part in value.split("|") if part.strip()]
+    if statuses and statuses[-1] in {
+        "stopped",
+        "continuing",
+        "up_to_date",
+        "not_started_yet",
+    }:
+        return statuses[-1]
+    return "unknown"
 
 
 def _normalized_watch_date(value: object) -> str | None:
@@ -348,7 +365,7 @@ def _episode_from_row(row: dict[str, str]) -> tuple[int, int, dict[str, Any]] | 
         "id": {"tvdb": episode_id, "imdb": None},
         "number": episode_number,
         "name": name,
-        "special": season_number == 0,
+        "special": _boolean(row.get("is_special")) or season_number == 0,
         "is_watched": watched,
         "watched_at": watched_at,
         "rewatch_count": 0,
@@ -444,7 +461,8 @@ def _validate_payload(payload: object) -> None:
             or set(identifier) != {"tvdb", "imdb"}
             or not isinstance(identifier.get("tvdb"), int)
             or identifier.get("imdb") is not None
-            or show.get("status") != "up_to_date"
+            or show.get("status")
+            not in {"stopped", "continuing", "up_to_date", "not_started_yet", "unknown"}
             or not isinstance(show.get("is_favorite"), bool)
             or not isinstance(show.get("_noEpisodeData"), bool)
             or not isinstance(show.get("seasons"), list)
@@ -536,7 +554,7 @@ def _build_payload_from_analysis(
                 "id": {"tvdb": series_id, "imdb": None},
                 "created_at": _optional_text(row.get("created_at")),
                 "title": _optional_text(row.get("name")),
-                "status": "up_to_date",
+                "status": _show_status(row.get("filters")),
                 "is_favorite": series_id in favorites,
                 "_noEpisodeData": not seasons,
                 "seasons": seasons,
@@ -608,7 +626,12 @@ def _write_payload(root: Path, filename: str, payload: list[dict[str, Any]]) -> 
     encoded = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     descriptor = -1
     try:
-        descriptor = create_private_file_descriptor(staging_path, exclusive=True)
+        if os.name == "nt":
+            descriptor = windows_create_private_staging_descriptor(staging_path)
+        else:
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(staging_path, flags, 0o600)
         opened = harden_private_descriptor(
             descriptor,
             expected_type=stat.S_IFREG,
@@ -625,11 +648,11 @@ def _write_payload(root: Path, filename: str, payload: list[dict[str, Any]]) -> 
         identity = (int(after.st_dev), int(after.st_ino))
         if identity != (int(opened.st_dev), int(opened.st_ino)):
             raise RefractConversionError("The private Refract staging file changed unexpectedly.")
-        promote_open_file_no_replace_atomic(
-            descriptor,
+        promote_file_no_replace_atomic(
             staging_path,
             final_path,
             expected_identity=identity,
+            held_descriptor=descriptor,
             durable=True,
         )
     except OSError as exc:

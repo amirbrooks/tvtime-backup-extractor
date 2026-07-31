@@ -1,0 +1,10 @@
+{
+  "contract": "refract-series-v1",
+  "fixture": "obviously synthetic generated export",
+  "upstream_commit": "73d99b649c452c76830beb6ed89c92c1bd12d853",
+  "upstream_contract_sources": [
+    "background.js",
+    "exporter.js"
+  ],
+  "sha256": "9ce4390d2e16a509c090d370e0a07edf223ca3b7bf4a5f0f56e931798ab06955"
+}

@@ -8,6 +8,8 @@ not contact TV Time, Refract, TVDB, or any other network service.
 
 This is a best-effort conversion of recovered local cache data. The cache may not contain every
 episode. Missing episodes, watch dates, identifiers, or rewatches are never invented.
+The generated shape is pinned to the reviewed TV-Time-Out source contract. A synthetic Windows UI
+smoke test in Refract is still required before this candidate can be described as import-validated.
 
 ## Private inputs
 
@@ -60,22 +62,23 @@ Each `series_library.csv` row becomes one show:
 | unavailable | `id.imdb: null` |
 | `created_at` | `created_at`, or `null` when blank |
 | `name` | `title` |
-| selected completion policy | `status: "up_to_date"` |
+| final recognized `filters` value | `status`, or `"unknown"` when no recognized value was recovered |
 | matching `favorite_shows.id` | `is_favorite` |
 
-`up_to_date` is the completion-like value emitted by
-[TV-Time-Out's show normalization](https://github.com/jeremyndeby/TV-Time-Out/blob/main/background.js#L1057-L1086).
-It does not mark nonexistent episodes as watched.
+The recognized status values follow
+[TV-Time-Out's pinned show normalization](https://github.com/jeremyndeby/TV-Time-Out/blob/73d99b649c452c76830beb6ed89c92c1bd12d853/background.js#L1057-L1086).
+The converter does not change a recovered status to make a show look complete.
 
 Episode rows are joined only when `episode_cache_unique.csv.show_id` exactly matches a converted
-`series_id`. Seasons and episodes are sorted numerically. Season zero is marked as specials; `TBA`
-placeholders are omitted. `seen`, `is_watched`, or a valid `seen_date` supplies watched evidence.
-Valid dates are normalized to UTC as `YYYY-MM-DDTHH:MM:SSZ`.
+`series_id`. Seasons and episodes are sorted numerically. A recovered `is_special` flag is
+preserved, and season zero is also treated as specials. `TBA` placeholders are omitted. `seen`,
+`is_watched`, or a valid `seen_date` supplies watched evidence. Valid dates are normalized to UTC as
+`YYYY-MM-DDTHH:MM:SSZ`.
 
 The recovered cache does not provide a reliable rewatch ledger, so `rewatch_count` is zero and
 `watched_count` is either zero or one. A series with no usable episode rows receives `seasons: []`
-and `_noEpisodeData: true`. Its show status remains `up_to_date`, but no episode watch is fabricated.
-The show-level `last_watch_date` is never assigned to an arbitrary episode.
+and `_noEpisodeData: true`. No episode watch is fabricated. The show-level `last_watch_date` is never
+assigned to an arbitrary episode.
 
 The analyzer protects spreadsheet-sensitive text by adding a leading apostrophe in CSV. The
 converter reads `analysis_summary.json` and removes that apostrophe only at the exact recorded cell
@@ -114,4 +117,4 @@ the converted private viewing data to Refract; the offline converter itself tran
 
 The upstream exporter creates only the non-empty artifact types available for a run; its JSON file
 selection is implemented in
-[`buildFilesList`](https://github.com/jeremyndeby/TV-Time-Out/blob/main/exporter.js#L1097-L1108).
+[`buildFilesList`](https://github.com/jeremyndeby/TV-Time-Out/blob/73d99b649c452c76830beb6ed89c92c1bd12d853/exporter.js#L1097-L1108).

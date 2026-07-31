@@ -271,6 +271,7 @@ markers have been validated.
 
 - [macOS guide](docs/macos.md)
 - [Windows guide](docs/windows.md)
+- [Refract series conversion guide](docs/refract-import.md)
 - [Private synthetic cross-platform checks](docs/synthetic-testing.md)
 - [Linux guide](docs/linux.md)
 - [Privacy and safe handling](docs/privacy.md)

@@ -39,6 +39,8 @@ def _series_row(**changes: object) -> dict[str, object]:
         "followed_at": "2024-01-01T00:00:00Z",
         "last_watch_date": "2024-02-03T04:05:06Z",
         "filters": "followed | continuing",
+        "watched_episode_count": "1",
+        "aired_episode_count": "2",
         "created_at": "2024-01-01T00:00:00Z",
         "updated_at": "2024-02-03T04:05:06Z",
     }
@@ -58,6 +60,7 @@ def _episode_row(**changes: object) -> dict[str, object]:
         "air_date": "2024-01-01T00:00:00Z",
         "seen": "True",
         "seen_date": "2024-02-03T05:05:06+01:00",
+        "is_special": "False",
         "is_watched": "False",
         "runtime": "2700",
     }
@@ -178,7 +181,7 @@ class RefractPayloadTests(unittest.TestCase):
             first = payload[0]
             self.assertEqual(first["title"], "=Synthetic Escaped Series")
             self.assertEqual(first["id"], {"tvdb": 101, "imdb": None})
-            self.assertEqual(first["status"], "up_to_date")
+            self.assertEqual(first["status"], "continuing")
             self.assertTrue(first["is_favorite"])
             self.assertFalse(first["_noEpisodeData"])
             self.assertEqual([season["number"] for season in first["seasons"]], [0, 1])
@@ -194,22 +197,58 @@ class RefractPayloadTests(unittest.TestCase):
 
             empty = payload[1]
             self.assertEqual(empty["title"], "Synthetic Empty Series")
-            self.assertEqual(empty["status"], "up_to_date")
+            self.assertEqual(empty["status"], "continuing")
             self.assertIsNone(empty["created_at"])
             self.assertTrue(empty["_noEpisodeData"])
             self.assertEqual(empty["seasons"], [])
 
-    def test_missing_optional_tables_produces_completed_status_with_empty_seasons(self) -> None:
+    def test_missing_optional_tables_preserve_status_with_empty_seasons(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             analysis = _write_analysis(Path(temporary), series=[_series_row()])
 
             payload, stats = build_refract_series_payload(analysis)
 
             self.assertEqual(stats.episodes, 0)
-            self.assertEqual(payload[0]["status"], "up_to_date")
+            self.assertEqual(payload[0]["status"], "continuing")
             self.assertTrue(payload[0]["_noEpisodeData"])
             self.assertEqual(payload[0]["seasons"], [])
             self.assertFalse(payload[0]["is_favorite"])
+
+    def test_recovered_status_and_explicit_special_flag_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            analysis = _write_analysis(
+                Path(temporary),
+                series=[_series_row(filters="followed | stopped")],
+                episodes=[_episode_row(season="1", is_special="True")],
+            )
+
+            payload, _stats = build_refract_series_payload(analysis)
+
+            self.assertEqual(payload[0]["status"], "stopped")
+            self.assertTrue(payload[0]["seasons"][0]["episodes"][0]["special"])
+
+    def test_synthetic_compatibility_fixture_pins_exact_bytes(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "refract_series_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            analysis = _write_analysis(
+                Path(temporary),
+                series=[_series_row()],
+                episodes=[_episode_row()],
+                favorites=[_favorite_row()],
+            )
+            payload, _stats = build_refract_series_payload(analysis)
+        encoded = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+        self.assertEqual(fixture["contract"], "refract-series-v1")
+        self.assertEqual(
+            fixture["upstream_commit"],
+            "73d99b649c452c76830beb6ed89c92c1bd12d853",
+        )
+        self.assertEqual(fixture["sha256"], hashlib.sha256(encoded).hexdigest())
 
     def test_seen_flag_survives_an_invalid_watch_date_without_inference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -22,6 +22,8 @@ All notable changes are documented here. The project follows semantic versioning
   records are no longer present in `DioCache.db`.
 - Added sealed owner-only TV Time Liberator ZIP exports with separate confirmed-state and explicitly
   estimated-progress variants generated offline.
+- Added an offline, owner-only Refract series converter using recovered tables. Import acceptance
+  still requires a synthetic Windows UI smoke test before merge.
 - Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
   in normalized tables.
 - This candidate is local and private. It has not been tagged, uploaded, published, or represented
