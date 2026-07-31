@@ -139,7 +139,8 @@ def _build_shows(
                 _integer(episode.get("episode_id")),
             ),
         ):
-            is_special = _boolean(source.get("is_special"))
+            season_number = _integer(source.get("season"))
+            is_special = _boolean(source.get("is_special")) or season_number == 0
             is_watched = _boolean(source.get("is_watched")) or _boolean(source.get("seen"))
             if is_watched and not is_special:
                 exact_regular_watches += 1
@@ -156,7 +157,7 @@ def _build_shows(
             watched_at = _text(source, "watched_at", "seen_date")
             if is_watched and watched_at and not watched_at.startswith("0001-01-01"):
                 episode["watched_at"] = watched_at
-            seasons.setdefault(_integer(source.get("season")), []).append(episode)
+            seasons.setdefault(season_number, []).append(episode)
 
         if estimate_progress:
             remaining = max(

@@ -418,6 +418,20 @@ class _BoundedDecompressingReader(io.RawIOBase):
         return count
 
 
+def _drain_android_archive_stream(
+    stream: BinaryIO,
+    *,
+    cancellation_check: Callable[[], None] | None,
+) -> None:
+    """Reach the compression trailer after TAR's end marker."""
+
+    while True:
+        if cancellation_check is not None:
+            cancellation_check()
+        if not stream.read(1024 * 1024):
+            return
+
+
 @contextmanager
 def _android_tar_stream(
     source: Path,
@@ -701,6 +715,10 @@ def _acquire_android_archive_into(
                         )
                     )
                     seen.add(name)
+            _drain_android_archive_stream(
+                stream,
+                cancellation_check=cancellation_check,
+            )
         except tarfile.TarError as exc:
             raise UnsupportedSchemaError("The Android backup TAR stream was invalid.") from exc
     if "apps/com.tozelabs.tvshowtime/db/DioCache.db" not in seen:
@@ -1013,6 +1031,7 @@ def _official_export_payload_records(
     payloads: dict[str, bytes],
 ) -> list[tuple[str, str, bytes, int]]:
     library: dict[str, dict[str, object]] = {}
+    watched_episode_ids: dict[str, set[str]] = {}
     episodes: list[dict[str, object]] = []
     watches: list[dict[str, object]] = []
     recognized_rows = 0
@@ -1059,6 +1078,8 @@ def _official_export_payload_records(
             )
             if show_id or show_name:
                 identity = show_id or hashlib.sha256(show_name.encode("utf-8")).hexdigest()
+                if season != 0:
+                    watched_episode_ids.setdefault(identity, set()).add(episode_id)
                 library.setdefault(
                     "series:" + identity,
                     {
@@ -1072,6 +1093,10 @@ def _official_export_payload_records(
                     },
                 )
             recognized_rows += 1
+
+    for identity, episode_ids in watched_episode_ids.items():
+        series = library["series:" + identity]
+        series["watch_status"] = {"watched_episode_count": len(episode_ids)}
 
     general_payload = payloads.get("tracking-prod-records.csv")
     if general_payload is not None:

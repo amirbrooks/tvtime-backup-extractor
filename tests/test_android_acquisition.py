@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import sqlite3
 import tempfile
@@ -264,6 +265,24 @@ class AndroidAcquisitionTests(unittest.TestCase):
             self.assertEqual(result.analysis["watched_movies"], 1)
             self.assertTrue(Path(result.report["report"]).is_file())
             self.assertTrue(Path(result.report["visual_report"]).is_file())
+
+    def test_compressed_backup_requires_a_complete_zlib_trailer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = _synthetic_cache_database(root / "synthetic-cache.sqlite")
+            valid = _android_backup(database)
+            header = ANDROID_BACKUP_MAGIC + b"5\n1\nnone\n"
+            unpacked = zlib.decompress(valid[len(header) :]) + b"x" * (2 * 1024 * 1024)
+            source = root / "synthetic-truncated-android.ab"
+            source.write_bytes(header + zlib.compress(unpacked)[:-4])
+
+            with self.assertRaises(UnsupportedSchemaError):
+                recover_acquired_source(
+                    source_kind=RecoverySourceKind.ANDROID_LEGACY_BACKUP,
+                    source=source,
+                    output_directory=root / "private-truncated-result",
+                    acknowledge_sensitive_output=True,
+                )
 
     def test_archive_ignores_empty_optional_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -579,6 +598,7 @@ class OfficialExportAcquisitionTests(unittest.TestCase):
         episodes = (
             b"type,ep_id,created_at,season_number,episode_number,show_id,show_name,episode_name\n"
             b"watch-episode,101,2025-01-02 03:04:05,1,2,show-1,Synthetic Series,Synthetic Episode\n"
+            b"watch-episode,102,2025-01-03 04:05:06,0,1,show-1,Synthetic Series,Synthetic Special\n"
         )
         movies = (
             b"created_at,uuid,type,movie_name,entity_type,imdb_id\n"
@@ -605,7 +625,12 @@ class OfficialExportAcquisitionTests(unittest.TestCase):
             self.assertEqual(result.analysis["series_library"], 1)
             self.assertEqual(result.analysis["watched_movies"], 1)
             self.assertEqual(result.analysis["movie_watchlist"], 1)
-            self.assertEqual(result.analysis["episode_cache_unique"], 1)
+            self.assertEqual(result.analysis["episode_cache_unique"], 2)
+            with (result.extraction.extraction_root / "analysis" / "series_library.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                series = list(csv.DictReader(handle))
+            self.assertEqual(series[0]["watched_episode_count"], "1")
             official = (
                 result.extraction.extraction_root
                 / "raw"

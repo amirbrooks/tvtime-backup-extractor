@@ -63,7 +63,7 @@ Each `series_library.csv` row becomes one show:
 | `created_at` | `created_at`, or `null` when blank |
 | `name` | `title` |
 | final recognized `filters` value | `status`, or `"unknown"` when no recognized value was recovered |
-| matching `favorite_shows.id` | `is_favorite` |
+| matching `favorite_shows.id`, with `uuid` as the fallback | `is_favorite` |
 
 The recognized status values follow
 [TV-Time-Out's pinned show normalization](https://github.com/jeremyndeby/TV-Time-Out/blob/73d99b649c452c76830beb6ed89c92c1bd12d853/background.js#L1057-L1086).

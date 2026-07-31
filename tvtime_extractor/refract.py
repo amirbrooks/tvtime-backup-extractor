@@ -428,12 +428,18 @@ def _group_episodes(
     return grouped, unmatched, ignored
 
 
-def _favorite_ids(rows: list[dict[str, str]], series_ids: set[int]) -> tuple[set[int], int]:
+def _favorite_ids(
+    rows: list[dict[str, str]],
+    series_ids: set[int],
+    series_ids_by_uuid: dict[str, int],
+) -> tuple[set[int], int]:
     matched: set[int] = set()
     unmatched = 0
     for row in rows:
         favorite_id = _positive_integer(row.get("id"))
-        if favorite_id is None or favorite_id not in series_ids:
+        if favorite_id not in series_ids:
+            favorite_id = series_ids_by_uuid.get(_optional_text(row.get("uuid")) or "")
+        if favorite_id is None:
             unmatched += 1
         else:
             matched.add(favorite_id)
@@ -541,7 +547,23 @@ def _build_payload_from_analysis(
     episodes_by_show, unmatched_episodes, ignored_episodes = _group_episodes(
         episode_rows, series_ids
     )
-    favorites, unmatched_favorites = _favorite_ids(favorite_rows, series_ids)
+    series_ids_by_uuid: dict[str, int] = {}
+    ambiguous_uuids: set[str] = set()
+    for series_id, row in by_id.items():
+        uuid = _optional_text(row.get("uuid"))
+        if uuid is None:
+            continue
+        if uuid in series_ids_by_uuid:
+            ambiguous_uuids.add(uuid)
+        else:
+            series_ids_by_uuid[uuid] = series_id
+    for uuid in ambiguous_uuids:
+        del series_ids_by_uuid[uuid]
+    favorites, unmatched_favorites = _favorite_ids(
+        favorite_rows,
+        series_ids,
+        series_ids_by_uuid,
+    )
 
     payload: list[dict[str, Any]] = []
     episode_count = 0

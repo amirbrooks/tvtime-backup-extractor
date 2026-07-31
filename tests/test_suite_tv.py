@@ -63,7 +63,7 @@ EPISODES = [
         "show_name": "Synthetic Suite Series",
         "season": "0",
         "episode": "1",
-        "is_special": "True",
+        "is_special": "",
         "is_watched": "False",
         "seen": "False",
         "seen_date": "",
@@ -158,6 +158,7 @@ class SuiteTVLiberatorTests(unittest.TestCase):
             for season in shows[0]["seasons"]
             for episode in season["episodes"]
         }
+        self.assertTrue(episodes[1000]["special"])
         self.assertFalse(episodes[1000]["is_watched"])
         self.assertFalse(episodes[1001]["is_watched"])
         self.assertTrue(episodes[1002]["is_watched"])

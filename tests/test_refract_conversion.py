@@ -166,7 +166,10 @@ class RefractPayloadTests(unittest.TestCase):
                     _episode_row(episode_id="9001", show_id="999"),
                 ],
                 favorites=[
-                    _favorite_row(),
+                    _favorite_row(
+                        uuid="synthetic-series-uuid",
+                        id="synthetic-favorite-list-entry",
+                    ),
                     _favorite_row(uuid="synthetic-unmatched-favorite", id="999"),
                 ],
             )
