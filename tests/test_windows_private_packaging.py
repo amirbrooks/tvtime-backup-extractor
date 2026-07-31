@@ -5,12 +5,32 @@ import re
 import unittest
 from pathlib import Path
 
+from tvtime_extractor.report import _BOUND_ARTIFACTS
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WindowsPrivatePackagingContractTests(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
+
+    def test_windows_artifact_contract_matches_report_producer(self) -> None:
+        contract = self.read("windows/TVTimeRecovery.Windows/RecoveryArtifactContract.cs")
+        entries = dict(
+            re.findall(
+                r'\["([^"]+)"\]\s*=\s*(?:\n\s*)?"([^"]+)"',
+                contract,
+            )
+        )
+        expected = dict(_BOUND_ARTIFACTS)
+        self.assertEqual(entries, expected)
+
+        validator = self.read("windows/TVTimeRecovery.Windows/RecoveryOutputValidator.cs")
+        harness = self.read("windows/TVTimeRecovery.Windows.CompileCheck/Program.cs")
+        self.assertNotIn("RequiredArtifacts =", validator)
+        self.assertNotIn("RequiredArtifacts =", harness)
+        self.assertIn("RecoveryArtifactContract.RequiredArtifacts", validator)
+        self.assertIn("RecoveryArtifactContract.RequiredArtifacts", harness)
 
     def test_msix_is_x64_self_contained_with_only_required_full_trust(self) -> None:
         project = self.read("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj")
@@ -102,7 +122,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("job?.Dispose();\n            process?.Dispose();", source)
         self.assertIn(
             "await helper.WaitForSuccessfulExitAsync();",
-            self.read("windows/TVTimeRecovery.Windows/RecoverySupport.cs"),
+            self.read("windows/TVTimeRecovery.Windows/RecoveryCoordinator.cs"),
         )
         self.assertLess(
             source.index("WaitForSingleObject(_process, 5_000)", source.index("DisposeAsync")),
@@ -139,24 +159,28 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("LaunchFolderAsync", main_window)
         self.assertIn("browser or viewer history", xaml)
         self.assertIn("Windows Recent Items", xaml)
-        support = self.read("windows/TVTimeRecovery.Windows/RecoverySupport.cs")
-        self.assertIn("RequiredArtifacts", support)
-        self.assertIn("identifiers.SetEquals(expectedArtifacts.Keys)", support)
-        self.assertIn("RequireExactDirectoryMembers", support)
-        self.assertIn("RejectReparseTree", support)
-        self.assertIn("properties.Length != keys.Count", support)
-        self.assertIn("leases.Add(OpenPinnedDirectory(output))", support)
-        self.assertIn("leases.Add(OpenPinnedDirectory(analysis))", support)
-        self.assertIn("FileShare.Read", support)
-        self.assertIn("internal sealed class ValidatedRecoveryOutput : IDisposable", support)
+        coordinator = self.read("windows/TVTimeRecovery.Windows/RecoveryCoordinator.cs")
+        validator = self.read("windows/TVTimeRecovery.Windows/RecoveryOutputValidator.cs")
+        self.assertIn("RequiredArtifacts", validator)
+        self.assertIn("identifiers.SetEquals(expectedArtifacts.Keys)", validator)
+        self.assertIn("RequireExactDirectoryMembers", validator)
+        self.assertIn("RejectReparseTree", validator)
+        self.assertIn("properties.Length != keys.Count", validator)
+        self.assertIn("leases.Add(OpenPinnedDirectory(output))", validator)
+        self.assertIn("leases.Add(OpenPinnedDirectory(analysis))", validator)
+        self.assertIn("FileShare.Read", validator)
+        self.assertIn(
+            "internal sealed class ValidatedRecoveryOutput : IDisposable",
+            coordinator,
+        )
         self.assertGreaterEqual(main_window.count("using var validated"), 2)
         self.assertIn("_completedOutput?.Dispose();", main_window)
         self.assertIn('"ios_encrypted_backup"', main_window)
         self.assertIn('Tag="ios_encrypted_backup"', xaml)
-        self.assertIn('EncryptedIosRequest("preflight"', support)
-        self.assertIn('EncryptedIosRequest("recover"', support)
-        self.assertIn('completed.TryGetProperty("backup_receipt"', support)
-        self.assertIn("await recovery.SendSecretAsync(password", support)
+        self.assertIn('EncryptedIosRequest("preflight"', coordinator)
+        self.assertIn('EncryptedIosRequest("recover"', coordinator)
+        self.assertIn('completed.TryGetProperty("backup_receipt"', coordinator)
+        self.assertIn("await recovery.SendSecretAsync(password", coordinator)
 
         mac_root = self.read("macos/Sources/TVTimeRecoveryApp/RecoveryRootView.swift")
         self.assertIn(".id(acquisitionKind.rawValue)", mac_root)

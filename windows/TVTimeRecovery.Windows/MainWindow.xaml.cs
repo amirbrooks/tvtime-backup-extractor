@@ -167,7 +167,7 @@ public sealed partial class MainWindow : Window
         if (_completedOutput is null) return;
         try
         {
-            using var validated = RecoveryCoordinator.ValidateCompletedOutput(
+            using var validated = RecoveryOutputValidator.ValidateCompletedOutput(
                 _completedOutput.OutputRoot);
             var folder = await StorageFolder.GetFolderFromPathAsync(validated.OutputRoot);
             if (!await Launcher.LaunchFolderAsync(folder)) throw new InvalidOperationException();
@@ -183,7 +183,7 @@ public sealed partial class MainWindow : Window
         if (_completedOutput is null) return;
         try
         {
-            using var validated = RecoveryCoordinator.ValidateCompletedOutput(
+            using var validated = RecoveryOutputValidator.ValidateCompletedOutput(
                 _completedOutput.OutputRoot);
             await LaunchPrivateFileAsync(selectedPath(validated));
         }
