@@ -1,24 +1,14 @@
 using System.Buffers.Binary;
 using System.Globalization;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Win32.SafeHandles;
 
 namespace TVTimeRecovery.Windows;
 
 internal static class RecoveryOutputValidator
 {
-    private const uint FileReadAttributes = 0x00000080;
-    private const uint FileShareRead = 0x00000001;
-    private const uint FileShareWrite = 0x00000002;
-    private const uint OpenExisting = 3;
-    private const uint FileFlagBackupSemantics = 0x02000000;
-    private const uint FileFlagOpenReparsePoint = 0x00200000;
-    private const uint FileAttributeDirectory = 0x00000010;
-    private const uint FileAttributeReparsePoint = 0x00000400;
     private const int MaximumRawTreeEntries = 100_000;
     private const int MaximumVisualRowsPerTable = 25_000;
     private const int MaximumCombinedVisualRows = 50_000;
@@ -44,20 +34,18 @@ internal static class RecoveryOutputValidator
         var leases = new List<IDisposable>();
         try
         {
-            leases.Add(OpenPinnedDirectory(output));
-            leases.Add(OpenPinnedDirectory(extraction));
-            leases.Add(OpenPinnedDirectory(analysis));
+            leases.Add(PinnedRecoveryFile.OpenDirectory(output));
+            leases.Add(PinnedRecoveryFile.OpenDirectory(extraction));
+            leases.Add(PinnedRecoveryFile.OpenDirectory(analysis));
             if (!Directory.Exists(output) || IsReparse(output) ||
                 Directory.GetFileSystemEntries(output).Length != 1 ||
-                !Directory.Exists(extraction) || IsReparse(extraction) || !File.Exists(markerPath) ||
-                IsReparse(markerPath))
+                !Directory.Exists(extraction) || IsReparse(extraction))
             {
                 throw InvalidOutput();
             }
-            var markerStream = new FileStream(
-                markerPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
-                FileOptions.SequentialScan);
-            leases.Add(markerStream);
+            var markerFile = PinnedRecoveryFile.Open(markerPath, output, 64 * 1024);
+            leases.Add(markerFile);
+            var markerStream = markerFile.Stream;
             if (markerStream.Length is <= 0 or > 64 * 1024) throw InvalidOutput();
             var markerPayload = ReadExactPayload(markerStream);
             using var marker = JsonDocument.Parse(
@@ -199,16 +187,16 @@ internal static class RecoveryOutputValidator
             }
             var path = Path.GetFullPath(Path.Combine(extraction, relative.Replace('/', Path.DirectorySeparatorChar)));
             if (!path.StartsWith(extraction + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                !File.Exists(path) || HasReparseAncestor(path, extraction) ||
-                IsReparse(path))
+                HasReparseAncestor(path, extraction))
                 throw InvalidOutput();
-            FileStream? stream = new FileStream(
-                path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024,
-                FileOptions.SequentialScan);
+            PinnedRecoveryFile? file = PinnedRecoveryFile.Open(
+                path, extraction, 128 * 1024);
             try
             {
-                if (stream.Length != expectedBytes || IsReparse(path)) throw InvalidOutput();
+                var stream = file.Stream;
+                if (stream.Length != expectedBytes) throw InvalidOutput();
                 var actualHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+                file.EnsureIdentity();
                 if (!CryptographicOperations.FixedTimeEquals(
                         Encoding.ASCII.GetBytes(actualHash), Encoding.ASCII.GetBytes(expectedHash)))
                     throw InvalidOutput();
@@ -216,13 +204,13 @@ internal static class RecoveryOutputValidator
                 if (identifier == "html_report") htmlReport = path;
                 if (identifier is "markdown_report" or "html_report")
                 {
-                    leases.Add(stream);
-                    stream = null;
+                    leases.Add(file);
+                    file = null;
                 }
             }
             finally
             {
-                stream?.Dispose();
+                file?.Dispose();
             }
             artifactIdentities.Add(identifier, (expectedBytes, expectedHash));
         }
@@ -253,7 +241,8 @@ internal static class RecoveryOutputValidator
         RejectReparseTree(Path.Combine(extraction, "raw"));
         markerStream.Position = 0;
         var finalMarkerPayload = ReadExactPayload(markerStream);
-        if (IsReparse(markerPath) || !markerPayload.AsSpan().SequenceEqual(finalMarkerPayload))
+        markerFile.EnsureIdentity();
+        if (!markerPayload.AsSpan().SequenceEqual(finalMarkerPayload))
             throw InvalidOutput();
         return new ValidatedRecoveryOutput(output, markdownReport, htmlReport, leases);
         }
@@ -270,31 +259,6 @@ internal static class RecoveryOutputValidator
         var payload = new byte[(int)stream.Length];
         stream.ReadExactly(payload);
         return payload;
-    }
-
-    private static SafeFileHandle OpenPinnedDirectory(string path)
-    {
-        var handle = CreateFileW(
-            path,
-            FileReadAttributes,
-            FileShareRead | FileShareWrite,
-            IntPtr.Zero,
-            OpenExisting,
-            FileFlagBackupSemantics | FileFlagOpenReparsePoint,
-            IntPtr.Zero);
-        if (handle.IsInvalid)
-        {
-            handle.Dispose();
-            throw InvalidOutput();
-        }
-        if (!GetFileInformationByHandle(handle, out var information) ||
-            (information.FileAttributes & FileAttributeDirectory) == 0 ||
-            (information.FileAttributes & FileAttributeReparsePoint) != 0)
-        {
-            handle.Dispose();
-            throw InvalidOutput();
-        }
-        return handle;
     }
 
     private static JsonElement RequireExactObject(JsonElement value, params string[] expected)
@@ -358,7 +322,7 @@ internal static class RecoveryOutputValidator
     {
         var inventoryPath = Path.Combine(extraction, "metadata", "inventory.csv");
         var inventoryPayload = ReadStableRegularFile(
-            inventoryPath, expectedInventoryBytes, expectedInventoryHash, capture: true);
+            inventoryPath, extraction, expectedInventoryBytes, expectedInventoryHash, capture: true);
         var entries = ParseInventory(inventoryPayload);
         long actualBytes = 0;
         foreach (var entry in entries)
@@ -374,18 +338,17 @@ internal static class RecoveryOutputValidator
         ValidateRawTreePass(rawRoot, entries);
         ValidateRawTreePass(rawRoot, entries);
         _ = ReadStableRegularFile(
-            inventoryPath, expectedInventoryBytes, expectedInventoryHash, capture: false);
+            inventoryPath, extraction, expectedInventoryBytes, expectedInventoryHash, capture: false);
     }
 
     private static byte[] ReadStableRegularFile(
-        string path, long expectedBytes, string expectedHash, bool capture)
+        string path, string root, long expectedBytes, string expectedHash, bool capture)
     {
-        if (!File.Exists(path) || IsReparse(path) || expectedBytes is <= 0 or > 256L * 1024 * 1024)
+        if (expectedBytes is <= 0 or > 256L * 1024 * 1024)
             throw InvalidOutput();
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024,
-            FileOptions.SequentialScan);
-        if (stream.Length != expectedBytes || IsReparse(path)) throw InvalidOutput();
+        using var file = PinnedRecoveryFile.Open(path, root, 128 * 1024);
+        var stream = file.Stream;
+        if (stream.Length != expectedBytes) throw InvalidOutput();
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var captured = capture ? new MemoryStream(checked((int)expectedBytes)) : null;
         var buffer = new byte[128 * 1024];
@@ -399,7 +362,8 @@ internal static class RecoveryOutputValidator
             captured?.Write(buffer, 0, count);
         }
         var observedHash = Convert.ToHexString(digest.GetHashAndReset()).ToLowerInvariant();
-        if (observed != expectedBytes || stream.Length != expectedBytes || IsReparse(path) ||
+        file.EnsureIdentity();
+        if (observed != expectedBytes || stream.Length != expectedBytes ||
             !CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(observedHash), Encoding.ASCII.GetBytes(expectedHash)))
             throw InvalidOutput();
@@ -581,7 +545,8 @@ internal static class RecoveryOutputValidator
                     if (!observedFiles.Add(relative) ||
                         !expectedFiles.TryGetValue(relative, out var expected))
                         throw InvalidOutput();
-                    _ = ReadRawFile(member, expected.ActualSize, expected.Sha256);
+                    _ = ReadRawFile(
+                        member, rawRoot, expected.ActualSize, expected.Sha256);
                 }
                 else throw InvalidOutput();
             }
@@ -591,14 +556,15 @@ internal static class RecoveryOutputValidator
             throw InvalidOutput();
     }
 
-    private static bool ReadRawFile(string path, long expectedBytes, string expectedHash)
+    private static bool ReadRawFile(
+        string path, string rawRoot, long expectedBytes, string expectedHash)
     {
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024,
-            FileOptions.SequentialScan);
-        if (stream.Length != expectedBytes || IsReparse(path)) throw InvalidOutput();
+        using var file = PinnedRecoveryFile.Open(path, rawRoot, 128 * 1024);
+        var stream = file.Stream;
+        if (stream.Length != expectedBytes) throw InvalidOutput();
         var observedHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-        if (stream.Length != expectedBytes || IsReparse(path) ||
+        file.EnsureIdentity();
+        if (stream.Length != expectedBytes ||
             !CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(observedHash), Encoding.ASCII.GetBytes(expectedHash)))
             throw InvalidOutput();
@@ -651,43 +617,6 @@ internal static class RecoveryOutputValidator
         }
         return true;
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeFileTime
-    {
-        public uint Low;
-        public uint High;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeFileInformation
-    {
-        public uint FileAttributes;
-        public NativeFileTime CreationTime;
-        public NativeFileTime LastAccessTime;
-        public NativeFileTime LastWriteTime;
-        public uint VolumeSerialNumber;
-        public uint FileSizeHigh;
-        public uint FileSizeLow;
-        public uint NumberOfLinks;
-        public uint FileIndexHigh;
-        public uint FileIndexLow;
-    }
-
-    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern SafeFileHandle CreateFileW(
-        string name,
-        uint access,
-        uint share,
-        IntPtr security,
-        uint creation,
-        uint flags,
-        IntPtr template);
-
-    [DllImport("kernel32", SetLastError = true)]
-    private static extern bool GetFileInformationByHandle(
-        SafeFileHandle handle,
-        out NativeFileInformation information);
 
     private static RecoveryUserException InvalidOutput()
     {
