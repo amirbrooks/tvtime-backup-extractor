@@ -8,7 +8,17 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import __version__
+from .acquisition import (
+    RecoverySourceKind,
+    inspect_official_export,
+    recover_acquired_source,
+)
 from .analyze import analyze_extraction
+from .android_device import (
+    capture_legacy_android_backup,
+    privacy_safe_probe_payload,
+    probe_android_device,
+)
 from .errors import (
     PartialExtractionError,
     TVTimeError,
@@ -28,6 +38,7 @@ from .models import (
 from .report import build_report
 from .safety import (
     held_destination_parent,
+    require_encrypted_ios_source_platform_support,
     require_fresh_output_platform_support,
     set_private_umask,
 )
@@ -94,12 +105,31 @@ def _add_output_format_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_acquired_source_arguments(parser: argparse.ArgumentParser, *, source_help: str) -> None:
+    parser.add_argument("--source", required=True, type=Path, help=source_help)
+    parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help=(
+            "New recovery-folder path on private encrypted storage; its parent must exist but "
+            "this path must not already exist"
+        ),
+    )
+    parser.add_argument(
+        "--acknowledge-sensitive-output",
+        action="store_true",
+        help="Confirm that the destination will contain highly sensitive recovered data",
+    )
+    _add_output_format_argument(parser)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tvtime-extractor",
         description=(
-            "Recover TV Time data from an encrypted local iOS backup without modifying "
-            "the phone or source backup."
+            "Recover TV Time data from a supported private source without modifying the "
+            "phone or source backup."
         ),
         epilog="Read README.md and docs/privacy.md before extracting real data.",
     )
@@ -127,6 +157,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_extraction_arguments(extract, allow_decrypted_manifest=True)
     _add_output_format_argument(extract)
+
+    recover_android_backup = subparsers.add_parser(
+        "recover-android-backup",
+        help=(
+            "Recover from a compatible legacy Android backup container; unsupported encrypted "
+            "or modern-device backups fail closed"
+        ),
+    )
+    _add_acquired_source_arguments(
+        recover_android_backup,
+        source_help="Existing Android backup container selected by its owner",
+    )
+
+    recover_android_snapshot = subparsers.add_parser(
+        "recover-android-snapshot",
+        help=(
+            "Recover from an already-preserved Android app snapshot; this command never roots "
+            "or modifies a phone"
+        ),
+    )
+    _add_acquired_source_arguments(
+        recover_android_snapshot,
+        source_help="Existing private snapshot directory containing an allowlisted TV Time cache",
+    )
+
+    recover_export = subparsers.add_parser(
+        "recover-export",
+        help="Recover from an already-downloaded official TV Time GDPR ZIP or tracking CSV",
+    )
+    _add_acquired_source_arguments(
+        recover_export,
+        source_help="Existing official TV Time GDPR ZIP or supported tracking CSV",
+    )
+    recover_export.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Read one ZIP password line from standard input instead of prompting securely",
+    )
+
+    android_probe = subparsers.add_parser(
+        "android-probe",
+        help="Report privacy-safe legacy Android backup capability without exposing device IDs",
+    )
+    android_probe.add_argument("--adb", required=True, type=Path, help="Reviewed adb executable")
+    _add_output_format_argument(android_probe)
+
+    android_capture = subparsers.add_parser(
+        "android-capture",
+        help="Attempt an explicitly approved legacy Android backup into a fresh private file",
+    )
+    android_capture.add_argument("--adb", required=True, type=Path, help="Reviewed adb executable")
+    android_capture.add_argument(
+        "--destination",
+        required=True,
+        type=Path,
+        help="Fresh private local .ab file outside Git and synced folders",
+    )
+    android_capture.add_argument(
+        "--acknowledge-device-capture",
+        action="store_true",
+        help="Explicitly permit the bounded local adb backup attempt",
+    )
+    _add_output_format_argument(android_capture)
 
     analyze = subparsers.add_parser(
         "analyze",
@@ -171,6 +264,7 @@ def _held_cli_destination_parent(
 
 
 def _run_extraction(args: argparse.Namespace):
+    require_encrypted_ios_source_platform_support()
     require_fresh_output_platform_support()
     _require_sensitive_output_acknowledgement(args)
     with _held_cli_destination_parent(args.output) as (
@@ -231,6 +325,7 @@ def _recovery_progress(event: RecoveryEvent) -> None:
 
 
 def _run_recovery(args: argparse.Namespace):
+    require_encrypted_ios_source_platform_support()
     require_fresh_output_platform_support()
     _require_sensitive_output_acknowledgement(args)
     with _held_cli_destination_parent(args.output) as (
@@ -266,6 +361,44 @@ def _run_recovery(args: argparse.Namespace):
             # Python strings cannot be reliably erased from memory. This only drops
             # the CLI's reference; the password is never intentionally written to disk.
             passphrase = ""
+
+
+def _run_acquired_recovery(
+    args: argparse.Namespace,
+    *,
+    source_kind: RecoverySourceKind,
+):
+    _require_sensitive_output_acknowledgement(args)
+    with _held_cli_destination_parent(args.output) as (
+        destination_parent_descriptor,
+        destination_identity,
+        visible_output,
+    ):
+        _progress("Inspecting the selected source without modifying it...")
+        source_passphrase = None
+        source_preflight = None
+        if source_kind is RecoverySourceKind.TVTIME_OFFICIAL_EXPORT:
+            source_preflight = inspect_official_export(args.source)
+            if source_preflight.encrypted:
+                source_passphrase = read_backup_password(password_stdin=args.password_stdin)
+        try:
+            result = recover_acquired_source(
+                source_kind=source_kind,
+                source=args.source,
+                output_directory=visible_output,
+                acknowledge_sensitive_output=True,
+                source_passphrase=source_passphrase,
+                source_preflight=source_preflight,
+                destination_parent_descriptor=destination_parent_descriptor,
+                expected_parent_identity=(
+                    destination_identity.device,
+                    destination_identity.inode,
+                ),
+            )
+        finally:
+            source_passphrase = None
+    _progress("Source acquisition, analysis, and report generation completed successfully.")
+    return result
 
 
 def _print_extraction_summary(result) -> None:
@@ -394,6 +527,76 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print()
                 _print_report_summary(report_summary)
             _progress("Recovery completed successfully.")
+            return 0
+
+        if args.command in {
+            "recover-android-backup",
+            "recover-android-snapshot",
+            "recover-export",
+        }:
+            source_kind = {
+                "recover-android-backup": RecoverySourceKind.ANDROID_LEGACY_BACKUP,
+                "recover-android-snapshot": RecoverySourceKind.ANDROID_PRESERVED_SNAPSHOT,
+                "recover-export": RecoverySourceKind.TVTIME_OFFICIAL_EXPORT,
+            }[args.command]
+            recovery = _run_acquired_recovery(args, source_kind=source_kind)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "source_kind": source_kind.value,
+                            "extraction": public_summary(recovery.extraction),
+                            "analysis": recovery.analysis,
+                            "report": recovery.report,
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                _print_extraction_summary(recovery.extraction)
+                print()
+                _print_analysis_summary(recovery.analysis)
+                print()
+                _print_report_summary(recovery.report)
+            return 0
+
+        if args.command == "android-probe":
+            payload = privacy_safe_probe_payload(probe_android_device(args.adb))
+            if args.json:
+                print(json.dumps(payload, indent=2, ensure_ascii=True))
+            else:
+                print("Android legacy-backup capability")
+                for name in (
+                    "device",
+                    "package",
+                    "legacy_backup",
+                    "target_sdk_band",
+                    "backup_allowed",
+                    "can_attempt_legacy_backup",
+                ):
+                    print(f"  {name.replace('_', ' ').title()}: {payload[name]}")
+            return 0
+
+        if args.command == "android-capture":
+            result = capture_legacy_android_backup(
+                args.adb,
+                args.destination,
+                acknowledge_device_capture=args.acknowledge_device_capture,
+            )
+            payload = {
+                "source_kind": result.source_kind.value,
+                "android_backup_version": result.android_backup_version,
+                "compressed": result.compressed,
+                "encrypted": result.encrypted,
+                "warnings": list(result.warnings),
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, ensure_ascii=True))
+            else:
+                print("Private Android backup capture completed.")
+                print(f"  Container version: {result.android_backup_version}")
+                print(f"  Compressed: {result.compressed}")
             return 0
 
         if args.command == "analyze":

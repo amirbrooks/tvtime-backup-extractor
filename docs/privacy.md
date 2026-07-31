@@ -14,6 +14,8 @@ substitutes for FileVault or other whole-disk encryption.
 - On macOS, let the native app create its owner-only recovery folder inside private app-managed
   local storage; do not move it into cloud sync, a shared folder, a Git repository, or the source
   backup.
+- On Windows, use the private native candidate only when BitLocker or Windows device encryption is
+  active for the app-container volume. Its sandbox and ACLs still do not replace disk encryption.
 - Enable FileVault when whole-disk protection is required. The native app does not claim that its
   sandbox or owner-only permissions encrypt recovered reports.
 - Disable custom software that uploads the app's container or revealed recovery folder.
@@ -34,14 +36,13 @@ replacing the backup root or changing bound critical metadata or a displayed agg
 confirmation fails before output creation. Selected payload files are snapshot-verified during
 extraction and revalidated before extraction completion. The POSIX CLI consumes the same
 identity-bound receipt across its hidden password prompt and applies the same held-parent and
-held-output-root model. Windows fresh extraction and recovery fail closed because the supported
-Python APIs cannot atomically create and lock a new plaintext directory. There is no override.
-Windows standalone analysis and reporting can hold an already complete extraction root without
-delete sharing, reject reparse points, and require the same volume/file identity to remain visible
-at completion. These checks do not make a mounted plaintext destination encrypted or prove that
-custom sync is disabled. The full-recovery CLI cannot certify every storage stack and therefore
-requires an explicit encrypted-destination acknowledgement. Neither interface can certify ownership
-authorization, sync behavior, snapshots, or backup policy; the user must confirm those boundaries.
+held-output-root model. The unpublished native Windows candidate uses Win32 relative source
+traversal and output creation, protected owner/SYSTEM ACLs, non-delete-sharing held handles,
+no-replace handle-based file promotion, explicit inherited-handle lists, and a Job Object. Its
+encrypted iOS route passes an in-memory preflight receipt to a separate password-gated helper. It
+refuses recovery unless Windows reports active volume protection. Standalone Windows
+analysis/reporting retains its held existing-root checks. These controls cannot certify
+authorization, custom sync, snapshots, or backup policy; the user must confirm those boundaries.
 
 Linux FUSE destinations are refused because the same mechanism can expose local, network, cloud, or
 shared storage. There is no override. Linux accepts only a conservative allowlist of ordinary local
@@ -55,9 +56,9 @@ private output. Close untrusted same-user software during recovery and discard a
 
 ## Password handling
 
-The macOS app uses a secure field and sends the password only to its bundled local helper. The CLI
-uses a hidden prompt by default. Neither path intentionally writes the password to disk, a report, or
-normal progress output.
+The native apps use secure fields and send passwords only through a separate local secret channel to
+the bundled helper. The CLI uses a hidden prompt by default. No path intentionally writes the
+password to disk, a report, or normal progress output.
 
 Do not put a password in a command, environment variable, shell history, text file, screenshot, or
 support request. Swift and Python cannot guarantee that every in-memory copy is overwritten
@@ -75,8 +76,11 @@ By default:
 - readable reports omit stable UUIDs and shorten recognized timestamps to calendar dates; and
 - visual reports show media-reference counts without embedding or fetching remote media.
 
-The normalized CSV files still contain private identifiers and exact timestamps where needed for a
-faithful archive. The readable reports are safer to inspect, not safe to publish.
+The normalized CSV files and Suite TV import ZIPs still contain private identifiers and exact
+timestamps where needed for a faithful archive. The readable reports are safer to inspect, not safe
+to publish. Creating the Suite TV archives is offline, but importing one hands its contents to Suite
+TV and whatever local storage, backup, or sync behavior that app uses. The generated Favorites list
+is marked private.
 
 The advanced `extract --include-decrypted-manifest` and `analyze --include-raw-cache` CLI options
 can expose much more device or account information. They are intentionally unavailable in the
@@ -106,8 +110,10 @@ necessarily erase caches, snapshots, or synced copies.
 Do not attach, commit, publish, or send any of the following, even to a private support issue:
 
 - an iOS or iPadOS backup, `Manifest.plist`, `Status.plist`, or decrypted manifest;
+- an Android backup, device capture, `DioCache.db`, preserved snapshot, or official export;
 - `TVTime-Extraction`, `raw`, `metadata`, `analysis`, or `cache_responses`;
-- SQLite databases, property lists, cookies, profile payloads, completion markers, reports, or CSVs;
+- SQLite databases, property lists, cookies, profile payloads, completion markers, reports, CSVs, or
+  Suite TV import ZIPs;
 - backup passwords, device IDs, stable user IDs, hashes, private URLs, or local paths; or
 - screenshots, screen recordings, PDFs, or previews containing recovered titles or history.
 

@@ -100,7 +100,7 @@ struct HelperProcessClientTests {
         sawReady = true
       case .cancelled:
         sawCancellation = true
-      case .progress, .preflightCompleted, .recoveryCompleted, .failed:
+      case .progress, .preflightCompleted, .recoveryCompleted, .acquisitionCompleted, .failed:
         break
       }
     }
@@ -147,7 +147,7 @@ struct HelperProcessClientTests {
         sawReady = true
       case .failed(let failure):
         sawExpectedFailure = failure.code == "recovery_failed"
-      case .progress, .preflightCompleted, .recoveryCompleted, .cancelled:
+      case .progress, .preflightCompleted, .recoveryCompleted, .acquisitionCompleted, .cancelled:
         break
       }
     }

@@ -1,0 +1,58 @@
+<Window
+  x:Class="TVTimeRecovery.Windows.MainWindow"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  Title="TV Time Backup Extractor">
+  <ScrollViewer>
+    <Grid MaxWidth="760" Padding="40" HorizontalAlignment="Center">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+
+      <TextBlock Grid.Row="0" Text="Recover your TV Time history" Style="{StaticResource TitleTextBlockStyle}" />
+      <TextBlock Grid.Row="1" Margin="0,12,0,24" TextWrapping="Wrap"
+        Text="Choose a supported local source. Recovery remains offline and writes only to this app's private local storage." />
+
+      <ComboBox Grid.Row="2" x:Name="SourceKind" Header="Recovery source" SelectionChanged="SourceKind_Changed">
+        <ComboBoxItem Content="Encrypted iOS backup folder" Tag="ios_encrypted_backup" />
+        <ComboBoxItem Content="Android legacy backup file" Tag="android_legacy_backup" />
+        <ComboBoxItem Content="Preserved Android database folder" Tag="android_preserved_snapshot" />
+        <ComboBoxItem Content="Official TV Time export" Tag="tvtime_official_export" />
+      </ComboBox>
+      <Button Grid.Row="3" Margin="0,14,0,0" x:Name="SelectBackupButton" Content="Select Android backup file" Click="SelectBackup_Click" />
+      <TextBlock Grid.Row="4" x:Name="SelectionStatus" Margin="0,12,0,20" Text="No source selected" />
+
+      <PasswordBox Grid.Row="5" x:Name="BackupPassword" Header="Source password (when required)" IsPasswordRevealButtonEnabled="false" />
+      <CheckBox Grid.Row="6" x:Name="SensitiveConfirmation" Margin="0,18,0,12"
+        Content="I understand the private output contains sensitive viewing history." />
+
+      <StackPanel Grid.Row="7" Orientation="Horizontal" Spacing="12">
+        <Button x:Name="RecoverButton" Content="Recover privately" Click="Recover_Click" IsEnabled="false" />
+        <Button x:Name="CancelButton" Content="Cancel" Click="Cancel_Click" IsEnabled="false" />
+      </StackPanel>
+
+      <InfoBar Grid.Row="8" x:Name="StatusBar" Margin="0,24,0,0" IsOpen="true"
+        Severity="Informational" Title="Ready"
+        Message="Your phone and backup are not modified. Keep the private report out of synced folders." />
+
+      <StackPanel Grid.Row="9" x:Name="ResultActions" Margin="0,20,0,0" Spacing="10" Visibility="Collapsed">
+        <TextBlock TextWrapping="Wrap"
+          Text="Opening a private report can add its filename to browser or viewer history and Windows Recent Items." />
+        <StackPanel Orientation="Horizontal" Spacing="10">
+          <Button Content="Open Markdown" Click="OpenMarkdown_Click" />
+          <Button Content="Open offline HTML" Click="OpenHtml_Click" />
+          <Button Content="Show private folder" Click="RevealOutput_Click" />
+        </StackPanel>
+      </StackPanel>
+    </Grid>
+  </ScrollViewer>
+</Window>

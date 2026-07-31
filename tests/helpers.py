@@ -38,6 +38,27 @@ def _json_bytes(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
+def write_legacy_archive(
+    path: Path,
+    *,
+    url: str,
+    payload: object,
+) -> None:
+    archive = {
+        "$archiver": "NSKeyedArchiver",
+        "$objects": [
+            "$null",
+            {"data": plistlib.UID(2), "response": plistlib.UID(3)},
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            url,
+        ],
+        "$top": {"root": plistlib.UID(1)},
+        "$version": 100_000,
+    }
+    path.write_bytes(plistlib.dumps(archive, fmt=plistlib.FMT_BINARY))
+    secure_file(path)
+
+
 def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
     library = {
         "data": {
@@ -51,6 +72,7 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
                     "watched_at": "2025-01-02T03:04:05Z",
                     "created_at": "2025-01-01T00:00:00Z",
                     "updated_at": "2025-01-03T00:00:00Z",
+                    "rewatch_count": 2,
                     "sorting": [
                         {"id": "follow_date", "value": "2025-01-01T00:00:00Z"},
                         {"id": "watched_date", "value": "2025-01-02T03:04:05Z"},
@@ -62,6 +84,7 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
                         "first_release_date": "2024-06-01",
                         "runtime": 7200,
                         "genres": ["Drama", "Mystery"],
+                        "external_sources": [{"source": "tvdb", "id": "700001"}],
                         "poster_url": (
                             "https://cdn.example.invalid/posters/example.jpg"
                             "?token=SYNTHETIC_TOKEN#private"
@@ -96,6 +119,7 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
                         "first_release_date": "2026-01-01",
                         "runtime": 6000,
                         "genres": ["Comedy"],
+                        "external_sources": [{"source": "tvdb", "id": "700002"}],
                     },
                 },
                 {
@@ -108,8 +132,12 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
                         {"id": "follow_date", "value": "2024-01-01T00:00:00Z"},
                         {"id": "watch_date", "value": "2025-03-04T05:06:07Z"},
                     ],
+                    "watch_status": {
+                        "watched_episode_count": 1,
+                        "aired_episode_count": 2,
+                    },
                     "meta": {
-                        "id": "series-example-1",
+                        "id": "700101",
                         "name": "Example Series",
                         "country": "AU",
                         "is_ended": False,
@@ -124,7 +152,7 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
             "type": "list",
             "objects": [
                 {
-                    "uuid": "44444444-4444-4444-8444-444444444444",
+                    "uuid": MOVIE_UUID,
                     "id": "favorite-movie-example",
                     "name": "Favorite Example Movie",
                     "type": "movie",
@@ -139,7 +167,7 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
             "type": "list",
             "objects": [
                 {
-                    "uuid": "55555555-5555-4555-8555-555555555555",
+                    "uuid": SERIES_UUID,
                     "id": "favorite-series-example",
                     "name": "Favorite Example Series",
                     "type": "series",
@@ -173,14 +201,15 @@ def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
     episodes = {
         "data": [
             {
-                "id": "episode-example-1",
-                "show": {"id": "series-example-1", "name": "Example Series"},
+                "id": "700201",
+                "show": {"id": "700101", "name": "Example Series"},
                 "season_number": 1,
                 "number": 2,
                 "name": "The Synthetic Episode",
                 "air_date": "2025-03-01T00:00:00Z",
                 "seen": True,
                 "seen_date": "2025-03-04T05:06:07Z",
+                "is_special": False,
                 "is_watched": True,
                 "runtime": 2700,
             }

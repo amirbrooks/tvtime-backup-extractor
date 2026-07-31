@@ -7,12 +7,16 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
+import struct
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
+
+from Crypto.Cipher import AES
 
 from tvtime_extractor.errors import (
     BackupUnfinishedError,
@@ -23,12 +27,14 @@ from tvtime_extractor.errors import (
 from tvtime_extractor.extract import (
     PRIMARY_DOMAIN,
     _bounded_manifest_rows,
+    _close_repository_manifest,
+    _copy_manifest_to_descriptor,
     _create_private_staging_descriptor,
+    _decrypt_snapshot_to_descriptor,
     _finished_status_state,
-    _harden_private_staging_descriptor,
-    _sha256_staging_descriptor,
+    _prepare_repository_owned_manifest,
     _source_payload_state,
-    _verified_dependency_output_alias,
+    _windows_source_payload,
     extract_backup,
 )
 from tvtime_extractor.report import read_csv
@@ -38,6 +44,7 @@ from tvtime_extractor.safety import (
     write_csv_private,
     write_json_private_atomic,
 )
+from tvtime_extractor.windows_native import WindowsHandleInformation
 
 
 class _Connection:
@@ -51,9 +58,18 @@ class _Connection:
             raise OSError("synthetic close failure")
 
 
+class _ManifestCopyBackup:
+    def __init__(self, source: Path) -> None:
+        self._temp_decrypted_manifest_db_path = os.fspath(source)
+        self._temp_manifest_db_conn = _Connection()
+
+    def _decrypt_manifest_db_file(self) -> None:
+        return None
+
+
 class _Keybag:
     def unwrapKeyForClass(self, _protection_class: object, _wrapped_key: object) -> bytes:
-        return b"synthetic-unwrapped-key"
+        return b"K" * 32
 
 
 class _FilePlist:
@@ -220,102 +236,204 @@ class ManifestBoundsTests(unittest.TestCase):
                 self.assertTrue(cursor.fetch_sizes)
 
 
-@unittest.skipUnless(
-    sys.platform == "darwin" or sys.platform.startswith("linux"),
-    "descriptor aliases are supported only by the macOS/Linux recovery path",
-)
 class DependencyDescriptorBindingTests(unittest.TestCase):
-    def test_pinned_cbc_dependency_writes_through_exact_held_descriptor(self) -> None:
-        from importlib.metadata import version
+    def test_manifest_lock_closes_when_sqlite_close_fails(self) -> None:
+        class Lock:
+            closed = False
 
-        from Crypto.Cipher import AES
-        from iphone_backup_decrypt import utils
+            def __exit__(self, *_args: object) -> None:
+                self.closed = True
 
-        self.assertEqual(version("iphone-backup-decrypt"), "0.9.0")
-        plaintext = b"descriptor-bound synthetic plaintext"
-        padding_size = 16 - len(plaintext) % 16
-        encryption_key = b"K" * 32
-        encrypted = AES.new(
-            encryption_key,
-            AES.MODE_CBC,
-            iv=b"\x00" * 16,
-        ).encrypt(plaintext + bytes([padding_size]) * padding_size)
+        class Backup:
+            def __init__(self) -> None:
+                self._temp_manifest_db_conn = _Connection(fail=True)
+                self._tvtime_manifest_lock = Lock()
 
-        class FilePlist:
-            filesize = len(plaintext)
-            mtime = 1_700_000_000
+        backup = Backup()
+        lock = backup._tvtime_manifest_lock
+        with self.assertRaisesRegex(OSError, "synthetic close failure"):
+            _close_repository_manifest(backup)
+        self.assertTrue(lock.closed)
+        self.assertIsNone(backup._temp_manifest_db_conn)
+        self.assertIsNone(backup._tvtime_manifest_lock)
+
+    def test_windows_source_payload_uses_one_relative_handle_chain(self) -> None:
+        payload = b"synthetic encrypted source payload"
+        information = WindowsHandleInformation(
+            attributes=0,
+            identity=(7, 11),
+            byte_size=len(payload),
+            last_write_time=116_444_736_000_000_000,
+        )
+
+        class Msvcrt:
+            @staticmethod
+            def get_osfhandle(descriptor: int) -> int:
+                self.assertGreaterEqual(descriptor, 0)
+                return 303
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic.bin"
+            source.write_bytes(payload)
+            with (
+                mock.patch.dict(sys.modules, {"msvcrt": Msvcrt}),
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.open_relative_path",
+                    side_effect=(101, 202),
+                ) as open_relative,
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.handle_information",
+                    return_value=information,
+                ) as inspect_handle,
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.handle_to_file_descriptor",
+                    side_effect=lambda _handle, flags: os.open(source, flags),
+                ),
+                mock.patch("tvtime_extractor.extract._windows_native.close_handle") as close_handle,
+            ):
+                snapshot, retained = _windows_source_payload(
+                    Path("ab", "synthetic.bin"),
+                    source_root_handle=91,
+                    retain_payload=True,
+                )
+
+        self.assertEqual(retained, payload)
+        self.assertEqual(snapshot.sha256, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(snapshot.device, 7)
+        self.assertEqual(snapshot.inode, 11)
+        self.assertEqual(
+            open_relative.call_args_list,
+            [
+                mock.call(91, ("ab", "synthetic.bin")),
+                mock.call(91, ("ab", "synthetic.bin")),
+            ],
+        )
+        self.assertEqual(inspect_handle.call_count, 3)
+        close_handle.assert_called_once_with(202)
+
+    def test_repository_manifest_accepts_relative_private_staging_root(self) -> None:
+        key = b"M" * 32
+
+        class Keybag:
+            def unwrapKeyForClass(self, protection_class: object, wrapped: object) -> bytes:
+                self_test.assertEqual(protection_class, 7)
+                self_test.assertEqual(wrapped, b"wrapped-manifest-key")
+                return key
+
+        class Backup:
+            def __init__(self) -> None:
+                self._manifest_plist: dict[str, object] | None = None
+                self._keybag: Keybag | None = None
+                self._temp_decrypted_manifest_db_path = "private-temp/Manifest.db"
+                self._temp_manifest_db_conn = None
+
+            def _read_and_unlock_keybag(self) -> None:
+                self._manifest_plist = {
+                    "ManifestKey": struct.pack("<l", 7) + b"wrapped-manifest-key"
+                }
+                self._keybag = Keybag()
+
+        self_test = self
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plaintext = root / "plaintext.db"
+            connection = sqlite3.connect(plaintext)
+            connection.execute(
+                "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+                "flags INTEGER, file BLOB)"
+            )
+            connection.execute(
+                "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+                ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+            )
+            connection.commit()
+            connection.close()
+            plaintext_bytes = plaintext.read_bytes()
+            self.assertEqual(len(plaintext_bytes) % 16, 0)
+            encrypted = root / "Manifest.encrypted.db"
+            encrypted.write_bytes(
+                AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(plaintext_bytes)
+            )
+            encrypted.chmod(0o600)
+            (root / "private-temp").mkdir(mode=0o700)
+            backup = Backup()
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                _prepare_repository_owned_manifest(
+                    backup,
+                    encrypted_manifest=encrypted,
+                    temp_root=Path("private-temp"),
+                )
+                assert backup._temp_manifest_db_conn is not None
+                self.assertEqual(
+                    backup._temp_manifest_db_conn.execute("SELECT count(*) FROM Files").fetchone(),
+                    (1,),
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    backup._temp_manifest_db_conn.execute("DELETE FROM Files")
+                _close_repository_manifest(backup)
+            finally:
+                os.chdir(previous)
+
+    def test_manifest_connection_is_closed_before_descriptor_copy(self) -> None:
+        from tvtime_extractor.safety import regular_binary_reader as real_reader
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            encrypted_path = root / "encrypted.bin"
-            encrypted_path.write_bytes(encrypted)
-            staging = root / "plaintext.partial"
-            descriptor, identity = _create_private_staging_descriptor(staging)
-            try:
-                alias = _verified_dependency_output_alias(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
-                utils.aes_decrypt_chunked(
-                    in_filename=str(encrypted_path),
-                    file_plist=FilePlist(),
-                    key=encryption_key,
-                    out_filepath=alias,
-                )
-                _harden_private_staging_descriptor(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
-                actual_size, actual_hash = _sha256_staging_descriptor(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
+            source = root / "Manifest.db"
+            payload = b"synthetic decrypted manifest"
+            source.write_bytes(payload)
+            source.chmod(0o600)
+            backup = _ManifestCopyBackup(source)
+            target = root / "Manifest.decrypted.db.partial"
+            descriptor, _identity = _create_private_staging_descriptor(target)
 
-                self.assertEqual(os.pread(descriptor, len(plaintext), 0), plaintext)
-                self.assertEqual(actual_size, len(plaintext))
-                self.assertEqual(actual_hash, hashlib.sha256(plaintext).hexdigest())
-                self.assertEqual(
-                    (staging.stat().st_dev, staging.stat().st_ino),
-                    identity,
-                )
-                self.assertEqual(staging.stat().st_mtime, FilePlist.mtime)
+            @contextlib.contextmanager
+            def observed_reader(*args: object, **kwargs: object):
+                self.assertTrue(backup._temp_manifest_db_conn is None)
+                with real_reader(*args, **kwargs) as binding:
+                    yield binding
+
+            try:
+                with mock.patch(
+                    "tvtime_extractor.extract.regular_binary_reader",
+                    side_effect=observed_reader,
+                ):
+                    _copy_manifest_to_descriptor(
+                        backup,
+                        descriptor,
+                        maximum_bytes=len(payload),
+                    )
+                self.assertEqual(os.pread(descriptor, len(payload), 0), payload)
             finally:
                 os.close(descriptor)
 
-    def test_visible_staging_substitution_cannot_redirect_dependency_plaintext(self) -> None:
+    def test_decryption_writes_only_through_the_held_descriptor(self) -> None:
+        from Crypto.Cipher import AES
+
+        plaintext = b"synthetic descriptor-bound Windows plaintext"
+        padding = 16 - len(plaintext) % 16
+        key = b"W" * 32
+        encrypted = AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding]) * padding
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            staging = root / "plaintext.partial"
-            moved = root / "held-plaintext.partial"
-            outside = root / "outside.bin"
-            outside.write_bytes(b"unchanged")
-            descriptor, identity = _create_private_staging_descriptor(staging)
+            source = root / "encrypted.bin"
+            source.write_bytes(encrypted)
+            source.chmod(0o600)
+            target = root / "plaintext.partial"
+            descriptor, _identity = _create_private_staging_descriptor(target)
             try:
-                alias = _verified_dependency_output_alias(
-                    staging,
+                _decrypt_snapshot_to_descriptor(
+                    source,
                     descriptor,
-                    expected_identity=identity,
+                    key=key,
                 )
-                staging.rename(moved)
-                staging.symlink_to(outside)
-                Path(alias).write_bytes(b"descriptor-only secret")
-
-                self.assertEqual(outside.read_bytes(), b"unchanged")
-                self.assertEqual(
-                    os.pread(descriptor, len(b"descriptor-only secret"), 0),
-                    b"descriptor-only secret",
-                )
-                with self.assertRaisesRegex(UnsafePathError, "identity changed"):
-                    _harden_private_staging_descriptor(
-                        staging,
-                        descriptor,
-                        expected_identity=identity,
-                    )
+                self.assertEqual(os.pread(descriptor, len(plaintext), 0), plaintext)
             finally:
                 os.close(descriptor)
 
@@ -336,7 +454,12 @@ def _row(
     file_id = "a" * 40
     encrypted = backup / file_id[:2] / file_id
     encrypted.parent.mkdir()
-    encrypted.write_bytes(b"synthetic encrypted payload")
+    padding = 16 - len(plaintext) % 16
+    encrypted.write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding]) * padding
+        )
+    )
     return (
         [
             (
@@ -521,7 +644,6 @@ class ExtractionLifecycleSecurityTests(unittest.TestCase):
             self.assertEqual(instance.run_state_at_cleanup, "incomplete")
             self.assertTrue(instance.connection.closed)
             self.assertEqual(instance.cleanup_calls, 1)
-            self.assertTrue(instance.decrypted_from_private_snapshot)
             self.assertIsNone(instance._passphrase)
             self.assertIsNone(instance._keybag)
             self.assertFalse((result.extraction_root / ".tmp").exists())

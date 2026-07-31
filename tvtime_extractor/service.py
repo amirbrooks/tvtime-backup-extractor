@@ -28,6 +28,7 @@ from .extract import (
     ExtractionResult,
     _held_backup_root,
     _require_bound_backup_root,
+    _windows_source_payload,
     extract_backup,
 )
 from .models import (
@@ -51,6 +52,7 @@ from .safety import (
     nearest_git_root,
     no_link_absolute_path,
     require_bound_destination_parent,
+    require_encrypted_ios_source_platform_support,
     require_fresh_output_platform_support,
     require_private_local_destination,
     validate_backup_directory,
@@ -217,6 +219,41 @@ def _capture_backup_preflight_snapshot(
     *,
     cancellation: CancellationToken,
 ) -> tuple[BackupPreflightSnapshot, bytes, bytes]:
+    if os.name == "nt":
+        with _held_backup_root(backup) as (root_handle, root_identity, _visible):
+            cancellation.raise_if_cancelled()
+            manifest_plist, manifest_payload = _windows_source_payload(
+                Path("Manifest.plist"),
+                source_root_handle=root_handle,
+                maximum_bytes=MAXIMUM_MANIFEST_PLIST_BYTES,
+                retain_payload=True,
+            )
+            cancellation.raise_if_cancelled()
+            manifest_database, _ = _windows_source_payload(
+                Path("Manifest.db"),
+                source_root_handle=root_handle,
+            )
+            cancellation.raise_if_cancelled()
+            status_plist, status_payload = _windows_source_payload(
+                Path("Status.plist"),
+                source_root_handle=root_handle,
+                maximum_bytes=MAXIMUM_STATUS_PLIST_BYTES,
+                retain_payload=True,
+            )
+        if manifest_payload is None or status_payload is None:
+            raise TVTimeError("Required backup metadata could not be retained safely.")
+        return (
+            BackupPreflightSnapshot(
+                root_device=root_identity[0],
+                root_inode=root_identity[1],
+                manifest_plist=manifest_plist,
+                manifest_database=manifest_database,
+                status_plist=status_plist,
+            ),
+            manifest_payload,
+            status_payload,
+        )
+
     try:
         root_before = backup.lstat()
     except OSError as exc:
@@ -491,6 +528,7 @@ class RecoveryService:
         cancellation: CancellationToken | None = None,
         destination_parent_descriptor: int | None = None,
     ) -> PreflightResult:
+        require_encrypted_ios_source_platform_support()
         if destination_parent_descriptor is None:
             if request.destination_parent_identity is not None:
                 raise UnsafePathError("Destination identity binding was incomplete.")
@@ -755,6 +793,7 @@ class RecoveryService:
     ) -> ExtractionResult:
         """Extract through the same identity-bound, single-use preflight receipt as recovery."""
 
+        require_encrypted_ios_source_platform_support()
         require_fresh_output_platform_support()
         if not request.acknowledge_sensitive_output:
             raise UserInputError(
@@ -871,6 +910,7 @@ class RecoveryService:
         destination_parent_descriptor: int | None = None,
         preflight_result: PreflightResult | None = None,
     ) -> RecoveryResult:
+        require_encrypted_ios_source_platform_support()
         require_fresh_output_platform_support()
         if not request.acknowledge_sensitive_output:
             raise UserInputError(

@@ -261,6 +261,9 @@ public final class RecoverySession {
   private let recoveryOutputValidator: @Sendable (RecoverySummary, URL) throws -> Void
 
   @ObservationIgnored
+  private let acquisitionOutputValidator: @Sendable (AcquisitionRecoverySummary, URL) throws -> Void
+
+  @ObservationIgnored
   private var operationTask: Task<Void, Never>?
 
   @ObservationIgnored
@@ -277,6 +280,9 @@ public final class RecoverySession {
 
   @ObservationIgnored
   private var activeAction: RecoveryAction?
+
+  @ObservationIgnored
+  private var isAcquisitionRoute = false
 
   @ObservationIgnored
   private var destinationParentIdentity: DestinationDirectoryIdentity?
@@ -297,6 +303,9 @@ public final class RecoverySession {
     recoveryOutputValidator = {
       try RecoveryOutputValidator.validate($0, beneath: $1)
     }
+    acquisitionOutputValidator = {
+      try RecoveryOutputValidator.validate($0, beneath: $1)
+    }
   }
 
   init(
@@ -309,6 +318,9 @@ public final class RecoverySession {
     self.diagnostics = diagnostics
     self.destinationEncryptionValidator = destinationEncryptionValidator
     self.recoveryOutputValidator = recoveryOutputValidator
+    acquisitionOutputValidator = {
+      try RecoveryOutputValidator.validate($0, beneath: $1)
+    }
   }
 
   public func selectBackup(_ url: URL) {
@@ -393,6 +405,7 @@ public final class RecoverySession {
         backupReceipt: backupReceipt
       )
       prepareForOperation()
+      isAcquisitionRoute = false
       activeAction = .recover
       let stream = try helperClient.events(for: request, secret: secret)
       phase = .running(
@@ -414,6 +427,62 @@ public final class RecoverySession {
       sourceLease.stop()
       destinationLease.stop()
       diagnostics.record(.failure(.recovery, RecoveryDiagnosticFailure(error: error)))
+      failSafely(error)
+    }
+  }
+
+  public func startAcquisition(
+    sourceKind: AcquisitionSourceKind,
+    sourceURL: URL,
+    appManagedDestinationParent: URL,
+    sourcePassword: String,
+    acknowledgeSensitiveOutput: Bool
+  ) {
+    guard !phase.isBusy, acknowledgeSensitiveOutput else { return }
+    let source = sourceURL.standardizedFileURL
+    let destination = appManagedDestinationParent.standardizedFileURL
+    let output = freshOutputDirectory(in: destination)
+    let sourceLease = SecurityScopedResourceLease(url: source)
+    let destinationLease = SecurityScopedResourceLease(url: destination)
+    var secret = sourcePassword.isEmpty ? nil : Data(sourcePassword.utf8)
+    defer {
+      if let count = secret?.count, count > 0 { secret?.resetBytes(in: 0..<count) }
+    }
+    do {
+      let identity = try destinationEncryptionValidator(destination)
+      backupDirectory = source
+      destinationParent = destination
+      destinationParentIdentity = identity
+      outputDirectory = output
+      let request = AcquisitionRequest(
+        sourceKind: sourceKind,
+        sourceURL: source,
+        outputDirectory: output,
+        destinationParentIdentity: identity,
+        acknowledgeSensitiveOutput: true,
+        hasSourceSecret: secret != nil
+      )
+      prepareForOperation()
+      isAcquisitionRoute = true
+      activeAction = .recover
+      let stream = try helperClient.events(for: request, secret: secret)
+      phase = .running(
+        RecoveryProgress(
+          stage: "extraction",
+          kind: "started",
+          message: "Validating and recovering the selected source…"
+        )
+      )
+      diagnostics.record(.milestone(.recovery, .started))
+      consume(
+        stream,
+        sourceLease: sourceLease,
+        destinationLease: destinationLease,
+        retainDestinationOnSuccess: true
+      )
+    } catch {
+      sourceLease.stop()
+      destinationLease.stop()
       failSafely(error)
     }
   }
@@ -446,7 +515,7 @@ public final class RecoverySession {
       }
     case .cancelling:
       decisionHandler?(true)
-    case .chooseBackup, .chooseDestination, .confirm, .completed, .failed:
+    case .chooseBackup, .chooseDestination, .confirm, .completed, .acquisitionCompleted, .failed:
       decisionHandler?(origin != .cancelButton)
     }
   }
@@ -483,11 +552,16 @@ public final class RecoverySession {
     outputDirectory = nil
     preflightSummary = nil
     backupReceipt = nil
+    isAcquisitionRoute = false
     phase = .chooseBackup
   }
 
   public func recoverFromFailure() {
     guard case .failed(let failure) = phase else {
+      return
+    }
+    if isAcquisitionRoute {
+      returnToBackupSelection()
       return
     }
     switch failure.recoveryPlan.route {
@@ -544,10 +618,11 @@ public final class RecoverySession {
   }
 
   public var markdownReportURL: URL? {
-    guard case .completed(let summary) = phase else {
-      return nil
+    switch phase {
+    case .completed(let summary): artifactURL(relativePath: summary.artifacts.report)
+    case .acquisitionCompleted(let summary): artifactURL(relativePath: summary.artifacts.report)
+    default: nil
     }
-    return artifactURL(relativePath: summary.artifacts.report)
   }
 
   public var reportURL: URL? {
@@ -555,27 +630,31 @@ public final class RecoverySession {
   }
 
   public var visualReportURL: URL? {
-    guard case .completed(let summary) = phase else {
-      return nil
+    switch phase {
+    case .completed(let summary): artifactURL(relativePath: summary.artifacts.visualReport)
+    case .acquisitionCompleted(let summary):
+      artifactURL(relativePath: summary.artifacts.visualReport)
+    default: nil
     }
-    return artifactURL(relativePath: summary.artifacts.visualReport)
   }
 
   public var pdfReportURL: URL? {
-    guard
-      case .completed(let summary) = phase,
-      let relativePath = summary.artifacts.pdfReport
-    else {
-      return nil
+    let relativePath: String?
+    switch phase {
+    case .completed(let summary): relativePath = summary.artifacts.pdfReport
+    case .acquisitionCompleted(let summary): relativePath = summary.artifacts.pdfReport
+    default: relativePath = nil
     }
-    return artifactURL(relativePath: relativePath)
+    return relativePath.flatMap(artifactURL)
   }
 
   public var analysisDirectoryURL: URL? {
-    guard case .completed(let summary) = phase else {
-      return nil
+    switch phase {
+    case .completed(let summary): artifactURL(relativePath: summary.artifacts.analysisDirectory)
+    case .acquisitionCompleted(let summary):
+      artifactURL(relativePath: summary.artifacts.analysisDirectory)
+    default: nil
     }
-    return artifactURL(relativePath: summary.artifacts.analysisDirectory)
   }
 
   private func startPreflight() {
@@ -601,6 +680,7 @@ public final class RecoverySession {
         acknowledgeSensitiveOutput: false
       )
       prepareForOperation()
+      isAcquisitionRoute = false
       activeAction = .preflight
       let stream = try helperClient.events(for: request, secret: nil)
       phase = .preflighting(
@@ -644,7 +724,12 @@ public final class RecoverySession {
           await handle(event)
         }
         sourceLease.stop()
-        if retainDestinationOnSuccess, case .completed = phase {
+        if retainDestinationOnSuccess,
+          case .completed = phase
+        {
+          retainedDestinationLease?.stop()
+          retainedDestinationLease = destinationLease
+        } else if retainDestinationOnSuccess, case .acquisitionCompleted = phase {
           retainedDestinationLease?.stop()
           retainedDestinationLease = destinationLease
         } else {
@@ -723,6 +808,40 @@ public final class RecoverySession {
         } else {
           failOutputValidation(error)
         }
+      }
+    case .acquisitionCompleted(let summary):
+      cancelPendingInterruptionRequests()
+      activeAction = nil
+      guard !cancellationSignalSent else {
+        failCancellation(for: .recovery)
+        return
+      }
+      do {
+        guard let outputDirectory else {
+          throw RecoveryOutputValidationError.missingArtifact
+        }
+        phase = .validating(
+          RecoveryProgress(
+            stage: "validation",
+            kind: "started",
+            message: "Validating recovered output…"
+          )
+        )
+        let validator = acquisitionOutputValidator
+        let task = Task.detached(priority: .userInitiated) {
+          try validator(summary, outputDirectory)
+        }
+        validationTask = task
+        try await task.value
+        validationTask = nil
+        guard !cancellationSignalSent, case .validating = phase else {
+          throw CancellationError()
+        }
+        phase = .acquisitionCompleted(summary)
+      } catch is CancellationError {
+        failValidationCancellation()
+      } catch {
+        failOutputValidation(error)
       }
     case .failed(let failure):
       cancelPendingInterruptionRequests()

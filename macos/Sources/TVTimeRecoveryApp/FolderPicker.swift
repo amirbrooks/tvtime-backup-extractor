@@ -39,6 +39,40 @@ final class FolderPicker {
     }
   }
 
+  func chooseAcquisitionSource(kind: AcquisitionSourceKind) async throws -> URL? {
+    diagnostics.record(.milestone(.backupPicker, .pickerPresented))
+    let panel = NSOpenPanel()
+    panel.title = "Choose a Private Local Recovery Source"
+    panel.message = "Choose only a local source you control. Recovered content stays offline."
+    panel.prompt = "Choose Source"
+    panel.canChooseFiles = kind != .androidPreservedSnapshot
+    panel.canChooseDirectories = kind == .androidPreservedSnapshot
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = false
+    panel.resolvesAliases = true
+    let selected = await withCheckedContinuation { continuation in
+      panel.begin { response in
+        continuation.resume(returning: response == .OK ? panel.url : nil)
+      }
+    }
+    guard let selected else {
+      diagnostics.record(.milestone(.backupPicker, .pickerCancelled))
+      return nil
+    }
+    let keys: Set<URLResourceKey> =
+      kind == .androidPreservedSnapshot
+      ? [.isDirectoryKey, .isSymbolicLinkKey]
+      : [.isRegularFileKey, .isSymbolicLinkKey]
+    let values = try selected.resourceValues(forKeys: keys)
+    guard values.isSymbolicLink != true else { throw FolderPickerError.invalidDirectory }
+    if kind == .androidPreservedSnapshot {
+      guard values.isDirectory == true else { throw FolderPickerError.invalidDirectory }
+    } else {
+      guard values.isRegularFile == true else { throw FolderPickerError.invalidDirectory }
+    }
+    return selected.standardizedFileURL
+  }
+
   private func chooseDirectory(
     title: String,
     message: String,

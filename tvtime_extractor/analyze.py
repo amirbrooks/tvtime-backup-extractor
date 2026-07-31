@@ -7,7 +7,6 @@ import os
 import plistlib
 import sqlite3
 import stat
-import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
@@ -25,12 +24,18 @@ from .errors import (
 )
 from .extract import PRIMARY_DOMAIN
 from .integrity import reconcile_raw_tree, source_snapshot_from_mapping
+from .legacy_cache import (
+    LegacyCacheNodeLimitError,
+    decode_legacy_cache_archive,
+    normalize_legacy_archives,
+)
 from .safety import (
     MAXIMUM_COMPLETION_MARKER_BYTES,
     anchored_existing_extraction_root,
     iter_regular_files,
     prepare_analysis_layout,
     private_source_id,
+    private_temporary_directory,
     promote_directory_no_replace_atomic,
     read_json_regular,
     regular_binary_reader,
@@ -588,8 +593,10 @@ def readonly_sqlite(
     expected_main_metadata: os.stat_result | None = None,
     require_private_source: bool = False,
 ) -> Iterator[sqlite3.Connection]:
-    with tempfile.TemporaryDirectory(prefix=".tvtime-sqlite-", dir=path.parent) as temporary:
-        snapshot_directory = secure_directory(Path(temporary))
+    with private_temporary_directory(
+        prefix=".tvtime-sqlite-",
+        parent=path.parent,
+    ) as snapshot_directory:
         snapshot = snapshot_directory / path.name
 
         def copy_snapshot(held_metadata: os.stat_result) -> None:
@@ -709,6 +716,21 @@ def _integer(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _external_source_id(meta: Mapping[str, object], source_name: str) -> str:
+    sources = meta.get("external_sources")
+    if not isinstance(sources, list):
+        return ""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if str(source.get("source") or "").casefold() != source_name.casefold():
+            continue
+        external_id = _integer(source.get("id"))
+        if external_id > 0:
+            return str(external_id)
+    return ""
 
 
 def unique_favorites(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -889,6 +911,8 @@ def _analyze_extraction(
     unique_hashes: dict[str, str] = {}
     payload_records: list[tuple[str, object]] = []
     cache_exports: list[tuple[str, object, bool]] = []
+    total_json_nodes = 0
+    total_cache_payload_bytes = 0
     with readonly_sqlite(cache_db, require_private_source=True) as connection:
         try:
             quick_check = str(connection.execute("PRAGMA quick_check").fetchone()[0])
@@ -912,11 +936,11 @@ def _analyze_extraction(
                     "SELECT key, subKey, content, statusCode FROM cache_dio ORDER BY key, subKey"
                 )
             ) as cache_rows:
-                total_json_nodes = 0
                 for key, subkey, content, status_code in cache_rows:
                     if cancellation_check is not None:
                         cancellation_check()
                     raw_content = _cache_content_bytes(content)
+                    total_cache_payload_bytes += len(raw_content)
                     source_id = private_source_id(key, subkey)
                     digest = sha256_bytes(raw_content)
                     duplicate_of = unique_hashes.get(digest, "")
@@ -972,6 +996,109 @@ def _analyze_extraction(
         except sqlite3.Error as exc:
             raise TVTimeError("DioCache.db could not be read safely.") from exc
 
+    legacy_archives = []
+    documents = cache_db.parent
+    for path in regular_files:
+        if path == cache_db or path.parent != documents or path.suffix:
+            continue
+        if cancellation_check is not None:
+            cancellation_check()
+        with regular_binary_reader(path, require_private=True) as (handle, metadata):
+            prefix = handle.read(8)
+            if prefix != b"bplist00":
+                continue
+            if metadata.st_size > MAXIMUM_PLIST_BYTES:
+                raise _cache_limit_error(
+                    "legacy URL-cache property-list byte size",
+                    MAXIMUM_PLIST_BYTES,
+                )
+            archive_bytes = bytearray(prefix)
+            while len(archive_bytes) < metadata.st_size:
+                chunk = handle.read(min(1024 * 1024, metadata.st_size - len(archive_bytes)))
+                if not chunk:
+                    break
+                archive_bytes.extend(chunk)
+            if len(archive_bytes) != metadata.st_size:
+                raise UnsafePathError("A recovered legacy URL-cache archive changed while read.")
+        source_id = private_source_id(
+            "legacy-url-cache",
+            str(path.relative_to(documents)),
+        )
+        try:
+            archive = decode_legacy_cache_archive(
+                bytes(archive_bytes),
+                source_id=source_id,
+                observed_mtime_ns=metadata.st_mtime_ns,
+                maximum_nodes=MAXIMUM_CACHE_JSON_NODES,
+            )
+        except LegacyCacheNodeLimitError as exc:
+            raise _cache_limit_error(
+                "legacy URL-cache archive node count",
+                MAXIMUM_CACHE_JSON_NODES,
+            ) from exc
+        if archive is None:
+            continue
+        _bounded_utf8_length(
+            archive.url,
+            subject="legacy URL-cache request URL byte size",
+            maximum_bytes=MAXIMUM_CACHE_KEY_BYTES,
+        )
+        node_count = _validate_cache_json_complexity(
+            archive.payload,
+            cancellation_check=cancellation_check,
+        )
+        total_json_nodes += node_count
+        if total_json_nodes > MAXIMUM_TOTAL_CACHE_JSON_NODES:
+            raise _cache_limit_error(
+                "combined JSON node count",
+                MAXIMUM_TOTAL_CACHE_JSON_NODES,
+            )
+        total_cache_payload_bytes += len(archive.payload_bytes)
+        if total_cache_payload_bytes > MAXIMUM_TOTAL_CACHE_PAYLOAD_BYTES:
+            raise _cache_limit_error(
+                "combined cache-response byte size",
+                MAXIMUM_TOTAL_CACHE_PAYLOAD_BYTES,
+            )
+        digest = sha256_bytes(archive.payload_bytes)
+        duplicate_of = unique_hashes.get(digest, "")
+        unique_hashes.setdefault(digest, source_id)
+        exported_file = ""
+        if include_raw_cache:
+            exported_file = f"{source_id}.json"
+            cache_exports.append((exported_file, archive.payload, True))
+        data = _payload_data(archive.payload)
+        if isinstance(data, dict):
+            shape = "object"
+            data_type = str(data.get("type") or "")
+            objects = data.get("objects")
+            object_count: int | str = len(objects) if isinstance(objects, list) else ""
+        elif isinstance(data, list):
+            shape = "array"
+            data_type = ""
+            object_count = len(data)
+        else:
+            shape = type(data).__name__
+            data_type = ""
+            object_count = ""
+        if len(cache_index) >= MAXIMUM_CACHE_ROWS:
+            raise _cache_limit_error("combined cache-row count", MAXIMUM_CACHE_ROWS)
+        cache_index.append(
+            {
+                "source_id": source_id,
+                "status_code": "",
+                "bytes": len(archive.payload_bytes),
+                "sha256": digest,
+                "duplicate_of": duplicate_of,
+                "json_valid": True,
+                "shape": shape,
+                "data_type": data_type,
+                "object_count": object_count,
+                "exported_file": exported_file,
+            }
+        )
+        legacy_archives.append(archive)
+
+    payload_records.extend(normalize_legacy_archives(legacy_archives))
     recognized_payloads = sum(_is_supported_payload(payload) for _, payload in payload_records)
     if cache_index and not recognized_payloads:
         raise UnsupportedSchemaError(
@@ -1077,6 +1204,7 @@ def _analyze_extraction(
                         "air_date": item.get("air_date", ""),
                         "seen": item.get("seen", ""),
                         "seen_date": item.get("seen_date", ""),
+                        "is_special": item.get("is_special", ""),
                         "is_watched": item.get("is_watched", ""),
                         "runtime": item.get("runtime", ""),
                     }
@@ -1107,27 +1235,45 @@ def _analyze_extraction(
         extended = item.get("extended") if isinstance(item.get("extended"), dict) else {}
         filters = _filters(item.get("filter"))
         if item.get("entity_type") == "movie":
-            watched_at = item.get("watched_at") or sorting_value(item, "watched_date", "watch_date")
+            raw_watched_at = item.get("watched_at") or sorting_value(
+                item,
+                "watched_date",
+                "watch_date",
+            )
+            watched_at = (
+                ""
+                if isinstance(raw_watched_at, str) and raw_watched_at.startswith("0001-01-01")
+                else raw_watched_at
+            )
+            is_watched = bool(extended.get("is_watched") or raw_watched_at)
             movie_library.append(
                 {
                     "uuid": item.get("uuid", ""),
                     "name": meta.get("name", ""),
                     "imdb_id": meta.get("imdb_id", ""),
+                    "tvdb_id": _external_source_id(meta, "tvdb"),
                     "first_release_date": meta.get("first_release_date", ""),
-                    "library_status": "watched"
-                    if watched_at
-                    else (filters[0] if filters else "saved"),
+                    "library_status": (
+                        "watched" if is_watched else (filters[0] if filters else "saved")
+                    ),
                     "watched_at": watched_at,
                     "followed_at": sorting_value(item, "follow_date"),
                     "runtime_seconds": meta.get("runtime", ""),
                     "genres": " | ".join(str(value) for value in meta.get("genres") or []),
                     "filters": " | ".join(filters),
-                    "is_watched": extended.get("is_watched", ""),
+                    "is_watched": is_watched,
+                    "rewatch_count": item.get(
+                        "rewatch_count",
+                        extended.get("rewatch_count", ""),
+                    ),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
             )
         elif item.get("entity_type") == "series":
+            watch_status = (
+                item.get("watch_status") if isinstance(item.get("watch_status"), dict) else {}
+            )
             series_library.append(
                 {
                     "uuid": item.get("uuid", ""),
@@ -1138,13 +1284,15 @@ def _analyze_extraction(
                     "followed_at": sorting_value(item, "follow_date"),
                     "last_watch_date": sorting_value(item, "watch_date", "watched_date"),
                     "filters": " | ".join(filters),
+                    "watched_episode_count": watch_status.get("watched_episode_count", ""),
+                    "aired_episode_count": watch_status.get("aired_episode_count", ""),
                     "created_at": item.get("created_at", ""),
                     "updated_at": item.get("updated_at", ""),
                 }
             )
 
-    watched_movies = [row for row in movie_library if row["watched_at"]]
-    movie_watchlist = [row for row in movie_library if not row["watched_at"]]
+    watched_movies = [row for row in movie_library if row["is_watched"]]
+    movie_watchlist = [row for row in movie_library if not row["is_watched"]]
     movie_by_uuid = {str(row["uuid"]): row for row in movie_library}
     named_watch_events = [
         {**event, "movie_name": movie_by_uuid.get(str(event.get("uuid")), {}).get("name", "")}
@@ -1170,6 +1318,7 @@ def _analyze_extraction(
         "uuid",
         "name",
         "imdb_id",
+        "tvdb_id",
         "first_release_date",
         "library_status",
         "watched_at",
@@ -1178,6 +1327,7 @@ def _analyze_extraction(
         "genres",
         "filters",
         "is_watched",
+        "rewatch_count",
         "created_at",
         "updated_at",
     ]
@@ -1208,6 +1358,8 @@ def _analyze_extraction(
             "followed_at",
             "last_watch_date",
             "filters",
+            "watched_episode_count",
+            "aired_episode_count",
             "created_at",
             "updated_at",
         ],
@@ -1237,6 +1389,7 @@ def _analyze_extraction(
         "air_date",
         "seen",
         "seen_date",
+        "is_special",
         "is_watched",
         "runtime",
     ]

@@ -17,9 +17,11 @@ TVTime-Extraction/
     ├── TVTime-Recovered-Data.md       canonical complete readable report
     ├── TVTime-Recovered-Data.html     self-contained offline visual report
     ├── TVTime-Recovered-Data.pdf      optional faithful printable report
+    ├── Suite-TV-Liberator-confirmed.zip
+    ├── Suite-TV-Liberator-estimated-progress.zip
     ├── recovery_state.json            full-recovery/report checkpoint
     ├── analysis_summary.json          parser, integrity, and table counts
-    ├── cache_index.csv                 opaque cache-source index
+    ├── cache_index.csv                 opaque database/legacy cache-source index
     ├── movie_library.csv               watched and saved movies
     ├── watched_movies.csv
     ├── movie_watchlist.csv
@@ -40,6 +42,12 @@ TVTime-Extraction/
 Exact rows depend on what remains in the local app cache. Empty tables, unnamed watch events, and
 missing image references are possible. Counts are not a guarantee of account completeness because
 this is local-backup recovery, not an official TV Time export.
+
+When present, compatible extensionless `NSKeyedArchiver` responses from the primary app's
+`Documents` directory contribute through the same normalized tables. Their filenames, request URLs,
+and account identifiers are not copied into those tables; `cache_index.csv` uses opaque source IDs.
+Series-like entries from old social-following payloads are accepted only when a recovered episode
+catalogue ties the same numeric series ID to actual episodes.
 
 **How to read the series count:** `Recovered series records` counts the recovered cache rows exactly;
 it is not silently deduplicated by title. The readable report separately shows named versus unnamed
@@ -77,6 +85,21 @@ Markdown and offline HTML remain complete; no names are silently dropped to forc
 The visual reports show aggregate media-reference counts but do not embed or fetch remote images or
 videos. Detailed sanitized references remain in the CSV tables.
 
+## Suite TV import archives
+
+Both Suite TV archives reproduce the five root-level files emitted by TV Time Liberator:
+`shows.json`, `movies.json`, `favorites.json`, `lists.json`, and `activity_history.csv`. Generation
+uses only the already recovered private tables and performs no network lookup.
+
+Use `Suite-TV-Liberator-confirmed.zip` when exactness matters. It marks only episodes and movies whose
+watch state was recovered directly. Use `Suite-TV-Liberator-estimated-progress.zip` only when
+preserving a recovered aggregate series count is more useful than exact episode selection. That
+archive retains exact watches, never estimates specials, and fills the oldest unwatched regular
+episodes until the aggregate count is reached. It cannot infer skipped or out-of-order episodes.
+Movies without a recovered positive TVDB identifier are omitted from both archives. The generated
+Favorites list is always private, even though the upstream Liberator currently labels that list
+public.
+
 ## Completion markers and atomic promotion
 
 `metadata/run_state.json` uses the versioned v0.2 contract and begins as `incomplete`. It changes to
@@ -87,8 +110,9 @@ been revalidated.
 
 `analysis/recovery_state.json` uses the versioned v0.2 contract. It is written with
 `status: complete` in a private staging directory only
-after the Markdown and HTML reports are complete and the PDF has either been generated faithfully or
-explicitly omitted. It binds an exact ordered artifact set—including `metadata/domains.txt`—with
+after the Markdown, HTML, and Suite TV archives are complete and the PDF has either been generated
+faithfully or explicitly omitted. It binds an exact ordered artifact set, including
+`metadata/domains.txt`, with
 byte sizes, lowercase SHA-256 digests, aggregate extraction/analysis/report counts, and PDF presence
 state. The exact bounded serialized marker bytes are read back after writing and again immediately
 before the entire staged analysis directory is promoted atomically.
@@ -115,13 +139,15 @@ an analysis containing either advanced export cannot be promoted to a native-val
 
 ## CSV behavior
 
-CSV files preserve exact private timestamps and identifiers needed for a faithful personal archive.
+CSV and Suite TV files preserve exact private timestamps and identifiers needed for a faithful
+personal archive.
 Cells that could be interpreted as spreadsheet formulas are prefixed safely when written. The
 coordinates of those escaped cells are recorded in `analysis_summary.json`, allowing the report
 builder to reverse only those exact escapes when it reconstructs readable text.
 
-Opening a CSV in spreadsheet software can create Recent Items, autosave, cache, or sync copies.
-Import it only in a private local application and never upload it to an online spreadsheet service.
+Opening a CSV in spreadsheet software or importing a ZIP into Suite TV can create Recent Items,
+autosave, cache, or sync copies. Import either only in a private local application and never upload a
+recovery artifact to an online conversion service.
 
 ## Permissions and sensitivity
 

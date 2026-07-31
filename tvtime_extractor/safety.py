@@ -17,11 +17,12 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from . import windows_native as _windows_native
 from .errors import OutputExistsError, PartialExtractionError, UnsafePathError, UserInputError
 
 EXTRACTION_DIRECTORY_NAME = "TVTime-Extraction"
@@ -54,21 +55,30 @@ _DARWIN_MNT_LOCAL = 0x00001000
 _WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_DELETE = 0x00010000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_FILE_SHARE_DELETE = 0x00000004
 _WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_CREATE_NEW = 1
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
+_WINDOWS_FILE_ADD_SUBDIRECTORY = 0x00000004
+_WINDOWS_FILE_TRAVERSE = 0x00000020
+_WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS = _WINDOWS_FILE_ADD_SUBDIRECTORY | _WINDOWS_FILE_TRAVERSE
+_WINDOWS_SYNCHRONIZE = 0x00100000
+_WINDOWS_FILE_CREATE = 2
+_WINDOWS_FILE_DIRECTORY_FILE = 0x00000001
+_WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+_WINDOWS_OBJ_CASE_INSENSITIVE = 0x00000040
+_WINDOWS_STATUS_OBJECT_NAME_COLLISION = -1073741771
+_WINDOWS_SDDL_REVISION_1 = 1
 _LINUX_RENAME_NOREPLACE = 1
 _DARWIN_RENAME_EXCL = 0x00000004
-WINDOWS_FRESH_RECOVERY_UNSUPPORTED_MESSAGE = (
-    "Fresh extraction and recovery are not supported on Windows in this release because Python "
-    "cannot atomically create and lock the new plaintext output directory. Use macOS or Linux "
-    "for extraction; Windows can safely analyze or report an existing complete extraction."
-)
 _REMOTE_FILESYSTEM_TYPES = frozenset(
     {
         "9p",
@@ -167,6 +177,40 @@ class _WindowsByHandleFileInformation(ctypes.Structure):
     ]
 
 
+class _WindowsUnicodeString(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_ushort),
+        ("maximum_length", ctypes.c_ushort),
+        ("buffer", ctypes.c_void_p),
+    ]
+
+
+class _WindowsObjectAttributes(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_ulong),
+        ("root_directory", ctypes.c_void_p),
+        ("object_name", ctypes.POINTER(_WindowsUnicodeString)),
+        ("attributes", ctypes.c_ulong),
+        ("security_descriptor", ctypes.c_void_p),
+        ("security_quality_of_service", ctypes.c_void_p),
+    ]
+
+
+class _WindowsIOStatusBlock(ctypes.Structure):
+    _fields_ = [
+        ("status", ctypes.c_ssize_t),
+        ("information", ctypes.c_size_t),
+    ]
+
+
+class _WindowsSecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_uint32),
+        ("security_descriptor", ctypes.c_void_p),
+        ("inherit_handle", ctypes.c_int),
+    ]
+
+
 @dataclass(frozen=True)
 class _WindowsRegularFileInformation:
     identity: tuple[int, int]
@@ -216,6 +260,7 @@ class _WindowsBoundOutputState:
     handle: int
     identity: tuple[int, int]
     visible_root: Path
+    descendant_handles: dict[str, tuple[Path, int, tuple[int, int]]] = field(default_factory=dict)
 
 
 _ANCHORED_OUTPUT_STATE: ContextVar[_AnchoredOutputState | None] = ContextVar(
@@ -583,10 +628,26 @@ def _running_on_windows() -> bool:
 
 
 def require_fresh_output_platform_support() -> None:
-    """Fail before creating plaintext output where fresh-root creation is not atomic."""
+    """Require one platform with a reviewed fresh-root anchoring implementation."""
 
     if _running_on_windows():
-        raise UserInputError(WINDOWS_FRESH_RECOVERY_UNSUPPORTED_MESSAGE)
+        # Loading both libraries here keeps failure before password entry or
+        # plaintext creation. The actual atomic operation remains in
+        # _windows_create_private_directory_relative.
+        _windows_kernel32()
+        _windows_ntdll()
+
+
+def require_encrypted_ios_source_platform_support() -> None:
+    """Require the reviewed native source-binding primitives before password entry."""
+
+    if _running_on_windows():
+        try:
+            _windows_native.require_supported_runtime()
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError(
+                "Encrypted iOS recovery requires a supported 64-bit Windows 11 installation."
+            ) from exc
 
 
 def _windows_kernel32() -> Any:
@@ -599,6 +660,157 @@ def _windows_kernel32() -> Any:
         return loader("kernel32", use_last_error=True)
     except (OSError, TypeError) as exc:
         raise UnsafePathError("Windows directory-handle binding was unavailable.") from exc
+
+
+def _windows_ntdll() -> Any:
+    if not _running_on_windows():
+        raise UnsafePathError("Windows atomic directory creation is unavailable on this platform.")
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        raise UnsafePathError("Windows atomic directory creation was unavailable.")
+    try:
+        return loader("ntdll", use_last_error=True)
+    except (OSError, TypeError) as exc:
+        raise UnsafePathError("Windows atomic directory creation was unavailable.") from exc
+
+
+def _windows_private_security_descriptor() -> tuple[int, Callable[[], None]]:
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        raise UnsafePathError("Windows private ACL creation was unavailable.")
+    try:
+        advapi32 = loader("advapi32", use_last_error=True)
+        kernel32 = _windows_kernel32()
+        convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        convert.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        convert.restype = ctypes.c_int
+        local_free = kernel32.LocalFree
+        local_free.argtypes = [ctypes.c_void_p]
+        local_free.restype = ctypes.c_void_p
+    except (AttributeError, OSError, TypeError) as exc:
+        raise UnsafePathError("Windows private ACL creation was unavailable.") from exc
+    descriptor = ctypes.c_void_p()
+    # Protected DACL. The creator/owner and SYSTEM receive full control, with
+    # object/container inheritance so every recovered descendant stays private.
+    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+    try:
+        succeeded = convert(
+            sddl,
+            _WINDOWS_SDDL_REVISION_1,
+            ctypes.byref(descriptor),
+            None,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise UnsafePathError("Windows private ACL creation was unavailable.") from exc
+    if not succeeded or not descriptor.value:
+        raise _windows_error("Windows private ACL creation failed.")
+
+    def release() -> None:
+        if descriptor.value:
+            local_free(descriptor)
+            descriptor.value = None
+
+    return int(descriptor.value), release
+
+
+def _windows_create_private_directory_relative(parent_handle: int, name: str) -> int:
+    """Atomically create and open one private child beneath an already-held parent."""
+
+    if (
+        not isinstance(parent_handle, int)
+        or isinstance(parent_handle, bool)
+        or parent_handle <= 0
+        or not name
+        or name in {".", ".."}
+        or "\\" in name
+        or "/" in name
+        or "\x00" in name
+    ):
+        raise UnsafePathError("The Windows destination child name was invalid.")
+    encoded = name.encode("utf-16-le")
+    if len(encoded) > 65_534:
+        raise UnsafePathError("The Windows destination child name was too long.")
+    name_buffer = ctypes.create_unicode_buffer(name)
+    unicode_name = _WindowsUnicodeString(
+        length=len(encoded),
+        maximum_length=len(encoded) + 2,
+        buffer=ctypes.cast(name_buffer, ctypes.c_void_p),
+    )
+    security_descriptor, release_security_descriptor = _windows_private_security_descriptor()
+    attributes = _WindowsObjectAttributes(
+        length=ctypes.sizeof(_WindowsObjectAttributes),
+        root_directory=ctypes.c_void_p(parent_handle),
+        object_name=ctypes.pointer(unicode_name),
+        attributes=_WINDOWS_OBJ_CASE_INSENSITIVE,
+        security_descriptor=ctypes.c_void_p(security_descriptor),
+        security_quality_of_service=None,
+    )
+    status_block = _WindowsIOStatusBlock()
+    opened = ctypes.c_void_p()
+    ntdll = _windows_ntdll()
+    try:
+        create_file = ntdll.NtCreateFile
+        create_file.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32,
+            ctypes.POINTER(_WindowsObjectAttributes),
+            ctypes.POINTER(_WindowsIOStatusBlock),
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        create_file.restype = ctypes.c_long
+        status = int(
+            create_file(
+                ctypes.byref(opened),
+                _WINDOWS_FILE_LIST_DIRECTORY
+                | _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
+                | _WINDOWS_FILE_READ_ATTRIBUTES
+                | _WINDOWS_DELETE
+                | _WINDOWS_SYNCHRONIZE,
+                ctypes.byref(attributes),
+                ctypes.byref(status_block),
+                None,
+                _WINDOWS_FILE_ATTRIBUTE_DIRECTORY,
+                _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+                _WINDOWS_FILE_CREATE,
+                _WINDOWS_FILE_DIRECTORY_FILE
+                | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
+                | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+                0,
+            )
+        )
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise UnsafePathError("The fresh Windows destination could not be created safely.") from exc
+    finally:
+        release_security_descriptor()
+    handle = _windows_handle_value(opened)
+    if status == _WINDOWS_STATUS_OBJECT_NAME_COLLISION:
+        if handle > 0:
+            _windows_close_handle(handle)
+        raise OutputExistsError(
+            "The destination already exists. Choose a fresh private recovery folder."
+        )
+    if status < 0 or handle in {-1, 0, _WINDOWS_INVALID_HANDLE_VALUE}:
+        if handle > 0:
+            _windows_close_handle(handle)
+        raise UnsafePathError("The fresh Windows destination could not be created safely.")
+    try:
+        _windows_directory_identity(handle)
+    except BaseException:
+        _windows_close_handle(handle)
+        raise
+    return handle
 
 
 def _windows_error(message: str) -> UnsafePathError:
@@ -619,7 +831,13 @@ def _windows_handle_value(value: object) -> int:
     return -1
 
 
-def _windows_create_file_directory_handle(path: Path) -> int:
+def _windows_create_file_directory_handle(
+    path: Path,
+    *,
+    allow_rename: bool = False,
+    allow_child_creation: bool = False,
+    share_delete: bool = False,
+) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
 
     kernel32 = _windows_kernel32()
@@ -636,10 +854,18 @@ def _windows_create_file_directory_handle(path: Path) -> int:
         ]
         create_file.restype = ctypes.c_void_p
     try:
+        share_mode = _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE
+        if share_delete:
+            share_mode |= _WINDOWS_FILE_SHARE_DELETE
+        desired_access = _WINDOWS_FILE_READ_ATTRIBUTES
+        if allow_rename:
+            desired_access |= _WINDOWS_DELETE
+        if allow_child_creation:
+            desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
         opened = create_file(
             os.fspath(path),
-            _WINDOWS_FILE_READ_ATTRIBUTES,
-            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            desired_access,
+            share_mode,
             None,
             _WINDOWS_OPEN_EXISTING,
             _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
@@ -685,6 +911,235 @@ def _windows_create_file_regular_handle(path: Path) -> int:
     if handle in {-1, 0, _WINDOWS_INVALID_HANDLE_VALUE}:
         raise _windows_error("A required private data file could not be opened safely.")
     return handle
+
+
+def _windows_create_private_file_descriptor(path: Path, *, desired_access: int) -> int:
+    if not _running_on_windows():
+        raise UnsafePathError("Windows private staging is unavailable on this platform.")
+    security_descriptor, release_security_descriptor = _windows_private_security_descriptor()
+    attributes = _WindowsSecurityAttributes(
+        length=ctypes.sizeof(_WindowsSecurityAttributes),
+        security_descriptor=ctypes.c_void_p(security_descriptor),
+        inherit_handle=False,
+    )
+    kernel32 = _windows_kernel32()
+    create_file = kernel32.CreateFileW
+    with suppress(AttributeError):
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(_WindowsSecurityAttributes),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+    try:
+        opened = create_file(
+            os.fspath(path),
+            desired_access,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            ctypes.byref(attributes),
+            _WINDOWS_CREATE_NEW,
+            _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise UnsafePathError(
+            "A private Windows staging file could not be created safely."
+        ) from exc
+    finally:
+        release_security_descriptor()
+    handle = _windows_handle_value(opened)
+    if handle in {-1, 0, _WINDOWS_INVALID_HANDLE_VALUE}:
+        raise _windows_error("A private Windows staging file could not be created safely.")
+    try:
+        information = _windows_regular_file_information(handle)
+        if information.byte_size != 0:
+            raise UnsafePathError("A private Windows staging file was not fresh.")
+        import msvcrt
+
+        descriptor = msvcrt.open_osfhandle(
+            handle,
+            os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+        )
+        handle = -1
+        return descriptor
+    except BaseException:
+        if handle > 0:
+            _windows_close_handle(handle)
+        raise
+
+
+def windows_create_private_staging_descriptor(path: Path) -> int:
+    """Create a private file whose exact handle can atomically promote it."""
+
+    return _windows_create_private_file_descriptor(
+        path,
+        desired_access=_WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE | _WINDOWS_DELETE,
+    )
+
+
+def windows_create_private_capture_descriptor(path: Path) -> int:
+    """Create a pinned private file that a path-only capture tool may reopen."""
+
+    return _windows_create_private_file_descriptor(
+        path,
+        desired_access=_WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE,
+    )
+
+
+def _windows_rename_handle_no_replace(
+    native_handle: int,
+    destination: Path,
+) -> None:
+    """Rename one exact Windows file or directory handle without replacement."""
+
+    parent_handle = -1
+    try:
+        parent_handle, _parent_identity = _windows_open_locked_directory(
+            destination.parent,
+            allow_child_creation=True,
+        )
+        try:
+            _windows_native.rename_handle_relative(
+                native_handle,
+                parent_handle,
+                (destination.name,),
+                replace=False,
+            )
+        except _windows_native.WindowsObjectExistsError as exc:
+            raise OutputExistsError(
+                "The destination appeared before atomic promotion. Nothing was overwritten."
+            ) from exc
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError("The private Windows file could not be promoted safely.") from exc
+    finally:
+        if parent_handle > 0:
+            _windows_close_handle(parent_handle)
+
+
+def _windows_promote_held_file_no_replace(
+    source: Path,
+    destination: Path,
+    *,
+    held_descriptor: int,
+) -> None:
+    """Rename through the exact held staging handle without permitting replacement."""
+
+    try:
+        import msvcrt
+
+        native_handle = int(msvcrt.get_osfhandle(held_descriptor))
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        raise UnsafePathError("The private Windows staging handle was unavailable.") from exc
+    _windows_rename_handle_no_replace(native_handle, destination)
+    if source.exists() or source.is_symlink():
+        raise UnsafePathError("The private Windows staging name remained after promotion.")
+
+
+def _windows_suspend_bound_descendants(
+    state: _WindowsBoundOutputState,
+    source: Path,
+) -> list[tuple[Path, tuple[int, int]]]:
+    """Close child directory capabilities that would block their parent's rename."""
+
+    source_key = _casefolded_path(source)
+    selected: list[tuple[str, Path, int, tuple[int, int], Path]] = []
+    for key, (visible, handle, identity) in state.descendant_handles.items():
+        if key == source_key:
+            continue
+        try:
+            relative = visible.relative_to(source)
+        except ValueError:
+            continue
+        selected.append((key, visible, handle, identity, relative))
+    selected.sort(key=lambda item: len(item[4].parts), reverse=True)
+
+    for _key, visible, handle, identity, _relative in selected:
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+
+    suspended: list[tuple[Path, tuple[int, int]]] = []
+    for key, _visible, handle, identity, relative in selected:
+        try:
+            _windows_close_handle(handle)
+        except BaseException:
+            _windows_resume_bound_descendants(state, source, suspended)
+            raise
+        state.descendant_handles.pop(key, None)
+        suspended.append((relative, identity))
+    return suspended
+
+
+def _windows_resume_bound_descendants(
+    state: _WindowsBoundOutputState,
+    base: Path,
+    suspended: list[tuple[Path, tuple[int, int]]],
+) -> None:
+    """Reopen moved child directories and require their exact prior identities."""
+
+    for relative, expected_identity in sorted(
+        suspended,
+        key=lambda item: len(item[0].parts),
+    ):
+        visible = base / relative
+        handle, identity = _windows_open_locked_directory(
+            visible,
+            allow_rename=True,
+            allow_child_creation=True,
+        )
+        try:
+            if identity != expected_identity:
+                raise UnsafePathError(
+                    "A Windows recovery directory changed during atomic promotion."
+                )
+            _require_windows_visible_directory_identity(
+                visible,
+                expected_identity=expected_identity,
+            )
+            state.descendant_handles[_casefolded_path(visible)] = (
+                visible,
+                handle,
+                identity,
+            )
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+
+
+def _windows_promote_bound_directory_no_replace(source: Path, destination: Path) -> None:
+    """Promote a retained directory and rebind every retained descendant path."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        raise UnsafePathError("A trusted Windows output-root handle was not active.")
+    source_key = _casefolded_path(source)
+    entry = state.descendant_handles.get(source_key)
+    if entry is None:
+        raise UnsafePathError("The Windows staging directory was not retained for promotion.")
+    _visible, handle, identity = entry
+    if _windows_directory_identity(handle) != identity:
+        raise UnsafePathError("The Windows staging directory identity changed before promotion.")
+    suspended = _windows_suspend_bound_descendants(state, source)
+    try:
+        _windows_rename_handle_no_replace(handle, destination)
+    except BaseException:
+        _windows_resume_bound_descendants(state, source, suspended)
+        raise
+    if source.exists() or source.is_symlink():
+        raise UnsafePathError("The private Windows staging directory remained after promotion.")
+
+    state.descendant_handles.pop(source_key, None)
+    state.descendant_handles[_casefolded_path(destination)] = (
+        destination,
+        handle,
+        identity,
+    )
+    _windows_resume_bound_descendants(state, destination, suspended)
+    _require_windows_visible_directory_identity(destination, expected_identity=identity)
 
 
 def _windows_regular_file_information(handle: int) -> _WindowsRegularFileInformation:
@@ -818,14 +1273,190 @@ def _windows_close_handle(handle: int) -> None:
         raise _windows_error("A Windows directory handle could not be closed safely.")
 
 
-def _windows_open_locked_directory(path: Path) -> tuple[int, tuple[int, int]]:
-    handle = _windows_create_file_directory_handle(path)
+def _windows_open_locked_directory(
+    path: Path,
+    *,
+    allow_rename: bool = False,
+    allow_child_creation: bool = False,
+    share_delete: bool = False,
+) -> tuple[int, tuple[int, int]]:
+    handle = _windows_create_file_directory_handle(
+        path,
+        allow_rename=allow_rename,
+        allow_child_creation=allow_child_creation,
+        share_delete=share_delete,
+    )
     try:
         return handle, _windows_directory_identity(handle)
     except BaseException:
         with suppress(Exception):
             _windows_close_handle(handle)
         raise
+
+
+def _windows_hold_bound_descendant_directory(path: Path) -> None:
+    """Retain a no-delete-sharing handle for every directory below a bound root."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        return
+    candidate = no_link_absolute_path(path)
+    if not _is_within_casefolded(candidate, state.visible_root):
+        raise UnsafePathError("A Windows recovery directory escaped its held output root.")
+    key = _casefolded_path(candidate)
+    root_key = _casefolded_path(state.visible_root)
+    if key == root_key:
+        _require_windows_visible_directory_identity(candidate, expected_identity=state.identity)
+        return
+    if key in state.descendant_handles:
+        _visible, handle, identity = state.descendant_handles[key]
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _require_windows_visible_directory_identity(candidate, expected_identity=identity)
+        return
+    parent_key = _casefolded_path(candidate.parent)
+    if parent_key != root_key and parent_key not in state.descendant_handles:
+        raise UnsafePathError(
+            "A Windows recovery directory parent was not retained before its child."
+        )
+    handle, identity = _windows_open_locked_directory(
+        candidate,
+        allow_rename=True,
+        allow_child_creation=True,
+    )
+    try:
+        _require_windows_visible_directory_identity(candidate, expected_identity=identity)
+        state.descendant_handles[key] = (candidate, handle, identity)
+    except BaseException:
+        _windows_close_handle(handle)
+        raise
+
+
+def _windows_create_and_hold_bound_descendant_directory(path: Path) -> None:
+    """Atomically create a private child through its retained parent handle."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        raise UnsafePathError("A trusted Windows output-root handle was not active.")
+    candidate = no_link_absolute_path(path)
+    if not _is_within_casefolded(candidate, state.visible_root) or candidate == state.visible_root:
+        raise UnsafePathError("A Windows recovery directory escaped its held output root.")
+    parent_key = _casefolded_path(candidate.parent)
+    root_key = _casefolded_path(state.visible_root)
+    if parent_key == root_key:
+        parent_handle = state.handle
+    else:
+        parent_entry = state.descendant_handles.get(parent_key)
+        if parent_entry is None:
+            raise UnsafePathError(
+                "A Windows recovery directory parent was not retained before its child."
+            )
+        _parent_visible, parent_handle, parent_identity = parent_entry
+        if _windows_directory_identity(parent_handle) != parent_identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+    handle = _windows_create_private_directory_relative(parent_handle, candidate.name)
+    try:
+        identity = _windows_directory_identity(handle)
+        _require_windows_visible_directory_identity(candidate, expected_identity=identity)
+        state.descendant_handles[_casefolded_path(candidate)] = (candidate, handle, identity)
+    except BaseException:
+        _windows_close_handle(handle)
+        raise
+
+
+def _windows_close_bound_descendant_directories(state: _WindowsBoundOutputState) -> None:
+    validation_error: BaseException | None = None
+    ordered = sorted(
+        state.descendant_handles.items(),
+        key=lambda item: item[0].count(os.sep),
+        reverse=True,
+    )
+    try:
+        for _key, (visible, handle, identity) in ordered:
+            try:
+                if _windows_directory_identity(handle) != identity:
+                    raise UnsafePathError("A held Windows recovery directory identity changed.")
+                _require_windows_visible_directory_identity(
+                    visible,
+                    expected_identity=identity,
+                )
+            except BaseException as exc:
+                if validation_error is None:
+                    validation_error = exc
+    finally:
+        for _key, (_visible, handle, _identity) in ordered:
+            try:
+                _windows_close_handle(handle)
+            except BaseException as exc:
+                if validation_error is None:
+                    validation_error = exc
+        state.descendant_handles.clear()
+    if validation_error is not None:
+        raise validation_error
+
+
+def _windows_release_bound_descendant_directory(path: Path) -> None:
+    """Release one empty ephemeral directory before its scoped cleanup."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        return
+    candidate = no_link_absolute_path(path)
+    key = _casefolded_path(candidate)
+    entry = state.descendant_handles.get(key)
+    if entry is None:
+        return
+    for other_key, (
+        other_visible,
+        _other_handle,
+        _other_identity,
+    ) in state.descendant_handles.items():
+        if other_key != key and _is_within_casefolded(other_visible, candidate):
+            raise UnsafePathError(
+                "A temporary Windows recovery directory still retained a child capability."
+            )
+
+    visible, handle, identity = entry
+    validation_error: BaseException | None = None
+    try:
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+    except BaseException as exc:
+        validation_error = exc
+    finally:
+        state.descendant_handles.pop(key, None)
+        try:
+            _windows_close_handle(handle)
+        except BaseException as exc:
+            if validation_error is None:
+                validation_error = exc
+    if validation_error is not None:
+        raise validation_error
+
+
+def _windows_hold_existing_descendant_directories(root: Path) -> None:
+    """Pin every existing directory in a selected private tree before traversal."""
+
+    for current_name, directory_names, _file_names in os.walk(
+        root, topdown=True, followlinks=False
+    ):
+        current = Path(current_name)
+        _windows_hold_bound_descendant_directory(current)
+        safe_names: list[str] = []
+        for name in sorted(directory_names):
+            candidate = current / name
+            try:
+                metadata = candidate.lstat()
+            except OSError as exc:
+                raise UnsafePathError(
+                    "A Windows recovery directory changed while it was retained."
+                ) from exc
+            if _is_link_or_reparse_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise UnsafePathError("A Windows recovery tree contained a redirected directory.")
+            _windows_hold_bound_descendant_directory(candidate)
+            safe_names.append(name)
+        directory_names[:] = safe_names
 
 
 def _require_windows_visible_directory_identity(
@@ -835,7 +1466,14 @@ def _require_windows_visible_directory_identity(
 ) -> None:
     visible_handle = -1
     try:
-        visible_handle, visible_identity = _windows_open_locked_directory(path)
+        # This is a transient identity check, not a retention lock. Sharing
+        # delete lets it coexist with the retained handle's DELETE access;
+        # the retained handle still omits FILE_SHARE_DELETE and therefore
+        # continues to deny rename/replacement by every other opener.
+        visible_handle, visible_identity = _windows_open_locked_directory(
+            path,
+            share_delete=True,
+        )
         if visible_identity != expected_identity:
             raise UnsafePathError("The visible Windows directory identity changed during recovery.")
     finally:
@@ -966,7 +1604,17 @@ def held_destination_parent(
     handle = -1
     try:
         if _running_on_windows():
-            handle, identity = _windows_open_locked_directory(parent)
+            handle, identity = _windows_open_locked_directory(
+                parent,
+                allow_child_creation=True,
+            )
+            try:
+                _windows_native.require_recovery_capabilities(handle)
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "Windows recovery requires a local NTFS destination with persistent "
+                    "access controls."
+                ) from exc
         else:
             try:
                 handle = os.open(parent, _descriptor_flags(stat.S_IFDIR))
@@ -1012,6 +1660,21 @@ def _open_bound_fresh_output_root(
     )
     if output_root.parent != parent or output_root.name in {"", ".", ".."}:
         raise UnsafePathError("The output was not a direct child of its selected destination.")
+    if _running_on_windows():
+        descriptor = _windows_create_private_directory_relative(
+            destination_parent_descriptor,
+            output_root.name,
+        )
+        try:
+            identity = _windows_directory_identity(descriptor)
+            _require_windows_visible_directory_identity(
+                output_root,
+                expected_identity=identity,
+            )
+            return descriptor, identity
+        except BaseException:
+            _windows_close_handle(descriptor)
+            raise
     try:
         os.mkdir(output_root.name, mode=0o700, dir_fd=destination_parent_descriptor)
     except FileExistsError as exc:
@@ -1141,6 +1804,58 @@ def anchored_bound_output_root(
     require_fresh_output_platform_support()
     visible_root = no_link_absolute_path(output_root)
 
+    if _running_on_windows():
+        root_handle = -1
+        root_identity = (0, 0)
+        token = None
+        windows_state: _WindowsBoundOutputState | None = None
+        try:
+            root_handle, root_identity = _open_bound_fresh_output_root(
+                visible_root,
+                destination_parent_descriptor=destination_parent_descriptor,
+                expected_identity=expected_parent_identity,
+            )
+            windows_state = _WindowsBoundOutputState(
+                handle=root_handle,
+                identity=root_identity,
+                visible_root=visible_root,
+            )
+            token = _WINDOWS_BOUND_OUTPUT_STATE.set(windows_state)
+            yield visible_root
+        finally:
+            validation_error: BaseException | None = None
+            if root_handle >= 0:
+                try:
+                    if _windows_directory_identity(root_handle) != root_identity:
+                        raise UnsafePathError(
+                            "The trusted Windows output-root handle identity changed."
+                        )
+                    _require_visible_output_identity(
+                        visible_root,
+                        destination_parent_descriptor=destination_parent_descriptor,
+                        expected_parent_identity=expected_parent_identity,
+                        expected_output_identity=root_identity,
+                    )
+                except BaseException as exc:
+                    validation_error = exc
+            if windows_state is not None:
+                try:
+                    _windows_close_bound_descendant_directories(windows_state)
+                except BaseException as exc:
+                    if validation_error is None:
+                        validation_error = exc
+            if token is not None:
+                _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+            if root_handle >= 0:
+                try:
+                    _windows_close_handle(root_handle)
+                except BaseException as exc:
+                    if validation_error is None:
+                        validation_error = exc
+            if validation_error is not None:
+                raise validation_error
+        return
+
     saved_cwd_descriptor = -1
     root_descriptor = -1
     token = None
@@ -1241,15 +1956,19 @@ def anchored_existing_extraction_root(extraction_root: Path) -> Iterator[Path]:
         root_handle = -1
         token = None
         root_identity = (0, 0)
+        windows_state: _WindowsBoundOutputState | None = None
         try:
-            root_handle, root_identity = _windows_open_locked_directory(visible_root)
-            token = _WINDOWS_BOUND_OUTPUT_STATE.set(
-                _WindowsBoundOutputState(
-                    handle=root_handle,
-                    identity=root_identity,
-                    visible_root=visible_root,
-                )
+            root_handle, root_identity = _windows_open_locked_directory(
+                visible_root,
+                allow_child_creation=True,
             )
+            windows_state = _WindowsBoundOutputState(
+                handle=root_handle,
+                identity=root_identity,
+                visible_root=visible_root,
+            )
+            token = _WINDOWS_BOUND_OUTPUT_STATE.set(windows_state)
+            _windows_hold_existing_descendant_directories(visible_root)
             yield visible_root
         finally:
             validation_error: BaseException | None = None
@@ -1265,6 +1984,12 @@ def anchored_existing_extraction_root(extraction_root: Path) -> Iterator[Path]:
                     )
                 except BaseException as exc:
                     validation_error = exc
+            if windows_state is not None:
+                try:
+                    _windows_close_bound_descendant_directories(windows_state)
+                except BaseException as exc:
+                    if validation_error is None:
+                        validation_error = exc
             if token is not None:
                 _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
             if root_handle >= 0:
@@ -1729,15 +2454,40 @@ def secure_directory(path: Path) -> Path:
 
     if not missing:
         _harden_private_path(resolved, expected_type=stat.S_IFDIR, mode=0o700)
+        if _running_on_windows():
+            _windows_hold_bound_descendant_directory(resolved)
         return resolved
 
     for directory in reversed(missing):
+        if _running_on_windows() and _WINDOWS_BOUND_OUTPUT_STATE.get() is not None:
+            _windows_create_and_hold_bound_descendant_directory(directory)
+            continue
         # A concurrent replacement is acceptable only if the descriptor-bound
         # hardening below proves it is the intended owned directory.
         with suppress(FileExistsError):
             directory.mkdir(mode=0o700)
         _harden_private_path(directory, expected_type=stat.S_IFDIR, mode=0o700)
+        if _running_on_windows():
+            _windows_hold_bound_descendant_directory(directory)
     return resolved
+
+
+@contextmanager
+def private_temporary_directory(
+    *,
+    parent: Path,
+    prefix: str,
+) -> Iterator[Path]:
+    """Create a private temporary directory with a bounded Windows capability lifetime."""
+
+    if not prefix or any(character in prefix for character in ("/", "\\", "\x00")):
+        raise ValueError("A private temporary-directory prefix must be one safe path component.")
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
+        directory = secure_directory(Path(temporary))
+        try:
+            yield directory
+        finally:
+            _windows_release_bound_descendant_directory(directory)
 
 
 def _is_link_or_reparse_point(path: Path) -> bool:
@@ -2517,6 +3267,7 @@ def _promote_path_no_replace_atomic(
     *,
     expected_type: int,
     expected_identity: tuple[int, int] | None = None,
+    held_descriptor: int | None = None,
     durable: bool = False,
 ) -> None:
     """Atomically rename one private path without replacing any destination."""
@@ -2552,17 +3303,30 @@ def _promote_path_no_replace_atomic(
                 "The destination appeared before atomic promotion. Nothing was overwritten; "
                 "preserve the incomplete output and retry into a fresh destination."
             )
-        try:
-            # Python's Windows os.rename contract is atomic and always refuses an
-            # existing destination; unlike os.replace, it cannot discard an existing path.
-            os.rename(source, destination)
-        except OSError as exc:
-            if isinstance(exc, FileExistsError) or getattr(exc, "winerror", None) in {80, 183}:
-                raise OutputExistsError(
-                    "The destination appeared before atomic promotion. Nothing was overwritten; "
-                    "preserve the incomplete output and retry into a fresh destination."
-                ) from exc
-            raise
+        if held_descriptor is not None:
+            if expected_type != stat.S_IFREG:
+                raise UnsafePathError(
+                    "A held Windows descriptor can promote only a regular staging file."
+                )
+            _windows_promote_held_file_no_replace(
+                source,
+                destination,
+                held_descriptor=held_descriptor,
+            )
+        elif expected_type == stat.S_IFDIR and _WINDOWS_BOUND_OUTPUT_STATE.get() is not None:
+            _windows_promote_bound_directory_no_replace(source, destination)
+        else:
+            try:
+                # Windows os.rename is atomic and refuses an existing destination.
+                os.rename(source, destination)
+            except OSError as exc:
+                if isinstance(exc, FileExistsError) or getattr(exc, "winerror", None) in {80, 183}:
+                    raise OutputExistsError(
+                        "The destination appeared before atomic promotion. Nothing was "
+                        "overwritten; preserve the incomplete output and retry into a fresh "
+                        "destination."
+                    ) from exc
+                raise
         promoted = require_private_path(destination, expected_type=expected_type)
         if _identity(promoted) != _identity(source_metadata):
             raise UnsafePathError("The promoted path identity changed unexpectedly.")
@@ -2709,6 +3473,7 @@ def promote_file_no_replace_atomic(
     destination: Path,
     *,
     expected_identity: tuple[int, int] | None = None,
+    held_descriptor: int | None = None,
     durable: bool = False,
 ) -> None:
     """Atomically rename one private regular file without replacing any destination."""
@@ -2718,6 +3483,7 @@ def promote_file_no_replace_atomic(
         destination,
         expected_type=stat.S_IFREG,
         expected_identity=expected_identity,
+        held_descriptor=held_descriptor,
         durable=durable,
     )
 

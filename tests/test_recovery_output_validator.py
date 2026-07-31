@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from contextlib import closing
 from pathlib import Path
 from unittest import mock
@@ -37,12 +38,17 @@ from script.validate_recovery_output import (
     _validate_json_complexity,
     validate_recovery_output,
 )
-from tests.helpers import create_synthetic_extraction, refresh_synthetic_source_snapshot
+from tests.helpers import (
+    create_synthetic_extraction,
+    refresh_synthetic_source_snapshot,
+    write_legacy_archive,
+)
 from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import UnsafePathError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
 from tvtime_extractor.report import build_report
 from tvtime_extractor.safety import write_json_private_atomic
+from tvtime_extractor.suite_tv import LIBERATOR_FILENAMES
 from tvtime_extractor.visual_report import HTML_REPORT_FILENAME, PDF_REPORT_FILENAME
 
 
@@ -131,6 +137,97 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         )
         self.assertEqual(dict(result.counts)["series_library"], 1)
         self.assertEqual(dict(result.counts)["saved_movies"], 1)
+
+    def test_suite_tv_archives_are_root_level_bound_and_tamper_evident(self) -> None:
+        output = self._copy_fixture()
+        analysis = output / "TVTime-Extraction" / "analysis"
+        _marker_path, marker = self._marker(output)
+        bindings = {
+            binding["id"]: binding for binding in marker["artifacts"] if isinstance(binding, dict)
+        }
+        expected = {
+            "suite_tv_liberator_confirmed": "Suite-TV-Liberator-confirmed.zip",
+            "suite_tv_liberator_estimated_progress": ("Suite-TV-Liberator-estimated-progress.zip"),
+        }
+        for artifact_id, filename in expected.items():
+            with self.subTest(artifact_id=artifact_id):
+                archive_path = analysis / filename
+                self.assertTrue(archive_path.is_file())
+                self.assertEqual(
+                    bindings[artifact_id]["relative_path"],
+                    f"analysis/{filename}",
+                )
+                with zipfile.ZipFile(archive_path) as archive:
+                    self.assertEqual(tuple(archive.namelist()), LIBERATOR_FILENAMES)
+                    self.assertTrue(all("/" not in name for name in archive.namelist()))
+
+        confirmed = analysis / expected["suite_tv_liberator_confirmed"]
+        with confirmed.open("ab") as handle:
+            handle.write(b"synthetic-tamper")
+        with self.assertRaises(ValidationFailure) as raised:
+            validate_recovery_output(output)
+        self.assertEqual(raised.exception.gate, "artifact_bindings")
+
+    def test_resealed_suite_tv_archive_with_wrong_members_is_rejected(self) -> None:
+        output = self._copy_fixture()
+        archive_path = (
+            output / "TVTime-Extraction" / "analysis" / "Suite-TV-Liberator-confirmed.zip"
+        )
+        with zipfile.ZipFile(
+            archive_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            for name in LIBERATOR_FILENAMES[:-1]:
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100600 << 16
+                archive.writestr(info, b"[]")
+        if os.name != "nt":
+            archive_path.chmod(0o600)
+        self._reseal_artifact(
+            output,
+            "suite_tv_liberator_confirmed",
+            archive_path,
+        )
+
+        with self.assertRaises(ValidationFailure) as raised:
+            validate_recovery_output(output)
+        self.assertEqual(raised.exception.gate, "artifact_bindings")
+
+    def test_resealed_suite_tv_archive_with_false_semantics_is_rejected(self) -> None:
+        output = self._copy_fixture()
+        archive_path = (
+            output / "TVTime-Extraction" / "analysis" / "Suite-TV-Liberator-confirmed.zip"
+        )
+        with zipfile.ZipFile(archive_path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        favorites = json.loads(files["favorites.json"])
+        favorites["is_public"] = True
+        files["favorites.json"] = json.dumps(favorites).encode("utf-8")
+        with zipfile.ZipFile(
+            archive_path,
+            "w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            for name in LIBERATOR_FILENAMES:
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = 0o100600 << 16
+                archive.writestr(info, files[name])
+        if os.name != "nt":
+            archive_path.chmod(0o600)
+        self._reseal_artifact(
+            output,
+            "suite_tv_liberator_confirmed",
+            archive_path,
+        )
+
+        with self.assertRaises(ValidationFailure) as raised:
+            validate_recovery_output(output)
+        self.assertEqual(raised.exception.gate, "artifact_bindings")
 
     def test_extra_output_root_member_fails_closed(self) -> None:
         output = self._copy_fixture()
@@ -244,6 +341,51 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         refresh_synthetic_source_snapshot(extraction)
         analyze_extraction(extraction_directory=extraction)
         build_report(extraction_directory=extraction)
+        result = validate_recovery_output(output)
+        self.assertIn("data_parity", result.gates)
+
+    def test_legacy_zero_timestamp_matches_analyzer_and_validator_semantics(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        output = Path(temporary.name) / "legacy-cache-output"
+        output.mkdir(mode=0o700)
+        extraction = create_synthetic_extraction(output)
+        documents = extraction / "raw" / PRIMARY_DOMAIN / "Documents"
+        with closing(sqlite3.connect(documents / "DioCache.db")) as connection:
+            connection.execute("DELETE FROM cache_dio")
+            connection.commit()
+        write_legacy_archive(
+            documents / "synthetic-legacy-movie-cache",
+            url=(
+                "https://api.example.invalid/prod/v1/tracking/cgw/follows/user/"
+                "900000002?entity_type=movie"
+            ),
+            payload={
+                "data": {
+                    "type": "list",
+                    "objects": [
+                        {
+                            "uuid": "40000000-0000-4000-8000-000000000001",
+                            "entity_type": "movie",
+                            "type": "follow",
+                            "created_at": "2020-01-01T00:00:00Z",
+                            "updated_at": "2020-01-02T00:00:00Z",
+                            "watched_at": "0001-01-01T00:00:00Z",
+                            "extended": {"is_watched": False},
+                            "filter": ["watched"],
+                            "meta": {"name": "Synthetic Sentinel Movie"},
+                        }
+                    ],
+                }
+            },
+        )
+        refresh_synthetic_source_snapshot(extraction)
+
+        summary = analyze_extraction(extraction_directory=extraction)
+        self.assertEqual(summary["watched_movies"], 1)
+        self.assertEqual(summary["movie_watchlist"], 0)
+        build_report(extraction_directory=extraction)
+
         result = validate_recovery_output(output)
         self.assertIn("data_parity", result.gates)
 

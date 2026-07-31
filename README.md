@@ -12,8 +12,8 @@ backup, contact TV Time, restore data to the app, or provide an official cloud-a
 > with separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and Intel, plus
 > verified Python wheel and source packages. Download only from the official release and verify the
 > DMG against `SHA256SUMS`. Version 0.2.0 includes the complete Markdown catalogue, shared offline
-> HTML/PDF views, and native macOS recovery experience. The Python CLI supports Python 3.10 through
-> 3.13; on Windows, use only `analyze` or `report` with an already completed extraction.
+> HTML/PDF views, and native macOS recovery experience. This checkout also contains an unpublished
+> private cross-platform candidate. Its Windows and Android changes are not part of public v0.2.0.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
@@ -25,7 +25,8 @@ access, and comply with applicable law and service terms.
 | --- | --- | --- |
 | Native macOS app | Most Mac users | macOS 14 or later and the v0.2.0 DMG matching the Mac's architecture |
 | Python CLI recovery | macOS, Linux, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
-| Windows existing-extraction tools | Windows review of an already complete extraction | Python 3.10 through 3.13; fresh `extract` and `recover` fail closed |
+| Private Windows app candidate | Encrypted iOS, local Android, and export recovery | Windows 11 x64 for encrypted iOS recovery, device encryption or BitLocker, and a private source build |
+| Android/export recovery | Mac, Windows, or CLI users with an already-preserved source | Supported legacy backup, allowlisted snapshot, or official ZIP/CSV export |
 
 The published native app is the normal Mac installation:
 
@@ -43,11 +44,12 @@ See the [macOS guide](docs/macos.md) for installation and the
   iTunes
 - The encryption password for that backup
 - The phone safely ejected and disconnected after backup completion is confirmed
-- Enough free local space for manifest processing, the selected TV Time app data, and reports—not another
-  copy of the whole device backup
+- Enough free local space for manifest processing, the selected TV Time app data, and reports.
+  Recovery does not duplicate the whole device backup.
 
-Android data, unencrypted or unfinished backups, cloud-account extraction, and restoring recovered
-data to TV Time are not supported.
+Rooting a phone, bypassing Android backup policy, cloud-account scraping, and restoring recovered
+data to TV Time are not supported. Modern Android release apps commonly disable legacy backup; the
+tool reports that limitation rather than bypassing it.
 
 ## Native macOS app workflow
 
@@ -105,6 +107,9 @@ A successful full recovery creates these primary reports under
   semantic tables; it works offline, contains no script, and does not request remote media
 - `TVTime-Recovered-Data.pdf`: optional print-friendly companion generated from the same report
   model; use the HTML report for tagged semantic structure with assistive technology
+- `Suite-TV-Liberator-confirmed.zip`: Suite TV import containing only exact recovered watch state
+- `Suite-TV-Liberator-estimated-progress.zip`: alternate Suite TV import that fills missing
+  per-episode state up to recovered aggregate series counts
 
 Markdown, HTML, and PDF are rendered from one shared safe display model, including identical
 missing-title placeholders and a copy-size-differences section when backup metadata and copied byte
@@ -116,6 +121,13 @@ The PDF is deliberately omitted when the available embedded font or shaping supp
 faithfully render every recovered character. This is a fidelity safeguard, not a failed recovery:
 the Markdown and offline HTML remain complete. Normalized CSV tables preserve the detailed private
 data used by the reports, including titles, favorites, episodes, and exact watch events.
+
+For Suite TV, prefer `Suite-TV-Liberator-confirmed.zip` when exactness matters. The estimated archive
+preserves every exact recovered watch and never estimates specials, but fills the oldest remaining
+regular episodes until each recovered aggregate watched count is reached. It cannot reconstruct
+which skipped, out-of-order, or repeatedly watched episodes produced that count. Both archives use
+the five-file TV Time Liberator layout and are created entirely offline; movies without a recovered
+positive TVDB identifier are omitted because Suite TV cannot identify them safely.
 
 Successful full recovery has two versioned machine-readable checkpoints:
 
@@ -151,11 +163,10 @@ destination while recovery is active.
 
 ## Python CLI fallback
 
-The CLI is free and supports full recovery with Python 3.10, 3.11, 3.12, or 3.13 on macOS and
-Linux. Windows can install the CLI and safely run standalone `analyze` or `report` against an
-already complete extraction, but this release deliberately refuses fresh `extract` and `recover`:
-Python cannot atomically create and lock the new Windows plaintext root. The CLI remains the
-supported source-based route when the native macOS app is not suitable.
+The CLI is free and supports Python 3.10 through 3.13. The private candidate adds native Win32
+handle binding for encrypted iOS source files and fresh output; use its WinUI package for the
+strongest Windows containment. It also adds `recover-android-backup`, `recover-android-snapshot`,
+`recover-export`, `android-probe`, and the explicitly acknowledged `android-capture` command.
 
 ### Install from a source checkout or ZIP
 
@@ -193,8 +204,8 @@ new one if the project moves.
 
 Use an individual backup folder and a destination run path that does not yet exist. The immediate
 encrypted output parent must already exist; the fresh run child itself must not exist. This
-parent-exists/child-does-not rule also applies when selecting paths on Windows, although Windows
-fresh recovery is refused in this release. On macOS or Linux:
+parent-exists/child-does-not rule also applies on Windows. Public v0.2.0 still has no Windows
+recovery app; the private candidate uses the native package documented below. On macOS or Linux:
 
 ```text
 ./.venv/bin/python -m tvtime_extractor recover \
@@ -215,9 +226,12 @@ in the command,
 environment, shell history, or a support request. The default terminal output is a concise readable
 summary; `--json` is an explicit private automation option and is not the default.
 
-On Windows, move or copy the intact encrypted backup to a private macOS/Linux system for extraction,
-or bring an already complete private extraction to Windows and use only `analyze`/`report`; see the
-[Windows guide](docs/windows.md).
+For the unpublished private Windows candidate, build and install the local MSIX as documented in the
+[Windows guide](docs/windows.md). Nothing in that workflow uploads or publishes the package.
+Its direct and transitive WinUI dependencies are committed in locked mode; a floating NuGet restore
+is rejected. Encrypted iOS recovery in that candidate requires Windows 11 x64 and remains blocked
+from merge until a synthetic Windows build, screenshot, and end-to-end smoke test confirm the native
+flow.
 
 Linux accepts only a conservative set of ordinary local filesystem types. FUSE, network, shared,
 virtual-machine shared-folder, temporary, overlay, and unknown filesystem types are refused with no
@@ -247,15 +261,20 @@ the private output. It requires the primary TV Time domain
 selected regular file is copied below `TVTime-Extraction/raw/` with its domain and manifest-relative
 path preserved. File counts, sizes, and hashes are recorded privately before analysis.
 
-The primary parser reads the copied `Documents/DioCache.db`; an available image-cache database is
-catalogued as a bonus. Local caches can be incomplete, events can survive without names, and TV Time
-can change its schema. Missing data is stated rather than guessed. Retain the original encrypted
-backup until titles, favorites, episodes, watch events, and completion markers have been validated.
+The primary parser reads the copied `Documents/DioCache.db` and also recognizes supported legacy
+extensionless URL-cache archives in that same directory. Those old `NSKeyedArchiver` responses are
+decoded entirely offline; the extractor never replays their private request URLs. An available
+image-cache database is catalogued as a bonus. Local caches can be incomplete, events can survive
+without names, and TV Time can change its schema. Missing data is stated rather than guessed. Retain
+the original encrypted backup until titles, favorites, episodes, watch events, and completion
+markers have been validated.
 
 ## Read before using real data
 
 - [macOS guide](docs/macos.md)
 - [Windows guide](docs/windows.md)
+- [Refract series conversion guide](docs/refract-import.md)
+- [Private synthetic cross-platform checks](docs/synthetic-testing.md)
 - [Linux guide](docs/linux.md)
 - [Privacy and safe handling](docs/privacy.md)
 - [Output reference](docs/output-reference.md)

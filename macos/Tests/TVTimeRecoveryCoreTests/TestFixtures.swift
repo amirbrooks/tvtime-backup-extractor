@@ -281,6 +281,14 @@ enum TestFixtures {
       Data("<!doctype html><title>Recovered data</title>\n".utf8),
       at: root.appendingPathComponent(summary.artifacts.visualReport)
     )
+    try writePrivate(
+      try suiteTVArchive(),
+      at: analysis.appendingPathComponent("Suite-TV-Liberator-confirmed.zip")
+    )
+    try writePrivate(
+      try suiteTVArchive(),
+      at: analysis.appendingPathComponent("Suite-TV-Liberator-estimated-progress.zip")
+    )
     if let pdfReport = summary.artifacts.pdfReport {
       try writePrivate(Data("%PDF-1.4\n".utf8), at: root.appendingPathComponent(pdfReport))
     }
@@ -368,6 +376,161 @@ enum TestFixtures {
     try setMode(0o600, at: url)
   }
 
+  static func suiteTVArchive(
+    showTVDBID: Int = 101,
+    favoritesPublic: Bool = false
+  ) throws -> Data {
+    let show: [String: Any] = [
+      "id": ["tvdb": showTVDBID, "imdb": "-1"],
+      "uuid": "30000000-0000-4000-8000-000000000001",
+      "title": "Synthetic Suite Series",
+      "status": "not_started_yet",
+      "seasons": [
+        [
+          "number": 1,
+          "episodes": [
+            [
+              "number": 1,
+              "special": false,
+              "id": ["tvdb": 1001, "imdb": "-1"],
+              "rating": NSNull(),
+              "is_watched": false,
+            ]
+          ],
+        ]
+      ],
+      "created_at": "2020-01-01T00:00:00Z",
+    ]
+    let favorites: [String: Any] = [
+      "name": "Favorites",
+      "description": "Your favorite movies and shows.",
+      "is_public": favoritesPublic,
+      "movies": [],
+      "shows": [],
+    ]
+    let activity = [
+      "imdb_id,tvdb_id,type,title,season,episode,is_special,is_watched,watched_at,status,is_watchlisted,rating",
+      "-1,\(showTVDBID),show,Synthetic Suite Series,,,,,,not_started_yet,true,",
+      "",
+    ].joined(separator: "\r\n")
+    let files: [(String, Data)] = [
+      (
+        "shows.json",
+        try JSONSerialization.data(withJSONObject: [show], options: [.prettyPrinted, .sortedKeys])
+      ),
+      (
+        "movies.json",
+        try JSONSerialization.data(withJSONObject: [], options: [.prettyPrinted, .sortedKeys])
+      ),
+      (
+        "favorites.json",
+        try JSONSerialization.data(
+          withJSONObject: favorites,
+          options: [.prettyPrinted, .sortedKeys]
+        )
+      ),
+      (
+        "lists.json",
+        try JSONSerialization.data(withJSONObject: [], options: [.prettyPrinted, .sortedKeys])
+      ),
+      ("activity_history.csv", Data(activity.utf8)),
+    ]
+    return storedZip(files)
+  }
+
+  private struct StoredZipRecord {
+    let name: Data
+    let checksum: UInt32
+    let byteCount: UInt32
+    let localOffset: UInt32
+  }
+
+  private static func storedZip(_ files: [(String, Data)]) -> Data {
+    var archive = Data()
+    var records: [StoredZipRecord] = []
+    for (name, payload) in files {
+      let nameData = Data(name.utf8)
+      let checksum = zipCRC32(payload)
+      let localOffset = UInt32(archive.count)
+      appendZipUInt32(0x0403_4B50, to: &archive)
+      appendZipUInt16(20, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(checksum, to: &archive)
+      appendZipUInt32(UInt32(payload.count), to: &archive)
+      appendZipUInt32(UInt32(payload.count), to: &archive)
+      appendZipUInt16(UInt16(nameData.count), to: &archive)
+      appendZipUInt16(0, to: &archive)
+      archive.append(nameData)
+      archive.append(payload)
+      records.append(
+        StoredZipRecord(
+          name: nameData,
+          checksum: checksum,
+          byteCount: UInt32(payload.count),
+          localOffset: localOffset
+        )
+      )
+    }
+
+    let centralOffset = UInt32(archive.count)
+    for record in records {
+      appendZipUInt32(0x0201_4B50, to: &archive)
+      appendZipUInt16(0x0314, to: &archive)
+      appendZipUInt16(20, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(record.checksum, to: &archive)
+      appendZipUInt32(record.byteCount, to: &archive)
+      appendZipUInt32(record.byteCount, to: &archive)
+      appendZipUInt16(UInt16(record.name.count), to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt16(0, to: &archive)
+      appendZipUInt32(0o100600 << 16, to: &archive)
+      appendZipUInt32(record.localOffset, to: &archive)
+      archive.append(record.name)
+    }
+    let centralBytes = UInt32(archive.count) - centralOffset
+    appendZipUInt32(0x0605_4B50, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    appendZipUInt16(UInt16(records.count), to: &archive)
+    appendZipUInt16(UInt16(records.count), to: &archive)
+    appendZipUInt32(centralBytes, to: &archive)
+    appendZipUInt32(centralOffset, to: &archive)
+    appendZipUInt16(0, to: &archive)
+    return archive
+  }
+
+  private static func appendZipUInt16(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(truncatingIfNeeded: value))
+    data.append(UInt8(truncatingIfNeeded: value >> 8))
+  }
+
+  private static func appendZipUInt32(_ value: UInt32, to data: inout Data) {
+    data.append(UInt8(truncatingIfNeeded: value))
+    data.append(UInt8(truncatingIfNeeded: value >> 8))
+    data.append(UInt8(truncatingIfNeeded: value >> 16))
+    data.append(UInt8(truncatingIfNeeded: value >> 24))
+  }
+
+  private static func zipCRC32(_ data: Data) -> UInt32 {
+    var checksum = UInt32.max
+    for byte in data {
+      checksum ^= UInt32(byte)
+      for _ in 0..<8 {
+        checksum = (checksum >> 1) ^ (0xEDB8_8320 & (0 &- (checksum & 1)))
+      }
+    }
+    return checksum ^ UInt32.max
+  }
+
   static func setMode(_ mode: mode_t, at url: URL) throws {
     guard Darwin.chmod(url.path, mode) == 0 else {
       throw POSIXFixtureError(operation: "chmod", code: errno)
@@ -396,6 +559,11 @@ enum TestFixtures {
     ("trailer_references", "analysis/trailer_references.csv"),
     ("media_url_inventory", "analysis/media_url_inventory.csv"),
     ("image_cache_references", "analysis/image_cache_references.csv"),
+    ("suite_tv_liberator_confirmed", "analysis/Suite-TV-Liberator-confirmed.zip"),
+    (
+      "suite_tv_liberator_estimated_progress",
+      "analysis/Suite-TV-Liberator-estimated-progress.zip"
+    ),
     ("markdown_report", "analysis/TVTime-Recovered-Data.md"),
     ("html_report", "analysis/TVTime-Recovered-Data.html"),
   ]
@@ -407,7 +575,7 @@ enum TestFixtures {
     ),
     (
       "movie_library.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "watch_events.csv",
@@ -415,21 +583,21 @@ enum TestFixtures {
     ),
     (
       "episode_cache.csv",
-      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
     ),
     ("sqlite_integrity.csv", "relative_path,bytes,quick_check,schema_objects"),
     ("plist_key_inventory.csv", "relative_path,format,top_level_keys"),
     (
       "series_library.csv",
-      "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,created_at,updated_at"
+      "uuid,series_id,name,country,is_ended,followed_at,last_watch_date,filters,watched_episode_count,aired_episode_count,created_at,updated_at"
     ),
     (
       "watched_movies.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "movie_watchlist.csv",
-      "uuid,name,imdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,created_at,updated_at"
+      "uuid,name,imdb_id,tvdb_id,first_release_date,library_status,watched_at,followed_at,runtime_seconds,genres,filters,is_watched,rewatch_count,created_at,updated_at"
     ),
     (
       "favorite_shows.csv",
@@ -441,7 +609,7 @@ enum TestFixtures {
     ),
     (
       "episode_cache_unique.csv",
-      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_watched,runtime"
+      "source_id,episode_id,show_id,show_name,season,episode,episode_name,air_date,seen,seen_date,is_special,is_watched,runtime"
     ),
     (
       "watch_events_named.csv",

@@ -28,6 +28,17 @@ _REQUEST_FIELDS = frozenset(
         "backup_receipt",
     }
 )
+_ACQUISITION_REQUEST_FIELDS = frozenset(
+    {
+        "source_kind",
+        "source_path",
+        "output_directory",
+        "destination_parent_identity",
+        "acknowledge_sensitive_output",
+        "include_raw_cache",
+        "has_source_secret",
+    }
+)
 
 
 class ProtocolError(UserInputError):
@@ -42,6 +53,60 @@ class ProtocolEOF(ProtocolError):
 class ControlRequest:
     action: str
     payload: dict[str, object]
+
+
+def _windows_pipe_has_data_or_closed(file_descriptor: int) -> bool:
+    """Poll an inherited Windows pipe without using socket-only ``select``."""
+
+    try:
+        import ctypes
+        import msvcrt
+
+        native_handle = msvcrt.get_osfhandle(file_descriptor)
+        available = ctypes.c_ulong()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        peek_named_pipe = kernel32.PeekNamedPipe
+        peek_named_pipe.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.c_void_p,
+        ]
+        peek_named_pipe.restype = ctypes.c_int
+        succeeded = peek_named_pipe(
+            ctypes.c_void_p(native_handle),
+            None,
+            0,
+            None,
+            ctypes.byref(available),
+            None,
+        )
+        if succeeded:
+            return available.value > 0
+        error = ctypes.get_last_error()
+        if error in {109, 233}:  # ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED
+            return True
+        raise OSError(error, "PeekNamedPipe failed")
+    except (ImportError, OverflowError, ValueError) as exc:
+        raise OSError("The Windows control pipe handle was unavailable.") from exc
+
+
+def _wait_until_readable(stream: BinaryIO, wait_seconds: float) -> bool:
+    if os.name == "nt":
+        try:
+            readable = _windows_pipe_has_data_or_closed(stream.fileno())
+        except OSError as exc:
+            raise ProtocolError("The helper could not monitor its local control pipe.") from exc
+        if not readable:
+            time.sleep(wait_seconds)
+        return readable
+    try:
+        readable, _, _ = select.select([stream.fileno()], [], [], wait_seconds)
+    except (OSError, ValueError) as exc:
+        raise ProtocolError("The helper could not monitor its local control pipe.") from exc
+    return bool(readable)
 
 
 def _read_exact(
@@ -62,11 +127,7 @@ def _read_exact(
             wait_seconds = min(wait_seconds, max(0.0, deadline - time.monotonic()))
             if wait_seconds == 0.0:
                 raise ProtocolError("The helper timed out waiting for a complete local frame.")
-        try:
-            readable, _, _ = select.select([stream.fileno()], [], [], wait_seconds)
-        except (OSError, ValueError) as exc:
-            raise ProtocolError("The helper could not monitor its local control pipe.") from exc
-        if not readable:
+        if not _wait_until_readable(stream, wait_seconds):
             continue
         try:
             chunk = os.read(stream.fileno(), remaining)
@@ -137,12 +198,13 @@ def read_control_request(
     if frame.get("protocolVersion") != PROTOCOL_VERSION:
         raise ProtocolError("The app and helper protocol versions are incompatible.")
     action = frame.get("type")
-    if action not in {"preflight", "recover"}:
+    if action not in {"preflight", "recover", "acquire"}:
         raise ProtocolError("The helper control request had an unsupported action.")
     payload = frame.get("payload")
     if not isinstance(payload, dict):
         raise ProtocolError("The helper request payload must be an object.")
-    if set(payload) != _REQUEST_FIELDS:
+    expected_fields = _ACQUISITION_REQUEST_FIELDS if action == "acquire" else _REQUEST_FIELDS
+    if set(payload) != expected_fields:
         raise ProtocolError("The helper request payload did not match the required fields.")
     return ControlRequest(action=str(action), payload=dict(payload))
 

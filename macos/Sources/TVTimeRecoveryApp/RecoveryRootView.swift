@@ -8,6 +8,7 @@ struct RecoveryRootView: View {
   let workspaceActions: WorkspaceActions
   let recoveryStore: AppManagedRecoveryStore
   let diagnostics: any RecoveryDiagnosticsSink
+  @State private var selectedSource = RecoverySourceChoice.iosBackup
 
   var body: some View {
     Group {
@@ -59,6 +60,17 @@ struct RecoveryRootView: View {
           onReveal: revealOutput,
           onStartAgain: session.returnToBackupSelection
         )
+      case .acquisitionCompleted(let summary):
+        RecoveryResultView(
+          summary: summary,
+          hasVisualReport: session.visualReportURL != nil,
+          hasPDFReport: session.pdfReportURL != nil,
+          onOpenVisualReport: openVisualReport,
+          onOpenPDFReport: openPDFReport,
+          onOpenMarkdown: openMarkdown,
+          onReveal: revealOutput,
+          onStartAgain: session.returnToBackupSelection
+        )
       case .failed(let failure):
         RecoveryErrorView(
           failure: failure,
@@ -91,26 +103,52 @@ struct RecoveryRootView: View {
   }
 
   private var backupStep: some View {
-    BackupStepView {
-      try await folderPicker.chooseBackup()
-    } onSelected: { url in
-      do {
-        let destination = try recoveryStore.prepareDestination()
-        diagnostics.record(.milestone(.preflight, .privateStoragePrepared))
-        session.selectBackup(url, appManagedDestinationParent: destination)
-      } catch {
-        diagnostics.record(.failure(.preflight, .privateStorageUnavailable))
-        throw error
-      }
-    } onShowRecoveries: {
-      do {
-        guard let destination = try recoveryStore.existingDestination() else {
-          throw RootActionError.missingArtifact
+    VStack(spacing: 18) {
+      Picker("Recovery source", selection: $selectedSource) {
+        ForEach(RecoverySourceChoice.allCases) { choice in
+          Text(choice.label).tag(choice)
         }
-        try workspaceActions.revealOutput(destination)
-      } catch {
-        diagnostics.record(.failure(.outputAccess, .outputUnavailable))
-        throw error
+      }
+      .pickerStyle(.segmented)
+      .frame(maxWidth: 720)
+
+      if selectedSource == .iosBackup {
+        BackupStepView {
+          try await folderPicker.chooseBackup()
+        } onSelected: { url in
+          do {
+            let destination = try recoveryStore.prepareDestination()
+            diagnostics.record(.milestone(.preflight, .privateStoragePrepared))
+            session.selectBackup(url, appManagedDestinationParent: destination)
+          } catch {
+            diagnostics.record(.failure(.preflight, .privateStorageUnavailable))
+            throw error
+          }
+        } onShowRecoveries: {
+          do {
+            guard let destination = try recoveryStore.existingDestination() else {
+              throw RootActionError.missingArtifact
+            }
+            try workspaceActions.revealOutput(destination)
+          } catch {
+            diagnostics.record(.failure(.outputAccess, .outputUnavailable))
+            throw error
+          }
+        }
+      } else if let acquisitionKind = selectedSource.acquisitionKind {
+        AcquisitionStepView(sourceKind: acquisitionKind) {
+          try await folderPicker.chooseAcquisitionSource(kind: acquisitionKind)
+        } onStart: { source, password, acknowledged in
+          let destination = try recoveryStore.prepareDestination()
+          session.startAcquisition(
+            sourceKind: acquisitionKind,
+            sourceURL: source,
+            appManagedDestinationParent: destination,
+            sourcePassword: password,
+            acknowledgeSensitiveOutput: acknowledged
+          )
+        }
+        .id(acquisitionKind.rawValue)
       }
     }
   }
@@ -192,6 +230,33 @@ struct RecoveryRootView: View {
       throw RootActionError.missingArtifact
     }
     try workspaceActions.revealOutput(output)
+  }
+}
+
+private enum RecoverySourceChoice: String, CaseIterable, Identifiable {
+  case iosBackup
+  case androidBackup
+  case androidSnapshot
+  case officialExport
+
+  var id: String { rawValue }
+
+  var label: String {
+    switch self {
+    case .iosBackup: "iOS Backup"
+    case .androidBackup: "Android Backup"
+    case .androidSnapshot: "Android Snapshot"
+    case .officialExport: "Official Export"
+    }
+  }
+
+  var acquisitionKind: AcquisitionSourceKind? {
+    switch self {
+    case .iosBackup: nil
+    case .androidBackup: .androidLegacyBackup
+    case .androidSnapshot: .androidPreservedSnapshot
+    case .officialExport: .tvTimeOfficialExport
+    }
   }
 }
 

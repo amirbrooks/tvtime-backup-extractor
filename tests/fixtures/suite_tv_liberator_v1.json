@@ -1,0 +1,21 @@
+{
+  "contract": "suite-tv-liberator-v1",
+  "fixture": "obviously synthetic generated export",
+  "upstream_commit": "a18caa46fbf8d611cc60f048c480e8981d7e6c05",
+  "upstream_contract_sources": [
+    "src/core/types/MediaIdentifier.ts",
+    "src/core/types/Show.ts",
+    "src/core/types/Movie.ts",
+    "src/core/serializer/toCsv.ts"
+  ],
+  "safety_overrides": [
+    "favorites.is_public=false"
+  ],
+  "sha256": {
+    "shows.json": "48466dcc7137c2ef41555611c587ff8478cc61633ab71bcded600c5f1ff6cf2d",
+    "movies.json": "df771691746fda6d78ba98f799616eaa0cf04c65cad289cc0381d39d338fea87",
+    "favorites.json": "77ac1813030d0f9f11f18b5ba8e265ab67e99efc308b9bd3fc666bf5d53ce090",
+    "lists.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "activity_history.csv": "78b661577f8ab6a1b2fb3a3fa81489f448ba19e6935d0045f860a03f83da6590"
+  }
+}

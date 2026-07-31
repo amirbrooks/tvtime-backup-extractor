@@ -15,6 +15,8 @@ from unittest import mock
 
 from tvtime_extractor.errors import OutputExistsError, UnsafePathError, UserInputError
 from tvtime_extractor.safety import (
+    _WINDOWS_DELETE,
+    _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
     _WINDOWS_FILE_ATTRIBUTE_DIRECTORY,
     _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT,
     _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
@@ -24,14 +26,21 @@ from tvtime_extractor.safety import (
     _WINDOWS_FILE_SHARE_WRITE,
     _WINDOWS_GENERIC_READ,
     EXTRACTION_DIRECTORY_NAME,
+    _casefolded_path,
     _darwin_volume_is_local,
     _linux_volume_is_local,
+    _open_bound_fresh_output_root,
+    _require_windows_visible_directory_identity,
     _windows_close_handle,
     _windows_create_file_directory_handle,
     _windows_create_file_regular_handle,
     _windows_directory_identity,
     _windows_open_locked_directory,
     _windows_regular_file_information,
+    _windows_rename_handle_no_replace,
+    _windows_resume_bound_descendants,
+    _windows_suspend_bound_descendants,
+    _WindowsBoundOutputState,
     anchored_bound_output_root,
     anchored_existing_extraction_root,
     extended_acl_state,
@@ -43,11 +52,13 @@ from tvtime_extractor.safety import (
     prepare_anchored_extraction_layout,
     prepare_extraction_layout,
     private_source_id,
+    private_temporary_directory,
     promote_directory_no_replace_atomic,
     promote_file_no_replace_atomic,
     read_regular_bytes,
     regular_binary_reader,
     require_bound_destination_parent,
+    require_encrypted_ios_source_platform_support,
     require_private_local_destination,
     require_private_path,
     safe_domain_component,
@@ -59,6 +70,7 @@ from tvtime_extractor.safety import (
     write_csv_private,
     write_text_private,
 )
+from tvtime_extractor.windows_native import WindowsUnsupportedError
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Darwin extended ACL regression")
@@ -1114,6 +1126,39 @@ class DestinationSafetyTests(unittest.TestCase):
 
 
 class WindowsDirectoryHandleContractTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "real Win32 temporary-capability regression")
+    def test_private_temporary_directory_releases_its_capability_before_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with anchored_existing_extraction_root(root):
+                with private_temporary_directory(
+                    parent=root,
+                    prefix=".tvtime-sqlite-",
+                ) as staging:
+                    staged_path = staging
+                    (staging / "synthetic.sqlite").write_bytes(b"synthetic")
+                self.assertFalse(staged_path.exists())
+
+    def test_windows_ios_gate_requires_reviewed_runtime_before_password(self) -> None:
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.require_supported_runtime"
+            ) as require_runtime,
+        ):
+            require_encrypted_ios_source_platform_support()
+        require_runtime.assert_called_once_with()
+
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.require_supported_runtime",
+                side_effect=WindowsUnsupportedError("synthetic unsupported runtime"),
+            ),
+            self.assertRaisesRegex(UnsafePathError, "64-bit Windows 11"),
+        ):
+            require_encrypted_ios_source_platform_support()
+
     class _Kernel32:
         def __init__(self, *, reparse: bool = False, directory: bool = True) -> None:
             self.reparse = reparse
@@ -1159,12 +1204,157 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(kernel32.closed, [101])
         self.assertEqual(len(kernel32.create_calls), 1)
         call = kernel32.create_calls[0]
+        desired_access = int(call[1])
         share_mode = int(call[2])
         flags = int(call[5])
         self.assertEqual(share_mode, _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE)
         self.assertFalse(share_mode & _WINDOWS_FILE_SHARE_DELETE)
+        self.assertFalse(desired_access & _WINDOWS_DELETE)
+        self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertTrue(flags & _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS)
         self.assertTrue(flags & _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT)
+
+    def test_output_directory_handle_can_create_relative_private_children(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_child_creation=True,
+            )
+            _windows_close_handle(handle)
+
+        desired_access = int(kernel32.create_calls[0][1])
+        self.assertEqual(
+            desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
+            _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
+        )
+        self.assertFalse(int(kernel32.create_calls[0][2]) & _WINDOWS_FILE_SHARE_DELETE)
+
+    def test_promotion_capable_directory_handle_requests_delete_access_once(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_rename=True,
+            )
+            _windows_close_handle(handle)
+
+        self.assertEqual(len(kernel32.create_calls), 1)
+        desired_access = int(kernel32.create_calls[0][1])
+        share_mode = int(kernel32.create_calls[0][2])
+        self.assertTrue(desired_access & _WINDOWS_DELETE)
+        self.assertFalse(share_mode & _WINDOWS_FILE_SHARE_DELETE)
+
+    def test_handle_promotion_uses_the_isolated_windows_backend(self) -> None:
+        destination = Path("C:/Synthetic/Private/Analysis")
+        closed: list[int] = []
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_open_locked_directory",
+                return_value=(101, (7, 11)),
+            ) as open_parent,
+            mock.patch("tvtime_extractor.safety._windows_native.rename_handle_relative") as rename,
+            mock.patch(
+                "tvtime_extractor.safety._windows_close_handle",
+                side_effect=closed.append,
+            ),
+        ):
+            _windows_rename_handle_no_replace(202, destination)
+
+        open_parent.assert_called_once_with(
+            destination.parent,
+            allow_child_creation=True,
+        )
+        rename.assert_called_once_with(
+            202,
+            101,
+            ("Analysis",),
+            replace=False,
+        )
+        self.assertEqual(closed, [101])
+
+    def test_parent_promotion_suspends_and_rebinds_child_capabilities(self) -> None:
+        root = Path("/synthetic/private")
+        source = root / "Analysis.incomplete"
+        child = source / "raw-cache"
+        destination = root / "Analysis"
+        source_identity = (7, 11)
+        child_identity = (7, 12)
+        state = _WindowsBoundOutputState(
+            handle=99,
+            identity=(7, 10),
+            visible_root=root,
+            descendant_handles={
+                _casefolded_path(source): (source, 101, source_identity),
+                _casefolded_path(child): (child, 102, child_identity),
+            },
+        )
+        closed: list[int] = []
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                side_effect=lambda handle: {101: source_identity, 102: child_identity}[handle],
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._require_windows_visible_directory_identity"
+            ) as visible,
+            mock.patch(
+                "tvtime_extractor.safety._windows_close_handle",
+                side_effect=closed.append,
+            ),
+        ):
+            suspended = _windows_suspend_bound_descendants(state, source)
+
+        self.assertEqual(suspended, [(Path("raw-cache"), child_identity)])
+        self.assertEqual(closed, [102])
+        self.assertNotIn(_casefolded_path(child), state.descendant_handles)
+        visible.assert_called_once_with(child, expected_identity=child_identity)
+
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_open_locked_directory",
+                return_value=(202, child_identity),
+            ) as reopen,
+            mock.patch(
+                "tvtime_extractor.safety._require_windows_visible_directory_identity"
+            ) as visible,
+        ):
+            _windows_resume_bound_descendants(state, destination, suspended)
+
+        rebound = destination / "raw-cache"
+        reopen.assert_called_once_with(
+            rebound,
+            allow_rename=True,
+            allow_child_creation=True,
+        )
+        visible.assert_called_once_with(rebound, expected_identity=child_identity)
+        self.assertEqual(
+            state.descendant_handles[_casefolded_path(rebound)],
+            (rebound, 202, child_identity),
+        )
+
+    def test_visible_identity_reopen_shares_delete_with_retained_handle(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            _require_windows_visible_directory_identity(
+                Path("C:/Synthetic/Private"),
+                expected_identity=(7, (1 << 32) | 11),
+            )
+
+        self.assertEqual(len(kernel32.create_calls), 1)
+        desired_access = int(kernel32.create_calls[0][1])
+        share_mode = int(kernel32.create_calls[0][2])
+        self.assertFalse(desired_access & _WINDOWS_DELETE)
+        self.assertTrue(share_mode & _WINDOWS_FILE_SHARE_DELETE)
 
     def test_reparse_directory_fails_closed_and_closes_the_opened_handle(self) -> None:
         kernel32 = self._Kernel32(reparse=True)
@@ -1256,6 +1446,9 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                     return_value=(101, (7, 11)),
                 ),
                 mock.patch(
+                    "tvtime_extractor.safety._windows_native.require_recovery_capabilities"
+                ) as require_capabilities,
+                mock.patch(
                     "tvtime_extractor.safety.require_bound_destination_parent",
                     return_value=output.parent,
                 ),
@@ -1272,23 +1465,69 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                 )
                 self.assertEqual(closed, [])
                 raise RuntimeError("synthetic body failure")
+            require_capabilities.assert_called_once_with(101)
             self.assertEqual(closed, [101])
 
-    def test_windows_fresh_output_fails_before_create_or_handle_open(self) -> None:
+    def test_windows_parent_requires_acl_capabilities_before_binding_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "fresh-output"
+            closed: list[int] = []
+            with (
+                mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+                mock.patch(
+                    "tvtime_extractor.safety._windows_open_locked_directory",
+                    return_value=(101, (7, 11)),
+                ),
+                mock.patch(
+                    "tvtime_extractor.safety._windows_native.require_recovery_capabilities",
+                    side_effect=WindowsUnsupportedError("synthetic unsupported filesystem"),
+                ) as require_capabilities,
+                mock.patch(
+                    "tvtime_extractor.safety.require_bound_destination_parent"
+                ) as require_binding,
+                mock.patch(
+                    "tvtime_extractor.safety._windows_close_handle",
+                    side_effect=closed.append,
+                ),
+                self.assertRaisesRegex(UnsafePathError, "local NTFS destination"),
+                held_destination_parent(output),
+            ):
+                self.fail("unsupported Windows output must fail before entering the body")
+            require_capabilities.assert_called_once_with(101)
+            require_binding.assert_not_called()
+            self.assertEqual(closed, [101])
+
+    def test_windows_fresh_output_uses_atomic_relative_native_creation(self) -> None:
+        output = Path("/synthetic/private/fresh-output")
         with (
             mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety.require_fresh_output_platform_support"),
             mock.patch("tvtime_extractor.safety.os.mkdir") as mkdir,
-            mock.patch("tvtime_extractor.safety._windows_open_locked_directory") as open_root,
-            self.assertRaisesRegex(UserInputError, "not supported on Windows"),
-            anchored_bound_output_root(
-                Path("/synthetic/private/fresh-output"),
-                destination_parent_descriptor=99,
-                expected_parent_identity=(5, 6),
+            mock.patch(
+                "tvtime_extractor.safety.require_bound_destination_parent",
+                return_value=output.parent,
             ),
+            mock.patch(
+                "tvtime_extractor.safety._windows_create_private_directory_relative",
+                return_value=101,
+            ) as create_relative,
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                return_value=(7, 11),
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._require_windows_visible_directory_identity"
+            ) as visible,
         ):
-            pass
+            handle, identity = _open_bound_fresh_output_root(
+                output,
+                destination_parent_descriptor=99,
+                expected_identity=(5, 6),
+            )
+        self.assertEqual((handle, identity), (101, (7, 11)))
+        create_relative.assert_called_once_with(99, "fresh-output")
+        visible.assert_called_once_with(output, expected_identity=(7, 11))
         mkdir.assert_not_called()
-        open_root.assert_not_called()
 
     def test_windows_existing_root_is_held_validated_and_closed_on_body_failure(self) -> None:
         identity = (7, 11)

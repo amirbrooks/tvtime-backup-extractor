@@ -53,6 +53,36 @@ def mutate_cache_payload(
 
 
 class AnalyzeAndReportTests(unittest.TestCase):
+    def test_report_rebuild_accepts_published_v0_2_analysis_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+            analyze_extraction(extraction_directory=extraction)
+            analysis = extraction / "analysis"
+            removed_fields = {
+                "movie_library.csv": {"tvdb_id", "rewatch_count"},
+                "watched_movies.csv": {"tvdb_id", "rewatch_count"},
+                "movie_watchlist.csv": {"tvdb_id", "rewatch_count"},
+                "series_library.csv": {"watched_episode_count", "aired_episode_count"},
+                "episode_cache.csv": {"is_special"},
+                "episode_cache_unique.csv": {"is_special"},
+            }
+            for filename, removed in removed_fields.items():
+                path = analysis / filename
+                with path.open(newline="", encoding="utf-8") as source:
+                    reader = csv.DictReader(source)
+                    fields = [field for field in reader.fieldnames or () if field not in removed]
+                    rows = list(reader)
+                with path.open("w", newline="", encoding="utf-8") as destination:
+                    writer = csv.DictWriter(destination, fieldnames=fields, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerows(rows)
+                path.chmod(0o600)
+
+            result = build_report(extraction_directory=extraction)
+
+            self.assertGreaterEqual(result["series"], 1)
+            self.assertTrue((analysis / "TVTime-Recovered-Data.md").is_file())
+
     def test_invisible_movie_name_uses_placeholder_without_report_mismatch(self) -> None:
         for invisible_name in (" \t\n ", "\u200b\u2060\u200e\ufe0f"):
             with (
@@ -290,6 +320,14 @@ class AnalyzeAndReportTests(unittest.TestCase):
 
             analysis = extraction / "analysis"
             self.assertFalse((analysis / "cache_responses").exists())
+            movies = {row["name"]: row for row in read_csv_rows(analysis / "movie_library.csv")}
+            self.assertEqual(movies["Example Movie"]["tvdb_id"], "700001")
+            self.assertEqual(movies["Example Movie"]["rewatch_count"], "2")
+            series = read_csv_rows(analysis / "series_library.csv")
+            self.assertEqual(series[0]["watched_episode_count"], "1")
+            self.assertEqual(series[0]["aired_episode_count"], "2")
+            episodes = read_csv_rows(analysis / "episode_cache_unique.csv")
+            self.assertEqual(episodes[0]["is_special"], "False")
             cache_index = read_csv_rows(analysis / "cache_index.csv")
             self.assertEqual(len(cache_index), 8)
             self.assertEqual(

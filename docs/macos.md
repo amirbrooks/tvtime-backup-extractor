@@ -9,6 +9,10 @@ for end users.
 > produced by `script/build_local_app.sh` remains ad-hoc signed for contributor use and is not a
 > substitute for the official release.
 
+The current checkout's Android and official-export source chooser is an unpublished private
+candidate. It is available only after a new local ad-hoc build; it is not present in the published
+v0.2.0 DMGs.
+
 Contributor app builds use exact CPython 3.13.12 plus a reviewed native-runtime license profile;
 the broader Python 3.10-through-3.13 range applies to the CLI, not native app packaging. See
 [CONTRIBUTING.md](../CONTRIBUTING.md#native-macos-development-setup).
@@ -25,9 +29,8 @@ the broader Python 3.10-through-3.13 range applies to the CLI, not native app pa
 7. Choose **Manage Backups**. Confirm the new backup appears with the encrypted-backup lock
    indicator. Use **Show in Finder** to identify it.
 
-The phone screen does not need to remain permanently on, but the cable must remain connected and the
-phone may need to be unlocked when Finder asks. Do not infer completion from backup size or a pause
-in the animation.
+The phone screen may turn off. Keep the cable connected, and unlock the phone if Finder asks. Do not
+infer completion from backup size or a pause in the animation.
 
 Once all completion checks pass, eject the device in Finder. Wait for it to disappear from the
 sidebar, then disconnect it. Recovery uses the local Mac backup; the phone should remain disconnected
@@ -54,6 +57,18 @@ Do not move, rename, edit, clean, or duplicate the backup as part of recovery. T
 folder picker normally opens at the standard backup location and lets macOS grant access to the
 chosen folder.
 
+## Private candidate: Android and official exports
+
+The local candidate adds a source selector for a supported legacy Android backup file, an already-
+preserved Android database folder, or an official TV Time ZIP/CSV export. The system picker grants
+only the selected source. The same sandboxed helper, app-managed destination, cancellation guard,
+completion marker, artifact hashes, and native output validator apply.
+
+This route does not root a device, bypass Android backup policy, or scrape a TV Time account.
+Unknown schemas and modern apps that cannot produce legacy backups fail closed. Use the privacy-safe
+CLI `android-probe` only with a reviewed local ADB executable; direct device capture additionally
+requires an explicit acknowledgement and a fresh private file outside Git or synced storage.
+
 ## 3. App-managed private output
 
 The native app creates every recovery in its own private local app container. The user does not
@@ -67,8 +82,8 @@ anything; the app does not automatically delete recovery output.
 
 Recovered reports are readable plaintext. The sandbox and owner-only permissions reduce accidental
 access but do not provide whole-disk encryption, so FileVault remains recommended. Anyone who can
-access the Mac account—or an administrator with sufficient privileges—may be able to read the
-recovered files.
+access the Mac account, including an administrator with sufficient privileges, may be able to read
+the recovered files.
 
 The app records the app-managed parent's filesystem device and inode before and after its local and
 non-cloud checks. Preflight and recovery must use the same identity. For each helper launch, the app
@@ -178,7 +193,7 @@ The PDF is optional. If recovered text requires character shaping or glyphs that
 embedded font cannot preserve, the app states that the PDF was not created. The Markdown and offline
 HTML reports remain the complete human-readable outputs.
 
-For a successful full recovery, verify locally—without posting the files—that both markers say
+For a successful full recovery, verify locally without posting the files that both markers say
 `complete`:
 
 ```text

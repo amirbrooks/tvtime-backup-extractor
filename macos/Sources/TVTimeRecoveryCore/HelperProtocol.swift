@@ -65,6 +65,46 @@ struct HelperRequestEnvelope: Encodable, Sendable {
   }
 }
 
+struct HelperAcquisitionEnvelope: Encodable, Sendable {
+  let protocolVersion = HelperProtocolV3.version
+  let type = "acquire"
+  let payload: Payload
+
+  init(request: AcquisitionRequest) {
+    payload = Payload(request: request)
+  }
+
+  struct Payload: Encodable, Sendable {
+    let sourceKind: AcquisitionSourceKind
+    let sourcePath: String
+    let outputDirectory: String
+    let destinationParentIdentity: DestinationDirectoryIdentity
+    let acknowledgeSensitiveOutput: Bool
+    let includeRawCache: Bool
+    let hasSourceSecret: Bool
+
+    init(request: AcquisitionRequest) {
+      sourceKind = request.sourceKind
+      sourcePath = request.sourceURL.path
+      outputDirectory = request.outputDirectory.path
+      destinationParentIdentity = request.destinationParentIdentity
+      acknowledgeSensitiveOutput = request.acknowledgeSensitiveOutput
+      includeRawCache = request.includeRawCache
+      hasSourceSecret = request.hasSourceSecret
+    }
+
+    enum CodingKeys: String, CodingKey {
+      case sourceKind = "source_kind"
+      case sourcePath = "source_path"
+      case outputDirectory = "output_directory"
+      case destinationParentIdentity = "destination_parent_identity"
+      case acknowledgeSensitiveOutput = "acknowledge_sensitive_output"
+      case includeRawCache = "include_raw_cache"
+      case hasSourceSecret = "has_source_secret"
+    }
+  }
+}
+
 struct HelperCancelEnvelope: Encodable, Sendable {
   let protocolVersion = HelperProtocolV3.version
   let type = "cancel"
@@ -132,6 +172,7 @@ private struct HelperCompletionPayload: Decodable, Sendable {
   enum Body: Sendable {
     case preflight(PreflightCompletion)
     case recovery(RecoverySummary)
+    case acquisition(AcquisitionRecoverySummary)
   }
 
   let body: Body
@@ -143,6 +184,7 @@ private struct HelperCompletionPayload: Decodable, Sendable {
     case analysis
     case report
     case artifacts
+    case source
   }
 
   init(from decoder: Decoder) throws {
@@ -150,9 +192,15 @@ private struct HelperCompletionPayload: Decodable, Sendable {
     let recoveryKeys: Set<String> = [
       "preflight", "extraction", "analysis", "report", "artifacts",
     ]
+    let acquisitionKeys: Set<String> = [
+      "source", "extraction", "analysis", "report", "artifacts",
+    ]
     let dynamicContainer = try decoder.container(keyedBy: StrictProtocolCodingKey.self)
     let actualKeys = Set(dynamicContainer.allKeys.map(\.stringValue))
-    guard actualKeys == preflightKeys || actualKeys == recoveryKeys else {
+    guard
+      actualKeys == preflightKeys || actualKeys == recoveryKeys
+        || actualKeys == acquisitionKeys
+    else {
       throw DecodingError.dataCorrupted(
         DecodingError.Context(
           codingPath: decoder.codingPath,
@@ -199,6 +247,26 @@ private struct HelperCompletionPayload: Decodable, Sendable {
       return
     }
 
+    if actualKeys == acquisitionKeys {
+      let summary = AcquisitionRecoverySummary(
+        source: try container.decode(AcquisitionSourceSummary.self, forKey: .source),
+        extraction: try container.decode(ExtractionSummary.self, forKey: .extraction),
+        analysis: try container.decode(AnalysisSummary.self, forKey: .analysis),
+        report: try container.decode(ReportSummary.self, forKey: .report),
+        artifacts: try container.decode(RecoveryArtifacts.self, forKey: .artifacts)
+      )
+      guard summary.hasPlausibleOutputValues else {
+        throw DecodingError.dataCorrupted(
+          DecodingError.Context(
+            codingPath: decoder.codingPath,
+            debugDescription: "The helper returned invalid acquisition values."
+          )
+        )
+      }
+      body = .acquisition(summary)
+      return
+    }
+
     throw DecodingError.dataCorrupted(
       DecodingError.Context(
         codingPath: decoder.codingPath,
@@ -214,6 +282,7 @@ public struct HelperEvent: Decodable, Sendable {
     case progress(HelperProgress)
     case preflightCompleted(PreflightCompletion)
     case recoveryCompleted(RecoverySummary)
+    case acquisitionCompleted(AcquisitionRecoverySummary)
     case failed(RecoveryFailure)
     case cancelled(RecoveryFailure)
   }
@@ -224,7 +293,7 @@ public struct HelperEvent: Decodable, Sendable {
 
   public var isTerminal: Bool {
     switch body {
-    case .preflightCompleted, .recoveryCompleted, .failed, .cancelled:
+    case .preflightCompleted, .recoveryCompleted, .acquisitionCompleted, .failed, .cancelled:
       true
     case .ready, .progress:
       false
@@ -256,6 +325,8 @@ public struct HelperEvent: Decodable, Sendable {
         body = .preflightCompleted(completion)
       case .recovery(let summary):
         body = .recoveryCompleted(summary)
+      case .acquisition(let summary):
+        body = .acquisitionCompleted(summary)
       }
     case "failed":
       body = .failed(try container.decode(RecoveryFailure.self, forKey: .payload))

@@ -64,6 +64,35 @@ struct HelperProtocolTests {
   }
 
   @Test
+  func testDecodesStrictSourceNeutralAcquisitionCompletion() throws {
+    for warning in [
+      "already_preserved_snapshot_only",
+      "official_export_partial_file_set",
+      "vendor_backup_envelope_detected",
+    ] {
+      let expected = AcquisitionRecoverySummary(
+        source: AcquisitionSourceSummary(
+          kind: .androidPreservedSnapshot,
+          encrypted: nil,
+          androidBackupVersion: nil,
+          compressed: nil,
+          warnings: [warning]
+        ),
+        extraction: TestFixtures.extraction(),
+        analysis: TestFixtures.analysis(),
+        report: TestFixtures.report(),
+        artifacts: TestFixtures.artifacts()
+      )
+      let event = try TestFixtures.event(type: "completed", payload: expected)
+      expectTrue(event.isTerminal)
+      guard case .acquisitionCompleted(let actual) = event.body else {
+        return failTest("Expected an acquisition completion")
+      }
+      expectEqual(actual, expected)
+    }
+  }
+
+  @Test
   func testRejectsIncompleteCompletionPayload() throws {
     struct IncompletePayload: Encodable {
       let preflight = TestFixtures.preflight()
