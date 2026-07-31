@@ -406,6 +406,51 @@ _PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_V0_2_PRE_REPORT_CSV_FIELDS: dict[str, tuple[str, ...]] = {
+    filename: tuple(field for field in fields if field not in missing_fields)
+    for filename, fields, missing_fields in (
+        (
+            "movie_library.csv",
+            _PRE_REPORT_CSV_FIELDS["movie_library.csv"],
+            {"tvdb_id", "rewatch_count"},
+        ),
+        (
+            "watched_movies.csv",
+            _PRE_REPORT_CSV_FIELDS["watched_movies.csv"],
+            {"tvdb_id", "rewatch_count"},
+        ),
+        (
+            "movie_watchlist.csv",
+            _PRE_REPORT_CSV_FIELDS["movie_watchlist.csv"],
+            {"tvdb_id", "rewatch_count"},
+        ),
+        (
+            "series_library.csv",
+            _PRE_REPORT_CSV_FIELDS["series_library.csv"],
+            {"watched_episode_count", "aired_episode_count"},
+        ),
+        (
+            "episode_cache.csv",
+            _PRE_REPORT_CSV_FIELDS["episode_cache.csv"],
+            {"is_special"},
+        ),
+        (
+            "episode_cache_unique.csv",
+            _PRE_REPORT_CSV_FIELDS["episode_cache_unique.csv"],
+            {"is_special"},
+        ),
+    )
+}
+
+_V0_2_PRE_REPORT_CSV_DEFAULTS: dict[str, dict[str, str]] = {
+    "movie_library.csv": {"tvdb_id": "", "rewatch_count": ""},
+    "watched_movies.csv": {"tvdb_id": "", "rewatch_count": ""},
+    "movie_watchlist.csv": {"tvdb_id": "", "rewatch_count": ""},
+    "series_library.csv": {"watched_episode_count": "", "aired_episode_count": ""},
+    "episode_cache.csv": {"is_special": ""},
+    "episode_cache_unique.csv": {"is_special": ""},
+}
+
 _VISUAL_REPORT_INPUT_FILENAMES = frozenset(
     {
         "series_library.csv",
@@ -1092,6 +1137,7 @@ def read_csv(
     maximum_rows: int | None = None,
     maximum_bytes: int = MAXIMUM_ANALYSIS_CSV_BYTES,
     expected_fields: tuple[str, ...] | None = None,
+    compatible_field_sets: tuple[tuple[str, ...], ...] = (),
 ) -> list[dict[str, str]]:
     """Read an analysis CSV without following links and reverse recorded safe-cell escapes."""
 
@@ -1100,6 +1146,8 @@ def read_csv(
         raise ValueError("maximum_rows must be nonnegative")
     if maximum_bytes <= 0:
         raise ValueError("maximum_bytes must be positive")
+    if compatible_field_sets and expected_fields is None:
+        raise ValueError("compatible_field_sets requires expected_fields")
     metadata = require_private_path(path, expected_type=stat.S_IFREG)
     if metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
         raise _report_limit_error("CSV file byte size", maximum_bytes)
@@ -1139,7 +1187,11 @@ def read_csv(
                 not fieldnames
                 or len(fieldnames) > 256
                 or len(set(fieldnames)) != len(fieldnames)
-                or (expected_fields is not None and fieldnames != expected_fields)
+                or (
+                    expected_fields is not None
+                    and fieldnames != expected_fields
+                    and fieldnames not in compatible_field_sets
+                )
             ):
                 raise TVTimeError("A private recovery table had an unsupported header.")
             for field in fieldnames:
@@ -1241,6 +1293,28 @@ def read_csv(
                 subject="analysis CSV cell byte size",
                 maximum_bytes=MAXIMUM_ANALYSIS_CSV_CELL_BYTES,
             )
+    return rows
+
+
+def _read_pre_report_csv(
+    analysis: Path,
+    filename: str,
+    *,
+    escaped_cells: object,
+    maximum_rows: int | None = None,
+) -> list[dict[str, str]]:
+    expected_fields = _PRE_REPORT_CSV_FIELDS[filename]
+    v0_2_fields = _V0_2_PRE_REPORT_CSV_FIELDS.get(filename)
+    rows = read_csv(
+        analysis / filename,
+        escaped_cells=escaped_cells,
+        maximum_rows=maximum_rows,
+        expected_fields=expected_fields,
+        compatible_field_sets=((v0_2_fields,) if v0_2_fields is not None else ()),
+    )
+    for row in rows:
+        for field, default in _V0_2_PRE_REPORT_CSV_DEFAULTS.get(filename, {}).items():
+            row.setdefault(field, default)
     return rows
 
 
@@ -1759,18 +1833,18 @@ def _build_report(
 
     validated_nonvisual_tables = set(_PRE_REPORT_CSV_FIELDS) - _VISUAL_REPORT_INPUT_FILENAMES
     for filename in sorted(validated_nonvisual_tables):
-        read_csv(
-            analysis / filename,
+        _read_pre_report_csv(
+            analysis,
+            filename,
             escaped_cells=escape_metadata.get(filename, []),
             maximum_rows=MAXIMUM_ANALYSIS_CSV_ROWS,
-            expected_fields=_PRE_REPORT_CSV_FIELDS[filename],
         )
 
     def read_analysis_csv(filename: str) -> list[dict[str, str]]:
-        rows = read_csv(
-            analysis / filename,
+        rows = _read_pre_report_csv(
+            analysis,
+            filename,
             escaped_cells=escape_metadata.get(filename, []),
-            expected_fields=_PRE_REPORT_CSV_FIELDS[filename],
         )
         report_table_budget.reserve("combined visual-report row count", len(rows))
         report_byte_budget.reserve_rows("combined visual-report input byte size", rows)
