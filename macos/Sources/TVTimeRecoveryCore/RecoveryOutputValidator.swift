@@ -24,13 +24,13 @@ enum RecoveryOutputValidator {
     (alias: "/var", target: "/private/var"),
   ]
 
-  static func validate(
-    _ summary: RecoverySummary,
+  static func validate<Summary: ValidatableRecoverySummary>(
+    _ summary: Summary,
     beneath outputDirectory: URL,
     beforeFinalCompletionMarkerRead: (() throws -> Void)? = nil
   ) throws {
     try Task.checkCancellation()
-    guard summary.hasPlausibleAggregateValues else {
+    guard summary.hasPlausibleOutputValues else {
       throw RecoveryOutputValidationError.invalidSummary
     }
 

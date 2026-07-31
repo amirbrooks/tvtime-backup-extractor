@@ -75,6 +75,86 @@ struct BackupStepView: View {
 }
 
 @MainActor
+struct AcquisitionStepView: View {
+  let sourceKind: AcquisitionSourceKind
+  let chooseSource: () async throws -> URL?
+  let onStart: (URL, String, Bool) throws -> Void
+  @State private var selectedSource: URL?
+  @State private var password = ""
+  @State private var acknowledgesSensitiveOutput = false
+  @State private var presentedError: PresentedError?
+
+  var body: some View {
+    VStack(spacing: 20) {
+      Image(systemName: "lock.doc")
+        .font(.system(size: 48))
+        .foregroundStyle(.tint)
+      Text(title).font(.title2.weight(.semibold)).phaseHeading()
+      Text(guidance)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 560)
+      Button(selectedSource == nil ? "Choose Source…" : "Choose Different Source…") {
+        Task {
+          do { selectedSource = try await chooseSource() ?? selectedSource } catch {
+            presentedError = PresentedError(message: safeMessage(for: error))
+          }
+        }
+      }
+      .buttonStyle(.borderedProminent)
+      if selectedSource != nil {
+        Label("Private local source selected", systemImage: "checkmark.circle.fill")
+          .foregroundStyle(.secondary)
+      }
+      if sourceKind == .tvTimeOfficialExport {
+        SecureField("Export password (only if the ZIP is encrypted)", text: $password)
+          .textFieldStyle(.roundedBorder)
+          .frame(maxWidth: 480)
+      }
+      Toggle(isOn: $acknowledgesSensitiveOutput) {
+        Text("I understand the recovered reports contain readable private viewing history.")
+      }
+      .frame(maxWidth: 560)
+      Button("Recover Privately") {
+        guard let selectedSource else { return }
+        let suppliedPassword = password
+        password.removeAll(keepingCapacity: false)
+        do { try onStart(selectedSource, suppliedPassword, acknowledgesSensitiveOutput) } catch {
+          presentedError = PresentedError(message: safeMessage(for: error))
+        }
+      }
+      .buttonStyle(.borderedProminent)
+      .keyboardShortcut(.defaultAction)
+      .disabled(selectedSource == nil || !acknowledgesSensitiveOutput)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .alert(item: $presentedError) { error in
+      Alert(title: Text("Recovery could not start"), message: Text(error.message))
+    }
+    .onDisappear { password.removeAll(keepingCapacity: false) }
+  }
+
+  private var title: String {
+    switch sourceKind {
+    case .androidLegacyBackup: "Recover an Android backup"
+    case .androidPreservedSnapshot: "Recover a preserved Android database"
+    case .tvTimeOfficialExport: "Recover an official TV Time export"
+    }
+  }
+
+  private var guidance: String {
+    switch sourceKind {
+    case .androidLegacyBackup:
+      "Legacy Android backup files are supported only when they contain the expected TV Time database. Modern release apps normally disable this route."
+    case .androidPreservedSnapshot:
+      "Choose a preserved folder containing DioCache.db. Unknown files and schemas are rejected rather than guessed."
+    case .tvTimeOfficialExport:
+      "Choose the official ZIP, tracking-prod-records.csv, or tracking-prod-records-v2.csv export."
+    }
+  }
+}
+
+@MainActor
 struct ConfirmationStepView: View {
   let summary: PreflightSummary
   let destinationIdentity: String
@@ -270,7 +350,7 @@ struct CancellingView: View {
 
 @MainActor
 struct RecoveryResultView: View {
-  let summary: RecoverySummary
+  let summary: any RecoveryResultSummary
   let hasVisualReport: Bool
   let hasPDFReport: Bool
   let onOpenVisualReport: () throws -> Void

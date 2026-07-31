@@ -65,6 +65,36 @@ final class RecoverySessionTests {
   }
 
   @Test
+  func testAcquisitionFailureReturnsToSourceSelectionInsteadOfIOSPreflight() throws {
+    let helper = FakeRecoveryHelperClient()
+    let session = RecoverySession(
+      helperClient: helper,
+      destinationEncryptionValidator: { _ in syntheticDestinationIdentity }
+    )
+    let root = try trackedDirectory()
+    let source = root.appendingPathComponent("android-source.ab")
+    let destination = root.appendingPathComponent("app-managed", isDirectory: true)
+    try Data("synthetic".utf8).write(to: source)
+    try makePrivateDirectory(destination)
+
+    session.startAcquisition(
+      sourceKind: .androidLegacyBackup,
+      sourceURL: source,
+      appManagedDestinationParent: destination,
+      sourcePassword: "",
+      acknowledgeSensitiveOutput: true
+    )
+    guard case .failed = session.phase else {
+      return failTest("Expected the unavailable fake acquisition helper to fail safely")
+    }
+
+    session.recoverFromFailure()
+
+    expectEqual(session.phase, .chooseBackup)
+    expectEqual(helper.invocations.count, 0)
+  }
+
+  @Test
   func testPreflightCompletionEnablesRecoveryAndPassesSecretOnlyToRecovery() async throws {
     let context = try makePreflightingSession()
     let receipt = TestFixtures.backupReceipt()

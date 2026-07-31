@@ -17,6 +17,12 @@ public enum RecoveryAction: String, Codable, Sendable {
   case recover
 }
 
+public enum AcquisitionSourceKind: String, Codable, CaseIterable, Sendable {
+  case androidLegacyBackup = "android_legacy_backup"
+  case androidPreservedSnapshot = "android_preserved_snapshot"
+  case tvTimeOfficialExport = "tvtime_official_export"
+}
+
 public struct DestinationDirectoryIdentity: Codable, Equatable, Sendable {
   public let device: UInt64
   public let inode: UInt64
@@ -264,6 +270,34 @@ public struct RecoveryRequest: Sendable {
     self.includeRawCache = includeRawCache
     self.includeDecryptedManifest = includeDecryptedManifest
     self.backupReceipt = backupReceipt
+  }
+}
+
+public struct AcquisitionRequest: Sendable {
+  public let sourceKind: AcquisitionSourceKind
+  public let sourceURL: URL
+  public let outputDirectory: URL
+  public let destinationParentIdentity: DestinationDirectoryIdentity
+  public let acknowledgeSensitiveOutput: Bool
+  public let includeRawCache: Bool
+  public let hasSourceSecret: Bool
+
+  public init(
+    sourceKind: AcquisitionSourceKind,
+    sourceURL: URL,
+    outputDirectory: URL,
+    destinationParentIdentity: DestinationDirectoryIdentity,
+    acknowledgeSensitiveOutput: Bool,
+    includeRawCache: Bool = false,
+    hasSourceSecret: Bool = false
+  ) {
+    self.sourceKind = sourceKind
+    self.sourceURL = sourceURL
+    self.outputDirectory = outputDirectory
+    self.destinationParentIdentity = destinationParentIdentity
+    self.acknowledgeSensitiveOutput = acknowledgeSensitiveOutput
+    self.includeRawCache = includeRawCache
+    self.hasSourceSecret = hasSourceSecret
   }
 }
 
@@ -552,6 +586,67 @@ public struct RecoverySummary: Codable, Equatable, Sendable {
   }
 }
 
+public protocol RecoveryResultSummary: Sendable {
+  var extraction: ExtractionSummary { get }
+  var analysis: AnalysisSummary { get }
+  var report: ReportSummary { get }
+  var artifacts: RecoveryArtifacts { get }
+}
+
+protocol ValidatableRecoverySummary: RecoveryResultSummary {
+  var hasPlausibleOutputValues: Bool { get }
+}
+
+extension RecoverySummary: RecoveryResultSummary, ValidatableRecoverySummary {
+  var hasPlausibleOutputValues: Bool { hasPlausibleAggregateValues }
+}
+
+public struct AcquisitionSourceSummary: Codable, Equatable, Sendable {
+  public let kind: AcquisitionSourceKind
+  public let encrypted: Bool?
+  public let androidBackupVersion: Int?
+  public let compressed: Bool?
+  public let warnings: [String]
+
+  enum CodingKeys: String, CodingKey {
+    case kind
+    case encrypted
+    case androidBackupVersion = "android_backup_version"
+    case compressed
+    case warnings
+  }
+
+  var hasPlausibleValues: Bool {
+    warnings.count <= 8
+      && warnings.allSatisfy {
+        [
+          "already_preserved_snapshot_only",
+          "official_export_partial_file_set",
+          "vendor_backup_envelope_detected",
+        ].contains($0)
+      } && (androidBackupVersion == nil || (1...5).contains(androidBackupVersion!))
+  }
+}
+
+public struct AcquisitionRecoverySummary: Codable, Equatable, Sendable,
+  RecoveryResultSummary, ValidatableRecoverySummary
+{
+  public let source: AcquisitionSourceSummary
+  public let extraction: ExtractionSummary
+  public let analysis: AnalysisSummary
+  public let report: ReportSummary
+  public let artifacts: RecoveryArtifacts
+
+  var hasPlausibleOutputValues: Bool {
+    source.hasPlausibleValues
+      && extraction.hasPlausibleAggregateValues
+      && analysis.hasPlausibleAggregateValues
+      && report.hasPlausibleAggregateValues
+      && artifacts.hasExpectedRelativePaths
+      && ((report.pdfStatus == "generated") == (artifacts.pdfReport != nil))
+  }
+}
+
 public enum RecoveryCancellationOrigin: Int, Equatable, Sendable {
   case cancelButton
   case windowClose
@@ -583,6 +678,7 @@ public enum RecoveryPhase: Equatable, Sendable {
   case validating(RecoveryProgress)
   case cancelling
   case completed(RecoverySummary)
+  case acquisitionCompleted(AcquisitionRecoverySummary)
   case failed(RecoveryFailure)
 
   public var isBusy: Bool {

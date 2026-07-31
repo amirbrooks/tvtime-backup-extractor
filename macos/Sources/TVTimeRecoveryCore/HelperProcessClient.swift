@@ -8,7 +8,21 @@ public protocol RecoveryHelperClient: AnyObject {
     secret: Data?
   ) throws -> AsyncThrowingStream<HelperEvent, Error>
 
+  func events(
+    for request: AcquisitionRequest,
+    secret: Data?
+  ) throws -> AsyncThrowingStream<HelperEvent, Error>
+
   func cancel()
+}
+
+extension RecoveryHelperClient {
+  public func events(
+    for request: AcquisitionRequest,
+    secret: Data?
+  ) throws -> AsyncThrowingStream<HelperEvent, Error> {
+    throw HelperClientError.invalidFrame
+  }
 }
 
 @MainActor
@@ -121,12 +135,53 @@ public final class HelperProcessClient: RecoveryHelperClient {
       }
     }
 
-    let requestFrame = try HelperFrameEncoder.frame(HelperRequestEnvelope(request: request))
-    let destinationParentDescriptor = try Self.openBoundDestinationParent(for: request)
+    return try startEvents(
+      requestFrame: HelperFrameEncoder.frame(HelperRequestEnvelope(request: request)),
+      outputDirectory: request.outputDirectory,
+      destinationIdentity: request.destinationParentIdentity,
+      requiredCapability: request.action.rawValue,
+      secret: secret
+    )
+  }
+
+  public func events(
+    for request: AcquisitionRequest,
+    secret: Data?
+  ) throws -> AsyncThrowingStream<HelperEvent, Error> {
+    guard activeRun == nil else { throw HelperClientError.helperBusy }
+    try validateBundledHelper()
+    guard
+      request.acknowledgeSensitiveOutput,
+      request.hasSourceSecret == (secret != nil),
+      secret?.isEmpty != true,
+      (secret?.count ?? 0) <= HelperProtocolV3.maximumSecretBytes
+    else {
+      throw HelperClientError.invalidFrame
+    }
+    return try startEvents(
+      requestFrame: HelperFrameEncoder.frame(HelperAcquisitionEnvelope(request: request)),
+      outputDirectory: request.outputDirectory,
+      destinationIdentity: request.destinationParentIdentity,
+      requiredCapability: "source-neutral-acquisition-v1",
+      secret: secret
+    )
+  }
+
+  private func startEvents(
+    requestFrame: Data,
+    outputDirectory: URL,
+    destinationIdentity: DestinationDirectoryIdentity,
+    requiredCapability: String,
+    secret: Data?
+  ) throws -> AsyncThrowingStream<HelperEvent, Error> {
+    let destinationParentDescriptor = try Self.openBoundDestinationParent(
+      outputDirectory: outputDirectory,
+      expectedIdentity: destinationIdentity
+    )
     defer { Darwin.close(destinationParentDescriptor) }
     let spawned = try spawnHelper(
       destinationParentDescriptor: destinationParentDescriptor,
-      requiresSecret: request.action == .recover
+      requiresSecret: secret != nil
     )
     let (stream, continuation) = AsyncThrowingStream<HelperEvent, Error>.makeStream(
       bufferingPolicy: .bufferingNewest(128)
@@ -174,7 +229,6 @@ public final class HelperProcessClient: RecoveryHelperClient {
       throw HelperClientError.communicationFailed
     }
 
-    let requiredCapability = request.action.rawValue
     let terminalObserver: @Sendable (TerminalKind, HelperEvent) -> Void = {
       [weak self] terminalKind, terminalEvent in
       Task { @MainActor [weak self] in
@@ -671,7 +725,17 @@ public final class HelperProcessClient: RecoveryHelperClient {
   }
 
   nonisolated static func openBoundDestinationParent(for request: RecoveryRequest) throws -> Int32 {
-    let output = request.outputDirectory.standardizedFileURL
+    try openBoundDestinationParent(
+      outputDirectory: request.outputDirectory,
+      expectedIdentity: request.destinationParentIdentity
+    )
+  }
+
+  nonisolated static func openBoundDestinationParent(
+    outputDirectory: URL,
+    expectedIdentity: DestinationDirectoryIdentity
+  ) throws -> Int32 {
+    let output = outputDirectory.standardizedFileURL
     guard output.isFileURL, output.path != "/" else {
       throw HelperClientError.destinationChanged
     }
@@ -687,7 +751,7 @@ public final class HelperProcessClient: RecoveryHelperClient {
       DestinationDirectoryIdentity(
         device: UInt64(metadata.st_dev),
         inode: UInt64(metadata.st_ino)
-      ) == request.destinationParentIdentity
+      ) == expectedIdentity
     else {
       throw HelperClientError.destinationChanged
     }
@@ -932,11 +996,13 @@ public final class HelperProcessClient: RecoveryHelperClient {
               terminalKind = .completed
             case .recoveryCompleted where requiredCapability == RecoveryAction.recover.rawValue:
               terminalKind = .completed
+            case .acquisitionCompleted where requiredCapability == "source-neutral-acquisition-v1":
+              terminalKind = .completed
             case .failed:
               terminalKind = .failed
             case .cancelled:
               terminalKind = .cancelled
-            case .preflightCompleted, .recoveryCompleted, .ready, .progress:
+            case .preflightCompleted, .recoveryCompleted, .acquisitionCompleted, .ready, .progress:
               return ReaderOutcome(
                 error: .invalidEventStream,
                 terminalKind: terminalKind,
