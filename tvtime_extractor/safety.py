@@ -67,6 +67,9 @@ _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _WINDOWS_FILE_LIST_DIRECTORY = 0x00000001
+_WINDOWS_FILE_ADD_SUBDIRECTORY = 0x00000004
+_WINDOWS_FILE_TRAVERSE = 0x00000020
+_WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS = _WINDOWS_FILE_ADD_SUBDIRECTORY | _WINDOWS_FILE_TRAVERSE
 _WINDOWS_SYNCHRONIZE = 0x00100000
 _WINDOWS_FILE_CREATE = 2
 _WINDOWS_FILE_DIRECTORY_FILE = 0x00000001
@@ -780,6 +783,7 @@ def _windows_create_private_directory_relative(parent_handle: int, name: str) ->
             create_file(
                 ctypes.byref(opened),
                 _WINDOWS_FILE_LIST_DIRECTORY
+                | _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
                 | _WINDOWS_FILE_READ_ATTRIBUTES
                 | _WINDOWS_DELETE
                 | _WINDOWS_SYNCHRONIZE,
@@ -841,6 +845,7 @@ def _windows_create_file_directory_handle(
     path: Path,
     *,
     allow_rename: bool = False,
+    allow_child_creation: bool = False,
     share_delete: bool = False,
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
@@ -862,9 +867,14 @@ def _windows_create_file_directory_handle(
         share_mode = _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE
         if share_delete:
             share_mode |= _WINDOWS_FILE_SHARE_DELETE
+        desired_access = _WINDOWS_FILE_READ_ATTRIBUTES
+        if allow_rename:
+            desired_access |= _WINDOWS_DELETE
+        if allow_child_creation:
+            desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
         opened = create_file(
             os.fspath(path),
-            _WINDOWS_FILE_READ_ATTRIBUTES | (_WINDOWS_DELETE if allow_rename else 0),
+            desired_access,
             share_mode,
             None,
             _WINDOWS_OPEN_EXISTING,
@@ -1230,11 +1240,13 @@ def _windows_open_locked_directory(
     path: Path,
     *,
     allow_rename: bool = False,
+    allow_child_creation: bool = False,
     share_delete: bool = False,
 ) -> tuple[int, tuple[int, int]]:
     handle = _windows_create_file_directory_handle(
         path,
         allow_rename=allow_rename,
+        allow_child_creation=allow_child_creation,
         share_delete=share_delete,
     )
     try:
@@ -1270,7 +1282,11 @@ def _windows_hold_bound_descendant_directory(path: Path) -> None:
         raise UnsafePathError(
             "A Windows recovery directory parent was not retained before its child."
         )
-    handle, identity = _windows_open_locked_directory(candidate, allow_rename=True)
+    handle, identity = _windows_open_locked_directory(
+        candidate,
+        allow_rename=True,
+        allow_child_creation=True,
+    )
     try:
         _require_windows_visible_directory_identity(candidate, expected_identity=identity)
         state.descendant_handles[key] = (candidate, handle, identity)
@@ -1511,7 +1527,10 @@ def held_destination_parent(
     handle = -1
     try:
         if _running_on_windows():
-            handle, identity = _windows_open_locked_directory(parent)
+            handle, identity = _windows_open_locked_directory(
+                parent,
+                allow_child_creation=True,
+            )
         else:
             try:
                 handle = os.open(parent, _descriptor_flags(stat.S_IFDIR))
@@ -1855,7 +1874,10 @@ def anchored_existing_extraction_root(extraction_root: Path) -> Iterator[Path]:
         root_identity = (0, 0)
         windows_state: _WindowsBoundOutputState | None = None
         try:
-            root_handle, root_identity = _windows_open_locked_directory(visible_root)
+            root_handle, root_identity = _windows_open_locked_directory(
+                visible_root,
+                allow_child_creation=True,
+            )
             windows_state = _WindowsBoundOutputState(
                 handle=root_handle,
                 identity=root_identity,

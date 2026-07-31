@@ -113,6 +113,10 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         ):
             self.assertIn(required, source)
         self.assertNotIn("RedirectStandardError", source)
+        self.assertIn(
+            "FileReadAttributes | FileAddSubdirectory | FileTraverse",
+            source,
+        )
         self.assertLess(
             source.index("TerminateProcess(process, 1)"),
             source.index(

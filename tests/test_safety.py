@@ -16,6 +16,7 @@ from unittest import mock
 from tvtime_extractor.errors import OutputExistsError, UnsafePathError, UserInputError
 from tvtime_extractor.safety import (
     _WINDOWS_DELETE,
+    _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
     _WINDOWS_FILE_ATTRIBUTE_DIRECTORY,
     _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT,
     _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
@@ -1190,8 +1191,28 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(share_mode, _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE)
         self.assertFalse(share_mode & _WINDOWS_FILE_SHARE_DELETE)
         self.assertFalse(desired_access & _WINDOWS_DELETE)
+        self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertTrue(flags & _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS)
         self.assertTrue(flags & _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT)
+
+    def test_output_directory_handle_can_create_relative_private_children(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_child_creation=True,
+            )
+            _windows_close_handle(handle)
+
+        desired_access = int(kernel32.create_calls[0][1])
+        self.assertEqual(
+            desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
+            _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
+        )
+        self.assertFalse(int(kernel32.create_calls[0][2]) & _WINDOWS_FILE_SHARE_DELETE)
 
     def test_promotion_capable_directory_handle_requests_delete_access_once(self) -> None:
         kernel32 = self._Kernel32()

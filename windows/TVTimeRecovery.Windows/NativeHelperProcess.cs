@@ -20,6 +20,8 @@ internal sealed class NativeHelperProcess : IAsyncDisposable
     private const nuint ProcThreadAttributeHandleList = 0x00020002;
     private const uint GenericWrite = 0x40000000;
     private const uint FileReadAttributes = 0x00000080;
+    private const uint FileAddSubdirectory = 0x00000004;
+    private const uint FileTraverse = 0x00000020;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
@@ -77,7 +79,7 @@ internal sealed class NativeHelperProcess : IAsyncDisposable
             CreateAnonymousPipe(out secretRead, out secretWrite, childReads: true);
             destination = CreateFileW(
                 destinationParent,
-                FileReadAttributes,
+                FileReadAttributes | FileAddSubdirectory | FileTraverse,
                 FileShareRead | FileShareWrite,
                 IntPtr.Zero,
                 OpenExisting,
