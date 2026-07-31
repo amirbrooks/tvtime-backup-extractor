@@ -1039,6 +1039,77 @@ def _windows_promote_held_file_no_replace(
         raise UnsafePathError("The private Windows staging name remained after promotion.")
 
 
+def _windows_suspend_bound_descendants(
+    state: _WindowsBoundOutputState,
+    source: Path,
+) -> list[tuple[Path, tuple[int, int]]]:
+    """Close child directory capabilities that would block their parent's rename."""
+
+    source_key = _casefolded_path(source)
+    selected: list[tuple[str, Path, int, tuple[int, int], Path]] = []
+    for key, (visible, handle, identity) in state.descendant_handles.items():
+        if key == source_key:
+            continue
+        try:
+            relative = visible.relative_to(source)
+        except ValueError:
+            continue
+        selected.append((key, visible, handle, identity, relative))
+    selected.sort(key=lambda item: len(item[4].parts), reverse=True)
+
+    for _key, visible, handle, identity, _relative in selected:
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+
+    suspended: list[tuple[Path, tuple[int, int]]] = []
+    for key, _visible, handle, identity, relative in selected:
+        try:
+            _windows_close_handle(handle)
+        except BaseException:
+            _windows_resume_bound_descendants(state, source, suspended)
+            raise
+        state.descendant_handles.pop(key, None)
+        suspended.append((relative, identity))
+    return suspended
+
+
+def _windows_resume_bound_descendants(
+    state: _WindowsBoundOutputState,
+    base: Path,
+    suspended: list[tuple[Path, tuple[int, int]]],
+) -> None:
+    """Reopen moved child directories and require their exact prior identities."""
+
+    for relative, expected_identity in sorted(
+        suspended,
+        key=lambda item: len(item[0].parts),
+    ):
+        visible = base / relative
+        handle, identity = _windows_open_locked_directory(
+            visible,
+            allow_rename=True,
+            allow_child_creation=True,
+        )
+        try:
+            if identity != expected_identity:
+                raise UnsafePathError(
+                    "A Windows recovery directory changed during atomic promotion."
+                )
+            _require_windows_visible_directory_identity(
+                visible,
+                expected_identity=expected_identity,
+            )
+            state.descendant_handles[_casefolded_path(visible)] = (
+                visible,
+                handle,
+                identity,
+            )
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+
+
 def _windows_promote_bound_directory_no_replace(source: Path, destination: Path) -> None:
     """Promote a retained directory and rebind every retained descendant path."""
 
@@ -1052,25 +1123,22 @@ def _windows_promote_bound_directory_no_replace(source: Path, destination: Path)
     _visible, handle, identity = entry
     if _windows_directory_identity(handle) != identity:
         raise UnsafePathError("The Windows staging directory identity changed before promotion.")
-    _windows_rename_handle_no_replace(handle, destination)
+    suspended = _windows_suspend_bound_descendants(state, source)
+    try:
+        _windows_rename_handle_no_replace(handle, destination)
+    except BaseException:
+        _windows_resume_bound_descendants(state, source, suspended)
+        raise
     if source.exists() or source.is_symlink():
         raise UnsafePathError("The private Windows staging directory remained after promotion.")
 
-    rebased: dict[str, tuple[Path, int, tuple[int, int]]] = {}
-    for key, (visible, retained_handle, retained_identity) in state.descendant_handles.items():
-        try:
-            relative = visible.relative_to(source)
-        except ValueError:
-            rebased[key] = (visible, retained_handle, retained_identity)
-            continue
-        new_visible = destination / relative
-        rebased[_casefolded_path(new_visible)] = (
-            new_visible,
-            retained_handle,
-            retained_identity,
-        )
-    state.descendant_handles.clear()
-    state.descendant_handles.update(rebased)
+    state.descendant_handles.pop(source_key, None)
+    state.descendant_handles[_casefolded_path(destination)] = (
+        destination,
+        handle,
+        identity,
+    )
+    _windows_resume_bound_descendants(state, destination, suspended)
     _require_windows_visible_directory_identity(destination, expected_identity=identity)
 
 

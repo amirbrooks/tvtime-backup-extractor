@@ -26,6 +26,7 @@ from tvtime_extractor.safety import (
     _WINDOWS_FILE_SHARE_WRITE,
     _WINDOWS_GENERIC_READ,
     EXTRACTION_DIRECTORY_NAME,
+    _casefolded_path,
     _darwin_volume_is_local,
     _linux_volume_is_local,
     _open_bound_fresh_output_root,
@@ -37,6 +38,9 @@ from tvtime_extractor.safety import (
     _windows_open_locked_directory,
     _windows_regular_file_information,
     _windows_rename_handle_no_replace,
+    _windows_resume_bound_descendants,
+    _windows_suspend_bound_descendants,
+    _WindowsBoundOutputState,
     anchored_bound_output_root,
     anchored_existing_extraction_root,
     extended_acl_state,
@@ -1274,6 +1278,66 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             replace=False,
         )
         self.assertEqual(closed, [101])
+
+    def test_parent_promotion_suspends_and_rebinds_child_capabilities(self) -> None:
+        root = Path("/synthetic/private")
+        source = root / "Analysis.incomplete"
+        child = source / "raw-cache"
+        destination = root / "Analysis"
+        source_identity = (7, 11)
+        child_identity = (7, 12)
+        state = _WindowsBoundOutputState(
+            handle=99,
+            identity=(7, 10),
+            visible_root=root,
+            descendant_handles={
+                _casefolded_path(source): (source, 101, source_identity),
+                _casefolded_path(child): (child, 102, child_identity),
+            },
+        )
+        closed: list[int] = []
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                side_effect=lambda handle: {101: source_identity, 102: child_identity}[handle],
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._require_windows_visible_directory_identity"
+            ) as visible,
+            mock.patch(
+                "tvtime_extractor.safety._windows_close_handle",
+                side_effect=closed.append,
+            ),
+        ):
+            suspended = _windows_suspend_bound_descendants(state, source)
+
+        self.assertEqual(suspended, [(Path("raw-cache"), child_identity)])
+        self.assertEqual(closed, [102])
+        self.assertNotIn(_casefolded_path(child), state.descendant_handles)
+        visible.assert_called_once_with(child, expected_identity=child_identity)
+
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_open_locked_directory",
+                return_value=(202, child_identity),
+            ) as reopen,
+            mock.patch(
+                "tvtime_extractor.safety._require_windows_visible_directory_identity"
+            ) as visible,
+        ):
+            _windows_resume_bound_descendants(state, destination, suspended)
+
+        rebound = destination / "raw-cache"
+        reopen.assert_called_once_with(
+            rebound,
+            allow_rename=True,
+            allow_child_creation=True,
+        )
+        visible.assert_called_once_with(rebound, expected_identity=child_identity)
+        self.assertEqual(
+            state.descendant_handles[_casefolded_path(rebound)],
+            (rebound, 202, child_identity),
+        )
 
     def test_visible_identity_reopen_shares_delete_with_retained_handle(self) -> None:
         kernel32 = self._Kernel32()

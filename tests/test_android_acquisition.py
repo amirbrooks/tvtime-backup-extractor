@@ -192,7 +192,7 @@ class AndroidAcquisitionTests(unittest.TestCase):
                 staging = Path(database)
                 self.assertEqual(staging.name, "normalized.sqlite")
                 self.assertTrue(staging.parent.name.startswith(".sqlite-compat-"))
-                self.assertEqual(staging.parent.parent, target.parent)
+                self.assertEqual(staging.parent.parent.resolve(), target.parent.resolve())
             self.assertNotIn(target, [Path(database) for database in opened[1:]])
             self.assertGreater(target.stat().st_size, 0)
 
