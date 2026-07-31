@@ -51,6 +51,7 @@ from .safety import (
     nearest_git_root,
     no_link_absolute_path,
     require_bound_destination_parent,
+    require_encrypted_ios_source_platform_support,
     require_fresh_output_platform_support,
     require_private_local_destination,
     validate_backup_directory,
@@ -491,6 +492,7 @@ class RecoveryService:
         cancellation: CancellationToken | None = None,
         destination_parent_descriptor: int | None = None,
     ) -> PreflightResult:
+        require_encrypted_ios_source_platform_support()
         if destination_parent_descriptor is None:
             if request.destination_parent_identity is not None:
                 raise UnsafePathError("Destination identity binding was incomplete.")
@@ -755,6 +757,7 @@ class RecoveryService:
     ) -> ExtractionResult:
         """Extract through the same identity-bound, single-use preflight receipt as recovery."""
 
+        require_encrypted_ios_source_platform_support()
         require_fresh_output_platform_support()
         if not request.acknowledge_sensitive_output:
             raise UserInputError(
@@ -871,6 +874,7 @@ class RecoveryService:
         destination_parent_descriptor: int | None = None,
         preflight_result: PreflightResult | None = None,
     ) -> RecoveryResult:
+        require_encrypted_ios_source_platform_support()
         require_fresh_output_platform_support()
         if not request.acknowledge_sensitive_output:
             raise UserInputError(

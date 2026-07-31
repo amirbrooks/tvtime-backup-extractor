@@ -6,9 +6,11 @@ import stat
 import sys
 import threading
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .acquisition import AcquiredRecoveryResult, RecoverySourceKind, recover_acquired_source
 from .errors import ErrorCode, TVTimeError, is_insufficient_space_error
 from .models import (
     CancellationToken,
@@ -30,7 +32,11 @@ from .protocol import (
     read_control_request,
     read_json_frame,
 )
-from .safety import set_private_umask
+from .safety import (
+    _close_bound_directory_handle,
+    _windows_directory_identity,
+    set_private_umask,
+)
 from .service import RecoveryService
 
 SAFE_ERROR_MESSAGES = {
@@ -88,6 +94,19 @@ SAFE_ERROR_MESSAGES = {
     ),
 }
 
+_WINDOWS_SECRET_HANDLE_ENVIRONMENT = "TVTIME_SECRET_HANDLE"
+_WINDOWS_DESTINATION_HANDLE_ENVIRONMENT = "TVTIME_DESTINATION_HANDLE"
+
+
+def _take_windows_inherited_handle(name: str) -> int:
+    raw = os.environ.pop(name, "")
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        raise ProtocolError("A required Windows helper handle was unavailable.")
+    handle = int(raw)
+    if handle <= 0 or handle > (1 << 64) - 1:
+        raise ProtocolError("A required Windows helper handle was malformed.")
+    return handle
+
 
 def _protocol_summary(result: RecoveryResult) -> dict[str, object]:
     extraction = result.extraction.summary
@@ -136,11 +155,106 @@ def _protocol_summary(result: RecoveryResult) -> dict[str, object]:
     }
 
 
+def _acquisition_protocol_summary(result: AcquiredRecoveryResult) -> dict[str, object]:
+    extraction = result.extraction.summary
+    analysis = result.analysis
+    report = result.report
+    source = result.source_preflight
+    artifacts = {
+        "extraction_directory": "TVTime-Extraction",
+        "report": "TVTime-Extraction/analysis/TVTime-Recovered-Data.md",
+        "visual_report": "TVTime-Extraction/analysis/TVTime-Recovered-Data.html",
+        "analysis_directory": "TVTime-Extraction/analysis",
+        "recovery_state": "TVTime-Extraction/analysis/recovery_state.json",
+    }
+    if report.get("pdf_report"):
+        artifacts["pdf_report"] = "TVTime-Extraction/analysis/TVTime-Recovered-Data.pdf"
+    return {
+        "source": {
+            "kind": source.source_kind.value,
+            "encrypted": source.encrypted,
+            "android_backup_version": source.android_backup_version,
+            "compressed": source.compressed,
+            "warnings": list(source.warnings),
+        },
+        "extraction": {
+            "files_expected": int(extraction["files_expected"]),
+            "files_extracted": int(extraction["files_extracted"]),
+            "bytes_extracted": int(extraction["bytes_extracted"]),
+            "selected_declared_bytes": int(extraction["selected_declared_bytes"]),
+            "size_discrepancy_count": len(extraction["size_discrepancies"]),
+        },
+        "analysis": {
+            "series_library": int(analysis["series_library"]),
+            "watched_movies": int(analysis["watched_movies"]),
+            "movie_watchlist": int(analysis["movie_watchlist"]),
+            "favorite_shows": int(analysis["favorite_shows"]),
+            "favorite_movies": int(analysis["favorite_movies"]),
+            "watch_events": int(analysis["watch_events"]),
+            "watch_events_with_titles": int(analysis["watch_events_with_titles"]),
+            "episode_cache_unique": int(analysis["episode_cache_unique"]),
+            "parser_status": str(analysis["parser_status"]),
+        },
+        "report": {
+            "image_cache_references": int(report["image_cache_references"]),
+            "trailer_references": int(report["trailer_references"]),
+            "media_urls": int(report["media_urls"]),
+            "pdf_status": str(report.get("pdf_status") or "generated"),
+            **(
+                {"pdf_omission_reason": str(report.get("pdf_warning") or "")}
+                if str(report.get("pdf_status") or "generated") == "omitted"
+                else {}
+            ),
+        },
+        "artifacts": artifacts,
+    }
+
+
+def _acquisition_request(
+    payload: dict[str, object],
+) -> tuple[RecoverySourceKind, Path, Path, DestinationDirectoryIdentity, bool, bool, bool]:
+    source_kind = payload.get("source_kind")
+    source_path = payload.get("source_path")
+    output_path = payload.get("output_directory")
+    if not isinstance(source_kind, str) or not isinstance(source_path, str) or not source_path:
+        raise ProtocolError("The acquisition source was malformed.")
+    if not isinstance(output_path, str) or not output_path:
+        raise ProtocolError("The acquisition destination was malformed.")
+    for option in ("acknowledge_sensitive_output", "include_raw_cache", "has_source_secret"):
+        if not isinstance(payload.get(option), bool):
+            raise ProtocolError("The acquisition option values were malformed.")
+    try:
+        kind = RecoverySourceKind(source_kind)
+    except ValueError as exc:
+        raise ProtocolError("The acquisition source kind was unsupported.") from exc
+    if kind is RecoverySourceKind.IOS_ENCRYPTED_BACKUP:
+        raise ProtocolError("The iOS source must use the encrypted-backup recovery route.")
+    identity = DestinationDirectoryIdentity.from_dict(payload.get("destination_parent_identity"))
+    return (
+        kind,
+        Path(source_path),
+        Path(output_path),
+        identity,
+        payload["acknowledge_sensitive_output"] is True,
+        payload["include_raw_cache"] is True,
+        payload["has_source_secret"] is True,
+    )
+
+
 def _read_secret(token: CancellationToken) -> tuple[str, bytearray]:
     descriptor = -1
     try:
-        descriptor = os.dup(SECRET_FILE_DESCRIPTOR)
-        os.close(SECRET_FILE_DESCRIPTOR)
+        if os.name == "nt":
+            import msvcrt
+
+            handle = _take_windows_inherited_handle(_WINDOWS_SECRET_HANDLE_ENVIRONMENT)
+            descriptor = msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+            )
+        else:
+            descriptor = os.dup(SECRET_FILE_DESCRIPTOR)
+            os.close(SECRET_FILE_DESCRIPTOR)
     except OSError as exc:
         if descriptor >= 0:
             with suppress(OSError):
@@ -170,6 +284,18 @@ def _read_secret(token: CancellationToken) -> tuple[str, bytearray]:
 def _hold_destination_parent_descriptor(
     expected_identity: DestinationDirectoryIdentity,
 ) -> int:
+    if os.name == "nt":
+        handle = _take_windows_inherited_handle(_WINDOWS_DESTINATION_HANDLE_ENVIRONMENT)
+        try:
+            identity = _windows_directory_identity(handle)
+        except BaseException:
+            with suppress(Exception):
+                _close_bound_directory_handle(handle)
+            raise
+        if identity != (expected_identity.device, expected_identity.inode):
+            _close_bound_directory_handle(handle)
+            raise ProtocolError("The selected destination directory identity did not match.")
+        return handle
     descriptor = -1
     try:
         descriptor = os.dup(DESTINATION_PARENT_FILE_DESCRIPTOR)
@@ -283,7 +409,9 @@ def main() -> int:
                 "recover",
                 "cancel",
                 "destination-parent-fd",
+                "windows-inherited-handles",
                 "source-receipt-v1",
+                "source-neutral-acquisition-v1",
             ],
         },
     )
@@ -306,12 +434,23 @@ def main() -> int:
             sys.stdin.buffer,
             cancellation_check=token.raise_if_cancelled,
         )
-        request = RecoveryRequest.from_dict(request_frame.payload)
-        if request.destination_parent_identity is None:
-            raise ProtocolError("The helper request did not bind a destination identity.")
-        destination_parent_descriptor = _hold_destination_parent_descriptor(
-            request.destination_parent_identity
-        )
+        if request_frame.action == "acquire":
+            (
+                source_kind,
+                source_path,
+                output_path,
+                destination_identity,
+                acknowledged,
+                include_raw_cache,
+                has_source_secret,
+            ) = _acquisition_request(request_frame.payload)
+            request = None
+        else:
+            request = RecoveryRequest.from_dict(request_frame.payload)
+            if request.destination_parent_identity is None:
+                raise ProtocolError("The helper request did not bind a destination identity.")
+            destination_identity = request.destination_parent_identity
+        destination_parent_descriptor = _hold_destination_parent_descriptor(destination_identity)
         _start_control_reader(sys.stdin.buffer, token)
         service = RecoveryService()
 
@@ -326,7 +465,28 @@ def main() -> int:
                 payload["total"] = event.total
             writer.write("progress", payload)
 
-        if request_frame.action == "preflight":
+        if request_frame.action == "acquire":
+            writer.write("progress", {"stage": "extraction", "kind": "started"})
+            source_passphrase: str | None = None
+            if has_source_secret:
+                password, secret_buffer = _read_secret(token)
+                source_passphrase = password
+            recovery = recover_acquired_source(
+                source_kind=source_kind,
+                source=source_path,
+                output_directory=output_path,
+                acknowledge_sensitive_output=acknowledged,
+                include_raw_cache=include_raw_cache,
+                source_passphrase=source_passphrase,
+                cancellation_check=token.raise_if_cancelled,
+                destination_parent_descriptor=destination_parent_descriptor,
+                expected_parent_identity=(destination_identity.device, destination_identity.inode),
+            )
+            terminal = _acquisition_protocol_summary(recovery)
+            if not token.try_finish():
+                token.raise_if_cancelled()
+        elif request_frame.action == "preflight":
+            assert request is not None
             if request.backup_receipt is not None:
                 raise ProtocolError("A preflight request cannot supply a backup receipt.")
             result = service.preflight(
@@ -342,6 +502,7 @@ def main() -> int:
             if not token.try_finish():
                 token.raise_if_cancelled()
         else:
+            assert request is not None
             if request.backup_receipt is None:
                 raise ProtocolError(
                     "A native recovery request requires its confirmed backup receipt."
@@ -366,8 +527,8 @@ def main() -> int:
         for index in range(len(secret_buffer)):
             secret_buffer[index] = 0
         if destination_parent_descriptor >= 0:
-            with suppress(OSError):
-                os.close(destination_parent_descriptor)
+            with suppress(Exception):
+                _close_bound_directory_handle(destination_parent_descriptor)
         protocol_stream.close()
     return exit_code
 

@@ -7,12 +7,13 @@ import json
 import os
 import plistlib
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
+
+from Crypto.Cipher import AES
 
 from tvtime_extractor.errors import (
     BackupUnfinishedError,
@@ -23,12 +24,11 @@ from tvtime_extractor.errors import (
 from tvtime_extractor.extract import (
     PRIMARY_DOMAIN,
     _bounded_manifest_rows,
+    _copy_manifest_to_descriptor,
     _create_private_staging_descriptor,
+    _decrypt_snapshot_to_descriptor,
     _finished_status_state,
-    _harden_private_staging_descriptor,
-    _sha256_staging_descriptor,
     _source_payload_state,
-    _verified_dependency_output_alias,
     extract_backup,
 )
 from tvtime_extractor.report import read_csv
@@ -51,9 +51,18 @@ class _Connection:
             raise OSError("synthetic close failure")
 
 
+class _ManifestCopyBackup:
+    def __init__(self, source: Path) -> None:
+        self._temp_decrypted_manifest_db_path = os.fspath(source)
+        self._temp_manifest_db_conn = _Connection()
+
+    def _decrypt_manifest_db_file(self) -> None:
+        return None
+
+
 class _Keybag:
     def unwrapKeyForClass(self, _protection_class: object, _wrapped_key: object) -> bytes:
-        return b"synthetic-unwrapped-key"
+        return b"K" * 32
 
 
 class _FilePlist:
@@ -220,102 +229,65 @@ class ManifestBoundsTests(unittest.TestCase):
                 self.assertTrue(cursor.fetch_sizes)
 
 
-@unittest.skipUnless(
-    sys.platform == "darwin" or sys.platform.startswith("linux"),
-    "descriptor aliases are supported only by the macOS/Linux recovery path",
-)
 class DependencyDescriptorBindingTests(unittest.TestCase):
-    def test_pinned_cbc_dependency_writes_through_exact_held_descriptor(self) -> None:
-        from importlib.metadata import version
-
-        from Crypto.Cipher import AES
-        from iphone_backup_decrypt import utils
-
-        self.assertEqual(version("iphone-backup-decrypt"), "0.9.0")
-        plaintext = b"descriptor-bound synthetic plaintext"
-        padding_size = 16 - len(plaintext) % 16
-        encryption_key = b"K" * 32
-        encrypted = AES.new(
-            encryption_key,
-            AES.MODE_CBC,
-            iv=b"\x00" * 16,
-        ).encrypt(plaintext + bytes([padding_size]) * padding_size)
-
-        class FilePlist:
-            filesize = len(plaintext)
-            mtime = 1_700_000_000
+    def test_manifest_connection_is_closed_before_descriptor_copy(self) -> None:
+        from tvtime_extractor.safety import regular_binary_reader as real_reader
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            encrypted_path = root / "encrypted.bin"
-            encrypted_path.write_bytes(encrypted)
-            staging = root / "plaintext.partial"
-            descriptor, identity = _create_private_staging_descriptor(staging)
-            try:
-                alias = _verified_dependency_output_alias(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
-                utils.aes_decrypt_chunked(
-                    in_filename=str(encrypted_path),
-                    file_plist=FilePlist(),
-                    key=encryption_key,
-                    out_filepath=alias,
-                )
-                _harden_private_staging_descriptor(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
-                actual_size, actual_hash = _sha256_staging_descriptor(
-                    staging,
-                    descriptor,
-                    expected_identity=identity,
-                )
+            source = root / "Manifest.db"
+            payload = b"synthetic decrypted manifest"
+            source.write_bytes(payload)
+            source.chmod(0o600)
+            backup = _ManifestCopyBackup(source)
+            target = root / "Manifest.decrypted.db.partial"
+            descriptor, _identity = _create_private_staging_descriptor(target)
 
-                self.assertEqual(os.pread(descriptor, len(plaintext), 0), plaintext)
-                self.assertEqual(actual_size, len(plaintext))
-                self.assertEqual(actual_hash, hashlib.sha256(plaintext).hexdigest())
-                self.assertEqual(
-                    (staging.stat().st_dev, staging.stat().st_ino),
-                    identity,
-                )
-                self.assertEqual(staging.stat().st_mtime, FilePlist.mtime)
+            @contextlib.contextmanager
+            def observed_reader(*args: object, **kwargs: object):
+                self.assertTrue(backup._temp_manifest_db_conn is None)
+                with real_reader(*args, **kwargs) as binding:
+                    yield binding
+
+            try:
+                with mock.patch(
+                    "tvtime_extractor.extract.regular_binary_reader",
+                    side_effect=observed_reader,
+                ):
+                    _copy_manifest_to_descriptor(
+                        backup,
+                        descriptor,
+                        maximum_bytes=len(payload),
+                    )
+                self.assertEqual(os.pread(descriptor, len(payload), 0), payload)
             finally:
                 os.close(descriptor)
 
-    def test_visible_staging_substitution_cannot_redirect_dependency_plaintext(self) -> None:
+    def test_decryption_writes_only_through_the_held_descriptor(self) -> None:
+        from Crypto.Cipher import AES
+
+        plaintext = b"synthetic descriptor-bound Windows plaintext"
+        padding = 16 - len(plaintext) % 16
+        key = b"W" * 32
+        encrypted = AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding]) * padding
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            staging = root / "plaintext.partial"
-            moved = root / "held-plaintext.partial"
-            outside = root / "outside.bin"
-            outside.write_bytes(b"unchanged")
-            descriptor, identity = _create_private_staging_descriptor(staging)
+            source = root / "encrypted.bin"
+            source.write_bytes(encrypted)
+            source.chmod(0o600)
+            target = root / "plaintext.partial"
+            descriptor, _identity = _create_private_staging_descriptor(target)
             try:
-                alias = _verified_dependency_output_alias(
-                    staging,
+                _decrypt_snapshot_to_descriptor(
+                    source,
                     descriptor,
-                    expected_identity=identity,
+                    key=key,
                 )
-                staging.rename(moved)
-                staging.symlink_to(outside)
-                Path(alias).write_bytes(b"descriptor-only secret")
-
-                self.assertEqual(outside.read_bytes(), b"unchanged")
-                self.assertEqual(
-                    os.pread(descriptor, len(b"descriptor-only secret"), 0),
-                    b"descriptor-only secret",
-                )
-                with self.assertRaisesRegex(UnsafePathError, "identity changed"):
-                    _harden_private_staging_descriptor(
-                        staging,
-                        descriptor,
-                        expected_identity=identity,
-                    )
+                self.assertEqual(os.pread(descriptor, len(plaintext), 0), plaintext)
             finally:
                 os.close(descriptor)
 
@@ -336,7 +308,12 @@ def _row(
     file_id = "a" * 40
     encrypted = backup / file_id[:2] / file_id
     encrypted.parent.mkdir()
-    encrypted.write_bytes(b"synthetic encrypted payload")
+    padding = 16 - len(plaintext) % 16
+    encrypted.write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding]) * padding
+        )
+    )
     return (
         [
             (
@@ -521,7 +498,6 @@ class ExtractionLifecycleSecurityTests(unittest.TestCase):
             self.assertEqual(instance.run_state_at_cleanup, "incomplete")
             self.assertTrue(instance.connection.closed)
             self.assertEqual(instance.cleanup_calls, 1)
-            self.assertTrue(instance.decrypted_from_private_snapshot)
             self.assertIsNone(instance._passphrase)
             self.assertIsNone(instance._keybag)
             self.assertFalse((result.extraction_root / ".tmp").exists())

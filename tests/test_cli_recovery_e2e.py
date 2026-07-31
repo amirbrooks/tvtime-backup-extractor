@@ -13,6 +13,7 @@ from unittest import mock
 from script.validate_recovery_output import validate_recovery_output
 from tests.helpers import create_synthetic_extraction
 from tests.test_service_protocol_e2e import (
+    _encrypt_synthetic_payload,
     _EndToEndBackup,
     _FilePlist,
     _tree_fingerprint,
@@ -50,7 +51,7 @@ class CliSyntheticRecoveryEndToEndTests(unittest.TestCase):
                 )
                 encrypted = backup / file_id[:2] / file_id
                 encrypted.parent.mkdir(exist_ok=True)
-                encrypted.write_bytes(b"synthetic encrypted payload")
+                encrypted.write_bytes(_encrypt_synthetic_payload(payload))
 
             instances: list[_EndToEndBackup] = []
 

@@ -41,6 +41,8 @@ from .safety import (
     prepare_anchored_extraction_layout,
     prepare_extraction_layout,
     promote_file_no_replace_atomic,
+    regular_binary_reader,
+    require_encrypted_ios_source_platform_support,
     require_fresh_output_platform_support,
     require_private_descriptor,
     safe_domain_component,
@@ -51,6 +53,7 @@ from .safety import (
     set_private_umask,
     validate_backup_directory,
     validate_file_id,
+    windows_create_private_staging_descriptor,
     write_csv_private,
     write_json_private_atomic,
     write_text_private,
@@ -691,7 +694,21 @@ def _require_single_link_private_staging(
 def _create_private_staging_descriptor(path: Path) -> tuple[int, tuple[int, int]]:
     """Create a private plaintext staging inode and keep it open until promotion."""
 
-    if os.name == "nt" or not (sys.platform == "darwin" or sys.platform.startswith("linux")):
+    if os.name == "nt":
+        descriptor = windows_create_private_staging_descriptor(path)
+        try:
+            metadata = os.fstat(descriptor)
+            identity = _metadata_identity(metadata)
+            _require_single_link_private_staging(
+                path,
+                descriptor,
+                expected_identity=identity,
+            )
+            return descriptor, identity
+        except BaseException:
+            os.close(descriptor)
+            raise
+    if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
         raise UnsafePathError("Descriptor-bound dependency output is unsupported on this platform.")
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -716,55 +733,81 @@ def _create_private_staging_descriptor(path: Path) -> tuple[int, tuple[int, int]
         raise
 
 
-def _verified_dependency_output_alias(
-    path: Path,
+def _write_all_to_descriptor(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("A private descriptor write stopped unexpectedly.")
+        view = view[written:]
+
+
+def _decrypt_snapshot_to_descriptor(
+    source: Path,
     descriptor: int,
     *,
-    expected_identity: tuple[int, int],
-) -> str:
-    """Return a kernel descriptor alias that the path-only dependency can safely open."""
+    key: bytes,
+) -> None:
+    """Decrypt a bound snapshot directly into its held staging descriptor."""
 
-    _require_single_link_private_staging(
-        path,
-        descriptor,
-        expected_identity=expected_identity,
-    )
-    if sys.platform == "darwin":
-        candidates = (f"/dev/fd/{descriptor}",)
-    elif sys.platform.startswith("linux"):
-        candidates = (f"/proc/self/fd/{descriptor}", f"/dev/fd/{descriptor}")
-    else:
-        candidates = ()
+    try:
+        from Crypto.Cipher import AES
+    except ImportError as exc:
+        raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE) from exc
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with regular_binary_reader(source, require_private=True) as (encrypted, metadata):
+        if metadata.st_size <= 0 or metadata.st_size % 16:
+            raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
+        cipher = AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16)
+        pending: bytes | None = None
+        while chunk := encrypted.read(1024 * 1024):
+            if len(chunk) % 16:
+                raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
+            decoded = cipher.decrypt(chunk)
+            if pending is not None:
+                _write_all_to_descriptor(descriptor, pending)
+            pending = decoded
+        if not pending:
+            raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
+        padding = pending[-1]
+        if padding < 1 or padding > 16 or pending[-padding:] != bytes([padding]) * padding:
+            raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
+        final = pending[:-padding]
+        _write_all_to_descriptor(descriptor, final)
 
-    verification_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
-    for alias in candidates:
-        alias_descriptor = -1
+
+def _copy_manifest_to_descriptor(
+    backup: Any,
+    descriptor: int,
+    *,
+    maximum_bytes: int,
+) -> None:
+    """Copy the dependency's decrypted manifest into the held Windows file handle."""
+
+    _quiet_dependency_call(backup._decrypt_manifest_db_file)
+    connection = getattr(backup, "_temp_manifest_db_conn", None)
+    if connection is not None:
         try:
-            alias_metadata = os.stat(alias)
-            alias_descriptor = os.open(alias, verification_flags)
-            opened_metadata = os.fstat(alias_descriptor)
-        except OSError:
-            continue
-        finally:
-            if alias_descriptor >= 0:
-                os.close(alias_descriptor)
-        if (
-            stat.S_ISREG(alias_metadata.st_mode)
-            and stat.S_ISREG(opened_metadata.st_mode)
-            and _metadata_identity(opened_metadata) == expected_identity
-            and int(opened_metadata.st_nlink) == 1
-        ):
-            _require_single_link_private_staging(
-                path,
-                descriptor,
-                expected_identity=expected_identity,
-            )
-            os.ftruncate(descriptor, 0)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            return alias
-    raise UnsafePathError(
-        "A verified descriptor alias was unavailable for private dependency output."
-    )
+            _quiet_dependency_call(connection.close)
+        except Exception as exc:
+            raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE) from exc
+        with suppress(Exception):
+            backup._temp_manifest_db_conn = None
+    source = no_link_absolute_path(Path(backup._temp_decrypted_manifest_db_path))
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with regular_binary_reader(source, require_private=False) as (handle, metadata):
+        if maximum_bytes <= 0 or metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
+            raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+        copied = 0
+        while chunk := handle.read(1024 * 1024):
+            copied += len(chunk)
+            if copied > maximum_bytes:
+                raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+            _write_all_to_descriptor(descriptor, chunk)
+    if copied != metadata.st_size:
+        raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
 
 
 def _harden_private_staging_descriptor(
@@ -810,7 +853,11 @@ def _sha256_staging_descriptor(
     digest = hashlib.sha256()
     offset = 0
     while True:
-        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if hasattr(os, "pread"):
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+        else:
+            os.lseek(descriptor, offset, os.SEEK_SET)
+            chunk = os.read(descriptor, 1024 * 1024)
         if not chunk:
             break
         digest.update(chunk)
@@ -1046,36 +1093,12 @@ def _extract_one_file(
                     "incomplete output and retry from a completed, disconnected backup."
                 )
 
-            # The pinned dependency accepts only a path. Keep the exact private
-            # staging inode open and expose only a kernel descriptor alias, never
-            # its replaceable visible pathname.
             staging_descriptor, staging_identity = _create_private_staging_descriptor(staging)
-            dependency_output = _verified_dependency_output_alias(
-                staging,
+            _decrypt_snapshot_to_descriptor(
+                encrypted_snapshot,
                 staging_descriptor,
-                expected_identity=staging_identity,
+                key=key,
             )
-
-            missing = object()
-            previous_backup_directory = getattr(backup, "_backup_directory", missing)
-            backup._backup_directory = str(snapshot_root)
-            # The pinned dependency prints absolute output paths in size warnings.
-            # Capture that output because this function independently records the
-            # declared and actual sizes in the private inventory.
-            try:
-                with redirect_stdout(io.StringIO()):
-                    backup._decrypt_file_to_disk(
-                        file_id=file_id,
-                        key=key,
-                        file_plist=file_plist,
-                        output_filepath=dependency_output,
-                    )
-            finally:
-                if previous_backup_directory is missing:
-                    with suppress(AttributeError):
-                        del backup._backup_directory
-                else:
-                    backup._backup_directory = previous_backup_directory
             if not _source_payload_state(encrypted_snapshot).same_content(snapshot_state):
                 raise SourceChangedError(
                     "A selected encrypted source snapshot changed during decryption. Preserve the "
@@ -1109,6 +1132,7 @@ def _extract_one_file(
             staging,
             target,
             expected_identity=staging_identity,
+            held_descriptor=staging_descriptor,
             durable=True,
         )
         _require_single_link_private_staging(
@@ -1323,14 +1347,10 @@ def _extract_backup(
                 manifest_descriptor, staged_manifest_identity = _create_private_staging_descriptor(
                     staged_manifest
                 )
-                dependency_manifest_output = _verified_dependency_output_alias(
-                    staged_manifest,
+                _copy_manifest_to_descriptor(
+                    backup,
                     manifest_descriptor,
-                    expected_identity=staged_manifest_identity,
-                )
-                _quiet_dependency_call(
-                    backup.save_manifest_file,
-                    dependency_manifest_output,
+                    maximum_bytes=source_manifest_snapshot.manifest_database.size,
                 )
                 _harden_private_staging_descriptor(
                     staged_manifest,
@@ -1347,6 +1367,7 @@ def _extract_backup(
                     staged_manifest,
                     decrypted_manifest,
                     expected_identity=staged_manifest_identity,
+                    held_descriptor=manifest_descriptor,
                     durable=True,
                 )
                 _require_single_link_private_staging(
@@ -1586,6 +1607,7 @@ def extract_backup(
     """Extract TV Time files and map storage exhaustion from every setup/write stage."""
 
     try:
+        require_encrypted_ios_source_platform_support()
         require_fresh_output_platform_support()
         if (source_root_descriptor is None) != (expected_source_root_identity is None):
             raise UnsafePathError("Source identity binding was incomplete.")

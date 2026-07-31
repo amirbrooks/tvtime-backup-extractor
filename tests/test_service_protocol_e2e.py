@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from Crypto.Cipher import AES
+
 from tests.helpers import create_synthetic_extraction
+from tvtime_extractor import protocol
 from tvtime_extractor.errors import (
     BackupUnencryptedError,
     BackupUnfinishedError,
@@ -92,7 +95,7 @@ class _FilePlist:
 
 class _Keybag:
     def unwrapKeyForClass(self, _protection_class: object, _wrapped: object) -> bytes:
-        return b"unwrapped"
+        return b"K" * 32
 
 
 class _Connection:
@@ -141,7 +144,7 @@ class _EndToEndBackup:
         file_plist: _FilePlist,
         output_filepath: str,
     ) -> None:
-        if key != b"unwrapped":
+        if key != b"K" * 32:
             raise AssertionError("unexpected synthetic key")
         Path(output_filepath).write_bytes(self.plaintext[file_id])
 
@@ -168,6 +171,13 @@ def _write_completed_encrypted_backup(base: Path) -> Path:
             handle,
         )
     return backup
+
+
+def _encrypt_synthetic_payload(payload: bytes) -> bytes:
+    padding = 16 - len(payload) % 16
+    return AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+        payload + bytes([padding]) * padding
+    )
 
 
 def _tree_fingerprint(root: Path) -> str:
@@ -219,7 +229,7 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
                 )
                 encrypted = backup / file_id[:2] / file_id
                 encrypted.parent.mkdir(exist_ok=True)
-                encrypted.write_bytes(b"synthetic encrypted payload")
+                encrypted.write_bytes(_encrypt_synthetic_payload(payload))
 
             instances: list[_EndToEndBackup] = []
 
@@ -827,6 +837,35 @@ class RecoveryServiceEndToEndTests(unittest.TestCase):
 
 
 class HelperProtocolTests(unittest.TestCase):
+    def test_source_neutral_acquisition_request_has_an_exact_secret_free_shape(self) -> None:
+        payload = {
+            "source_kind": "android_preserved_snapshot",
+            "source_path": "/synthetic/source",
+            "output_directory": "/synthetic/output",
+            "destination_parent_identity": {"device": 1, "inode": 2},
+            "acknowledge_sensitive_output": True,
+            "include_raw_cache": False,
+            "has_source_secret": False,
+        }
+        frame = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "type": "acquire",
+            "payload": payload,
+        }
+        read_descriptor, write_descriptor = os.pipe()
+        os.write(write_descriptor, _frame(frame))
+        os.close(write_descriptor)
+        with os.fdopen(read_descriptor, "rb") as stream:
+            request = read_control_request(stream)
+        self.assertEqual(request.action, "acquire")
+        self.assertEqual(request.payload, payload)
+        malformed = {**payload, "source_secret": "must never be in the control frame"}
+        read_descriptor, write_descriptor = os.pipe()
+        os.write(write_descriptor, _frame({**frame, "payload": malformed}))
+        os.close(write_descriptor)
+        with os.fdopen(read_descriptor, "rb") as stream, self.assertRaises(ProtocolError):
+            read_control_request(stream)
+
     @unittest.skipIf(os.name == "nt", "The native helper descriptor contract is POSIX-only")
     def test_helper_holds_bound_destination_descriptor_and_closes_reserved_fd(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -976,6 +1015,25 @@ class HelperProtocolTests(unittest.TestCase):
             frames = [json.loads(line) for line in output]
         self.assertEqual([frame["sequence"] for frame in frames], [1, 2])
         self.assertEqual([frame["type"] for frame in frames], ["ready", "completed"])
+
+    def test_windows_control_pipe_poll_does_not_use_socket_select(self) -> None:
+        stream = mock.Mock()
+        stream.fileno.return_value = 17
+        with (
+            mock.patch.object(protocol.os, "name", "nt"),
+            mock.patch.object(
+                protocol,
+                "_windows_pipe_has_data_or_closed",
+                return_value=False,
+            ) as pipe_probe,
+            mock.patch.object(protocol.time, "sleep") as sleep,
+            mock.patch.object(protocol.select, "select") as socket_select,
+        ):
+            self.assertFalse(protocol._wait_until_readable(stream, 0.25))
+
+        pipe_probe.assert_called_once_with(17)
+        sleep.assert_called_once_with(0.25)
+        socket_select.assert_not_called()
 
     def test_control_request_rejects_unknown_fields(self) -> None:
         request = {

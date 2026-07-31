@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from Crypto.Cipher import AES
+
 from tests.helpers import create_synthetic_extraction, write_finished_status
 from tvtime_extractor.cli import _run_extraction, _run_recovery, build_parser, main
 from tvtime_extractor.errors import TVTimeError, UserInputError
@@ -62,7 +64,7 @@ class _FakeKeybag:
     def unwrapKeyForClass(self, protection_class: object, encryption_key: object) -> bytes:
         if protection_class != 1 or encryption_key != b"wrapped-key":
             raise AssertionError("Unexpected synthetic key metadata")
-        return b"unwrapped-key"
+        return b"K" * 32
 
 
 class _FakeFilePlist:
@@ -119,7 +121,7 @@ class _FakeBackup:
         file_plist: _FakeFilePlist,
         output_filepath: str,
     ) -> None:
-        if file_id != "a" * 40 or key != b"unwrapped-key":
+        if file_id != "a" * 40 or key != b"K" * 32:
             raise AssertionError("Unexpected synthetic file metadata")
         print(f"synthetic dependency warning for {output_filepath}")
         Path(output_filepath).write_bytes(b"data")
@@ -149,7 +151,13 @@ def _dependency_loader(
 def _write_selected_source_payload(backup: Path, file_id: str = "a" * 40) -> None:
     source = backup / file_id[:2] / file_id
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(b"synthetic encrypted payload")
+    plaintext = b"data"
+    padding = 16 - len(plaintext) % 16
+    source.write_bytes(
+        AES.new(b"K" * 32, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(
+            plaintext + bytes([padding]) * padding
+        )
+    )
 
 
 def _synthetic_preflight() -> PreflightResult:
@@ -682,12 +690,16 @@ class CliTests(unittest.TestCase):
 
                 return factory, _FakeFilePlist
 
-            result = extract_backup(
-                backup_directory=backup,
-                output_directory=base / "private-output",
-                passphrase="synthetic-passphrase",
-                dependency_loader=loader,
-            )
+            with mock.patch(
+                "tvtime_extractor.extract._decrypt_snapshot_to_descriptor",
+                side_effect=RuntimeError(secret),
+            ):
+                result = extract_backup(
+                    backup_directory=backup,
+                    output_directory=base / "private-output",
+                    passphrase="synthetic-passphrase",
+                    dependency_loader=loader,
+                )
             persisted = (result.extraction_root / "metadata" / "summary.json").read_text(
                 encoding="utf-8"
             )
