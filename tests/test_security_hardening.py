@@ -7,6 +7,9 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
+import struct
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,11 +27,14 @@ from tvtime_extractor.errors import (
 from tvtime_extractor.extract import (
     PRIMARY_DOMAIN,
     _bounded_manifest_rows,
+    _close_repository_manifest,
     _copy_manifest_to_descriptor,
     _create_private_staging_descriptor,
     _decrypt_snapshot_to_descriptor,
     _finished_status_state,
+    _prepare_repository_owned_manifest,
     _source_payload_state,
+    _windows_source_payload,
     extract_backup,
 )
 from tvtime_extractor.report import read_csv
@@ -38,6 +44,7 @@ from tvtime_extractor.safety import (
     write_csv_private,
     write_json_private_atomic,
 )
+from tvtime_extractor.windows_native import WindowsHandleInformation
 
 
 class _Connection:
@@ -230,6 +237,145 @@ class ManifestBoundsTests(unittest.TestCase):
 
 
 class DependencyDescriptorBindingTests(unittest.TestCase):
+    def test_manifest_lock_closes_when_sqlite_close_fails(self) -> None:
+        class Lock:
+            closed = False
+
+            def __exit__(self, *_args: object) -> None:
+                self.closed = True
+
+        class Backup:
+            def __init__(self) -> None:
+                self._temp_manifest_db_conn = _Connection(fail=True)
+                self._tvtime_manifest_lock = Lock()
+
+        backup = Backup()
+        lock = backup._tvtime_manifest_lock
+        with self.assertRaisesRegex(OSError, "synthetic close failure"):
+            _close_repository_manifest(backup)
+        self.assertTrue(lock.closed)
+        self.assertIsNone(backup._temp_manifest_db_conn)
+        self.assertIsNone(backup._tvtime_manifest_lock)
+
+    def test_windows_source_payload_uses_one_relative_handle_chain(self) -> None:
+        payload = b"synthetic encrypted source payload"
+        information = WindowsHandleInformation(
+            attributes=0,
+            identity=(7, 11),
+            byte_size=len(payload),
+            last_write_time=116_444_736_000_000_000,
+        )
+
+        class Msvcrt:
+            @staticmethod
+            def get_osfhandle(descriptor: int) -> int:
+                self.assertGreaterEqual(descriptor, 0)
+                return 303
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic.bin"
+            source.write_bytes(payload)
+            with (
+                mock.patch.dict(sys.modules, {"msvcrt": Msvcrt}),
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.open_relative_path",
+                    side_effect=(101, 202),
+                ) as open_relative,
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.handle_information",
+                    return_value=information,
+                ) as inspect_handle,
+                mock.patch(
+                    "tvtime_extractor.extract._windows_native.handle_to_file_descriptor",
+                    side_effect=lambda _handle, flags: os.open(source, flags),
+                ),
+                mock.patch("tvtime_extractor.extract._windows_native.close_handle") as close_handle,
+            ):
+                snapshot, retained = _windows_source_payload(
+                    Path("ab", "synthetic.bin"),
+                    source_root_handle=91,
+                    retain_payload=True,
+                )
+
+        self.assertEqual(retained, payload)
+        self.assertEqual(snapshot.sha256, hashlib.sha256(payload).hexdigest())
+        self.assertEqual(snapshot.device, 7)
+        self.assertEqual(snapshot.inode, 11)
+        self.assertEqual(
+            open_relative.call_args_list,
+            [
+                mock.call(91, ("ab", "synthetic.bin")),
+                mock.call(91, ("ab", "synthetic.bin")),
+            ],
+        )
+        self.assertEqual(inspect_handle.call_count, 3)
+        close_handle.assert_called_once_with(202)
+
+    def test_repository_manifest_accepts_relative_private_staging_root(self) -> None:
+        key = b"M" * 32
+
+        class Keybag:
+            def unwrapKeyForClass(self, protection_class: object, wrapped: object) -> bytes:
+                self_test.assertEqual(protection_class, 7)
+                self_test.assertEqual(wrapped, b"wrapped-manifest-key")
+                return key
+
+        class Backup:
+            def __init__(self) -> None:
+                self._manifest_plist: dict[str, object] | None = None
+                self._keybag: Keybag | None = None
+                self._temp_decrypted_manifest_db_path = "private-temp/Manifest.db"
+                self._temp_manifest_db_conn = None
+
+            def _read_and_unlock_keybag(self) -> None:
+                self._manifest_plist = {
+                    "ManifestKey": struct.pack("<l", 7) + b"wrapped-manifest-key"
+                }
+                self._keybag = Keybag()
+
+        self_test = self
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plaintext = root / "plaintext.db"
+            connection = sqlite3.connect(plaintext)
+            connection.execute(
+                "CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, "
+                "flags INTEGER, file BLOB)"
+            )
+            connection.execute(
+                "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+                ("0" * 40, PRIMARY_DOMAIN, "Documents/synthetic.db", 1, b"synthetic"),
+            )
+            connection.commit()
+            connection.close()
+            plaintext_bytes = plaintext.read_bytes()
+            self.assertEqual(len(plaintext_bytes) % 16, 0)
+            encrypted = root / "Manifest.encrypted.db"
+            encrypted.write_bytes(
+                AES.new(key, AES.MODE_CBC, iv=b"\x00" * 16).encrypt(plaintext_bytes)
+            )
+            encrypted.chmod(0o600)
+            (root / "private-temp").mkdir(mode=0o700)
+            backup = Backup()
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                _prepare_repository_owned_manifest(
+                    backup,
+                    encrypted_manifest=encrypted,
+                    temp_root=Path("private-temp"),
+                )
+                assert backup._temp_manifest_db_conn is not None
+                self.assertEqual(
+                    backup._temp_manifest_db_conn.execute("SELECT count(*) FROM Files").fetchone(),
+                    (1,),
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    backup._temp_manifest_db_conn.execute("DELETE FROM Files")
+                _close_repository_manifest(backup)
+            finally:
+                os.chdir(previous)
+
     def test_manifest_connection_is_closed_before_descriptor_copy(self) -> None:
         from tvtime_extractor.safety import regular_binary_reader as real_reader
 

@@ -23,6 +23,7 @@
         Text="Choose a supported local source. Recovery remains offline and writes only to this app's private local storage." />
 
       <ComboBox Grid.Row="2" x:Name="SourceKind" Header="Recovery source" SelectionChanged="SourceKind_Changed">
+        <ComboBoxItem Content="Encrypted iOS backup folder" Tag="ios_encrypted_backup" />
         <ComboBoxItem Content="Android legacy backup file" Tag="android_legacy_backup" />
         <ComboBoxItem Content="Preserved Android database folder" Tag="android_preserved_snapshot" />
         <ComboBoxItem Content="Official TV Time export" Tag="tvtime_official_export" />

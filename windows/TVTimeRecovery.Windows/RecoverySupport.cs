@@ -211,12 +211,11 @@ internal sealed class RecoveryCoordinator
         CancellationToken cancellationToken)
     {
         if (sourceKind is not (
-            "android_legacy_backup" or "android_preserved_snapshot" or
+            "ios_encrypted_backup" or "android_legacy_backup" or "android_preserved_snapshot" or
             "tvtime_official_export"))
         {
             throw new RecoveryUserException(
-                "Encrypted iOS recovery is not available in this private Windows candidate. " +
-                "Use the notarized macOS app or the Python CLI on macOS or Linux.",
+                "The selected recovery source is not supported by this private installation.",
                 RecoveryDiagnostic.BackupRejected);
         }
         var helper = Path.Combine(AppContext.BaseDirectory, "Helpers", "tvtime-helper.exe");
@@ -230,9 +229,101 @@ internal sealed class RecoveryCoordinator
             "The app-managed recovery location was unavailable.",
             RecoveryDiagnostic.DestinationUnencrypted);
 
-        await AcquireAsync(
-            helper, sourceKind, backup, output, parent, password, progress, cancellationToken);
+        if (sourceKind == "ios_encrypted_backup")
+        {
+            await RecoverEncryptedIosAsync(
+                helper, backup, output, parent, password, progress, cancellationToken);
+        }
+        else
+        {
+            await AcquireAsync(
+                helper, sourceKind, backup, output, parent, password, progress, cancellationToken);
+        }
         return ValidateCompletedOutput(output);
+    }
+
+    private static async Task RecoverEncryptedIosAsync(
+        string helper,
+        string backup,
+        string output,
+        string parent,
+        string password,
+        Action<string> progress,
+        CancellationToken cancellationToken)
+    {
+        if (password.Length == 0)
+        {
+            throw new RecoveryUserException(
+                "Enter the encrypted local-backup password before recovery.",
+                RecoveryDiagnostic.BackupRejected);
+        }
+
+        RecoveryDiagnostics.Record(RecoveryDiagnostic.PreflightStarted);
+        progress("Validating the completed encrypted backup…");
+        JsonElement receipt;
+        await using (var preflight = NativeHelperProcess.Start(helper, parent))
+        {
+            var payload = EncryptedIosPayload(
+                backup, output, preflight.DestinationIdentity, receipt: null);
+            await preflight.SendControlAsync(
+                EncryptedIosRequest("preflight", payload),
+                cancellationToken);
+            var completed = await ReadToCompletionAsync(preflight, progress, cancellationToken);
+            if (!completed.TryGetProperty("backup_receipt", out var receiptValue) ||
+                receiptValue.ValueKind != JsonValueKind.Object)
+            {
+                throw new RecoveryUserException(
+                    "The private helper did not return a valid backup confirmation.",
+                    RecoveryDiagnostic.LocalHelperError);
+            }
+            receipt = receiptValue.Clone();
+        }
+        RecoveryDiagnostics.Record(RecoveryDiagnostic.PreflightCompleted);
+
+        RecoveryDiagnostics.Record(RecoveryDiagnostic.RecoveryStarted);
+        progress("Unlocking and recovering the encrypted backup…");
+        await using var recovery = NativeHelperProcess.Start(helper, parent);
+        var recoveryPayload = EncryptedIosPayload(
+            backup, output, recovery.DestinationIdentity, receipt);
+        await recovery.SendControlAsync(
+            EncryptedIosRequest("recover", recoveryPayload),
+            cancellationToken);
+        await recovery.SendSecretAsync(password, cancellationToken);
+        await ReadToCompletionAsync(recovery, progress, cancellationToken);
+    }
+
+    private static Dictionary<string, object?> EncryptedIosPayload(
+        string backup,
+        string output,
+        DestinationIdentity destination,
+        JsonElement? receipt)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["backup_directory"] = backup,
+            ["output_directory"] = output,
+            ["destination_parent_identity"] = new Dictionary<string, ulong>
+            {
+                ["device"] = destination.Device,
+                ["inode"] = destination.Inode,
+            },
+            ["acknowledge_sensitive_output"] = true,
+            ["include_raw_cache"] = false,
+            ["include_decrypted_manifest"] = false,
+            ["backup_receipt"] = receipt,
+        };
+    }
+
+    private static byte[] EncryptedIosRequest(
+        string action,
+        Dictionary<string, object?> payload)
+    {
+        return JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+        {
+            ["protocolVersion"] = ProtocolVersion,
+            ["type"] = action,
+            ["payload"] = payload,
+        });
     }
 
     private static async Task AcquireAsync(

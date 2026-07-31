@@ -63,6 +63,7 @@ from tvtime_extractor.safety import (
     write_csv_private,
     write_text_private,
 )
+from tvtime_extractor.windows_native import WindowsUnsupportedError
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Darwin extended ACL regression")
@@ -1118,10 +1119,23 @@ class DestinationSafetyTests(unittest.TestCase):
 
 
 class WindowsDirectoryHandleContractTests(unittest.TestCase):
-    def test_windows_encrypted_ios_gate_fails_before_source_or_password_work(self) -> None:
+    def test_windows_ios_gate_requires_reviewed_runtime_before_password(self) -> None:
         with (
             mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
-            self.assertRaisesRegex(UserInputError, "unavailable on Windows"),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.require_supported_runtime"
+            ) as require_runtime,
+        ):
+            require_encrypted_ios_source_platform_support()
+        require_runtime.assert_called_once_with()
+
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.require_supported_runtime",
+                side_effect=WindowsUnsupportedError("synthetic unsupported runtime"),
+            ),
+            self.assertRaisesRegex(UnsafePathError, "64-bit Windows 11"),
         ):
             require_encrypted_ios_source_platform_support()
 

@@ -10,6 +10,9 @@ All notable changes are documented here. The project follows semantic versioning
 - Added a Windows 10 1809+ x64 WinUI 3 app with explicit inherited handles, a separate secret
   channel, Job Object cancellation, a BitLocker/device-encryption gate, app-managed output, strict
   artifact validation, and private self-signed MSIX build/install scripts.
+- Added encrypted iOS backup selection to the private WinUI app on Windows 11 x64. Source traversal
+  uses held relative Win32 handles, and recovery consumes a preflight receipt before the password is
+  sent to a separate helper process. Merge still requires synthetic Windows UI and recovery proof.
 - Bound the complete Windows App SDK dependency graph with exact NuGet ranges and content hashes,
   added a real-reference cross-host C# compile check, and added validated Markdown, offline HTML,
   and private-folder result actions without persisting source or output paths.

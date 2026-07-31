@@ -2,8 +2,9 @@
 
 Public v0.2.0 contains no Windows app. This checkout contains an unpublished private x64 WinUI 3
 candidate for Windows 10 version 1809 or later. It can recover a supported Android source or an
-official TV Time export without uploading anything. Encrypted iOS recovery remains unavailable in
-this candidate because the source-root binding is not yet implemented with native Windows handles.
+official TV Time export without uploading anything. On Windows 11 x64, it also contains a candidate
+encrypted iOS recovery route. That route is not merge-ready until a real Windows build and
+synthetic end-to-end smoke test confirm it.
 
 ## Security model
 
@@ -12,6 +13,11 @@ framed control pipe, sequenced event pipe, separate secret pipe, held destinatio
 and null diagnostic sink. A Job Object terminates the helper tree on cancellation or app exit. The
 helper atomically creates the fresh owner-only output below the held parent; file promotion uses the
 held file handle and does not replace an existing name.
+
+For encrypted iOS recovery, the helper opens the selected backup root without delete sharing and
+traverses each source file relative to that held Win32 handle while rejecting reparse points. A
+first helper returns an in-memory receipt for the source identity and critical metadata. A separate
+password-gated helper must match that receipt before it creates output.
 
 Recovery is refused unless Windows reports active BitLocker or device-encryption protection for the
 app container volume. Output stays under the packaged app's local container. Completion is accepted
@@ -57,9 +63,14 @@ exists, so it cannot silently replace review evidence.
 
 ## iOS source
 
-Encrypted iOS recovery is intentionally absent from the Windows source chooser and fails closed if
-requested through an unexpected internal call. Use the notarized macOS app or the Python CLI on
-macOS or Linux. Do not enter an iOS backup password into this private Windows candidate.
+The source chooser accepts a completed encrypted iOS backup folder on Windows 11 x64. Disconnect
+the phone after Apple Devices or iTunes finishes the backup, select the individual backup folder,
+confirm sensitive output, and enter the local-backup password only in the native password field.
+
+This route is a private candidate, not part of v0.2.0. Before merge, it requires a locked-dependency
+Windows build, the real NTFS capability tests, a synthetic UI screenshot, and a synthetic
+end-to-end recovery smoke test. Never use real titles, history, identifiers, paths, or recovered
+output in that evidence.
 
 ## Android and official-export sources
 

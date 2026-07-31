@@ -36,12 +36,13 @@ replacing the backup root or changing bound critical metadata or a displayed agg
 confirmation fails before output creation. Selected payload files are snapshot-verified during
 extraction and revalidated before extraction completion. The POSIX CLI consumes the same
 identity-bound receipt across its hidden password prompt and applies the same held-parent and
-held-output-root model. The unpublished native Windows candidate uses Win32 relative directory
-creation, protected owner/SYSTEM ACLs, non-delete-sharing held handles, no-replace handle-based file
-promotion, explicit inherited-handle lists, and a Job Object. It refuses recovery unless Windows
-reports active volume protection. Standalone Windows analysis/reporting retains its held existing-
-root checks. These controls cannot certify authorization, custom sync, snapshots, or backup policy;
-the user must confirm those boundaries.
+held-output-root model. The unpublished native Windows candidate uses Win32 relative source
+traversal and output creation, protected owner/SYSTEM ACLs, non-delete-sharing held handles,
+no-replace handle-based file promotion, explicit inherited-handle lists, and a Job Object. Its
+encrypted iOS route passes an in-memory preflight receipt to a separate password-gated helper. It
+refuses recovery unless Windows reports active volume protection. Standalone Windows
+analysis/reporting retains its held existing-root checks. These controls cannot certify
+authorization, custom sync, snapshots, or backup policy; the user must confirm those boundaries.
 
 Linux FUSE destinations are refused because the same mechanism can expose local, network, cloud, or
 shared storage. There is no override. Linux accepts only a conservative allowlist of ordinary local

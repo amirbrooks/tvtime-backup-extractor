@@ -8,7 +8,9 @@ import os
 import plistlib
 import secrets
 import shutil
+import sqlite3
 import stat
+import struct
 import sys
 import tempfile
 from collections.abc import Callable
@@ -18,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import windows_native as _windows_native
 from .errors import (
     AppDataMissingError,
     BackupPasswordError,
@@ -34,6 +37,9 @@ from .safety import (
     EXTRACTION_RUN_STATE_CONTRACT,
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
     ExtractionLayout,
+    _windows_close_handle,
+    _windows_directory_identity,
+    _windows_open_locked_directory,
     anchored_bound_output_root,
     harden_private_descriptor,
     held_destination_parent,
@@ -53,6 +59,7 @@ from .safety import (
     set_private_umask,
     validate_backup_directory,
     validate_file_id,
+    windows_create_private_capture_descriptor,
     windows_create_private_staging_descriptor,
     write_csv_private,
     write_json_private_atomic,
@@ -129,6 +136,125 @@ def _same_source_metadata(before: os.stat_result, after: os.stat_result) -> bool
     return all(getattr(before, field, 0) == getattr(after, field, 0) for field in fields)
 
 
+def _windows_filetime_ns(value: int) -> int:
+    """Convert a Windows FILETIME value to Unix nanoseconds."""
+
+    return max(0, (value - 116_444_736_000_000_000) * 100)
+
+
+def _windows_source_payload(
+    path: Path,
+    *,
+    source_root_handle: int,
+    snapshot_destination: Path | None = None,
+    maximum_bytes: int | None = None,
+    retain_payload: bool = False,
+) -> tuple[BackupFileSnapshot, bytes | None]:
+    """Read one relative source file through a held, no-reparse Windows handle chain."""
+
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        raise UnsafePathError("A handle-rooted Windows source path was invalid.")
+
+    source_handle = -1
+    source_descriptor = -1
+    destination_descriptor = -1
+    visible_handle = -1
+    digest = hashlib.sha256()
+    payload = bytearray() if retain_payload else None
+    byte_count = 0
+    try:
+        source_handle = _windows_native.open_relative_path(source_root_handle, path.parts)
+        before = _windows_native.handle_information(source_handle)
+        if before.is_directory or before.is_reparse_point:
+            raise UnsafePathError("A Windows source payload was not a regular file.")
+        if maximum_bytes is not None and (
+            before.byte_size <= 0 or before.byte_size > maximum_bytes
+        ):
+            raise UserInputError("Required backup metadata had an unsafe byte size.")
+        source_descriptor = _windows_native.handle_to_file_descriptor(
+            source_handle,
+            flags=os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+        source_handle = -1
+        if snapshot_destination is not None:
+            secure_directory(snapshot_destination.parent)
+            destination_descriptor = windows_create_private_capture_descriptor(snapshot_destination)
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            byte_count += len(chunk)
+            if maximum_bytes is not None and byte_count > maximum_bytes:
+                raise UserInputError("Required backup metadata had an unsafe byte size.")
+            digest.update(chunk)
+            if payload is not None:
+                payload.extend(chunk)
+            if destination_descriptor >= 0:
+                _write_all_to_descriptor(destination_descriptor, chunk)
+        if destination_descriptor >= 0:
+            os.fsync(destination_descriptor)
+
+        import msvcrt
+
+        native_source = int(msvcrt.get_osfhandle(source_descriptor))
+        after = _windows_native.handle_information(native_source)
+        visible_handle = _windows_native.open_relative_path(source_root_handle, path.parts)
+        visible = _windows_native.handle_information(visible_handle)
+        if (
+            before != after
+            or after != visible
+            or byte_count != after.byte_size
+            or after.is_directory
+            or after.is_reparse_point
+        ):
+            raise SourceChangedError(
+                "A selected encrypted source payload changed during verification. Preserve the "
+                "incomplete output and retry from a completed, disconnected backup."
+            )
+        if snapshot_destination is not None:
+            secure_file(snapshot_destination)
+        timestamp_ns = _windows_filetime_ns(after.last_write_time)
+        return (
+            BackupFileSnapshot(
+                mode=stat.S_IFREG,
+                size=after.byte_size,
+                modified_ns=timestamp_ns,
+                changed_ns=timestamp_ns,
+                device=after.identity[0],
+                inode=after.identity[1],
+                sha256=digest.hexdigest(),
+            ),
+            bytes(payload) if payload is not None else None,
+        )
+    except (TVTimeError, UnsafePathError):
+        raise
+    except _windows_native.WindowsNativeError as exc:
+        raise SourceChangedError(
+            "A selected encrypted source payload was unavailable. Preserve the incomplete output "
+            "and retry from a completed, disconnected backup."
+        ) from exc
+    except OSError as exc:
+        if is_insufficient_space_error(exc):
+            raise insufficient_space_error() from exc
+        raise SourceChangedError(
+            "A selected encrypted source payload changed during verification. Preserve the "
+            "incomplete output and retry from a completed, disconnected backup."
+        ) from exc
+    finally:
+        if visible_handle >= 0:
+            with suppress(Exception):
+                _windows_native.close_handle(visible_handle)
+        if destination_descriptor >= 0:
+            with suppress(OSError):
+                os.close(destination_descriptor)
+        if source_descriptor >= 0:
+            with suppress(OSError):
+                os.close(source_descriptor)
+        if source_handle >= 0:
+            with suppress(Exception):
+                _windows_native.close_handle(source_handle)
+
+
 def _source_payload_state(
     path: Path,
     *,
@@ -136,6 +262,14 @@ def _source_payload_state(
     source_root_descriptor: int | None = None,
 ) -> BackupFileSnapshot:
     """Hash/copy one source payload through a stable, descriptor-rooted no-follow chain."""
+
+    if os.name == "nt" and source_root_descriptor is not None:
+        snapshot, _payload = _windows_source_payload(
+            path,
+            source_root_handle=source_root_descriptor,
+            snapshot_destination=snapshot_destination,
+        )
+        return snapshot
 
     parent_descriptor = -1
     source_name: str | Path = path
@@ -293,6 +427,34 @@ def _finished_status_state(
 ) -> BackupFileSnapshot:
     """Read and hash the exact Status.plist bytes that assert a finished snapshot."""
 
+    if os.name == "nt" and source_root_descriptor is not None:
+        try:
+            snapshot, payload = _windows_source_payload(
+                path,
+                source_root_handle=source_root_descriptor,
+                maximum_bytes=MAXIMUM_STATUS_PLIST_BYTES,
+                retain_payload=True,
+            )
+        except (SourceChangedError, UnsafePathError, UserInputError) as exc:
+            raise BackupUnfinishedError(
+                "The backup status could not be read safely. Use a completed, disconnected backup."
+            ) from exc
+        try:
+            value = plistlib.loads(payload or b"")
+        except plistlib.InvalidFileException as exc:
+            raise BackupUnfinishedError(
+                "The backup status could not be validated. Use a completed, disconnected backup."
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or str(value.get("SnapshotState") or "").strip().casefold() != "finished"
+        ):
+            raise BackupUnfinishedError(
+                "The selected backup is not marked finished. Let Apple Devices finish the backup, "
+                "then disconnect the phone before recovery."
+            )
+        return snapshot
+
     try:
         if source_root_descriptor is not None:
             if path.is_absolute() or path.parts != (path.name,):
@@ -408,6 +570,28 @@ def _require_bound_backup_root(
 ) -> None:
     """Require one held no-follow directory descriptor to remain the visible backup root."""
 
+    if os.name == "nt":
+        visible_handle = -1
+        try:
+            if _windows_directory_identity(descriptor) != expected_identity:
+                raise SourceChangedError(
+                    "The selected backup root changed while recovery was preparing to use it."
+                )
+            visible_handle, visible_identity = _windows_open_locked_directory(backup)
+            if visible_identity != expected_identity:
+                raise SourceChangedError(
+                    "The selected backup root changed while recovery was preparing to use it."
+                )
+            return
+        except UnsafePathError as exc:
+            raise SourceChangedError(
+                "The selected backup root changed while recovery was preparing to use it."
+            ) from exc
+        finally:
+            if visible_handle >= 0:
+                with suppress(Exception):
+                    _windows_close_handle(visible_handle)
+
     try:
         opened = os.fstat(descriptor)
         visible = backup.lstat()
@@ -442,6 +626,23 @@ def _held_backup_root(
         raise SourceChangedError("The selected backup root could not be opened safely.") from exc
     if _is_link_or_reparse(before) or not stat.S_ISDIR(before.st_mode):
         raise UnsafePathError("The selected backup root was not a regular directory.")
+    if os.name == "nt":
+        handle = -1
+        try:
+            handle, identity = _windows_open_locked_directory(backup)
+            if expected_identity is not None and identity != expected_identity:
+                raise SourceChangedError("The selected backup root changed while it was opened.")
+            _require_bound_backup_root(
+                backup,
+                descriptor=handle,
+                expected_identity=identity,
+            )
+            yield handle, identity, backup
+        finally:
+            if handle >= 0:
+                with suppress(Exception):
+                    _windows_close_handle(handle)
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
@@ -542,14 +743,10 @@ def _dispose_dependency(backup: Any, temp_root: Path, *, strict: bool) -> None:
 
     close_failed = False
     unsafe_dependency_path = False
-    connection = getattr(backup, "_temp_manifest_db_conn", None)
-    if connection is not None:
-        try:
-            _quiet_dependency_call(connection.close)
-        except Exception:
-            close_failed = True
-        with suppress(Exception):
-            backup._temp_manifest_db_conn = None
+    try:
+        _close_repository_manifest(backup)
+    except Exception:
+        close_failed = True
 
     temporary_folder = getattr(backup, "_temporary_folder", "")
     try:
@@ -747,6 +944,7 @@ def _decrypt_snapshot_to_descriptor(
     descriptor: int,
     *,
     key: bytes,
+    strip_padding: bool = True,
 ) -> None:
     """Decrypt a bound snapshot directly into its held staging descriptor."""
 
@@ -765,9 +963,14 @@ def _decrypt_snapshot_to_descriptor(
             if len(chunk) % 16:
                 raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
             decoded = cipher.decrypt(chunk)
+            if not strip_padding:
+                _write_all_to_descriptor(descriptor, decoded)
+                continue
             if pending is not None:
                 _write_all_to_descriptor(descriptor, pending)
             pending = decoded
+        if not strip_padding:
+            return
         if not pending:
             raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
         padding = pending[-1]
@@ -775,6 +978,109 @@ def _decrypt_snapshot_to_descriptor(
             raise TVTimeError(DEPENDENCY_FILE_FAILURE_MESSAGE)
         final = pending[:-padding]
         _write_all_to_descriptor(descriptor, final)
+
+
+def _close_repository_manifest(backup: Any) -> None:
+    failure: BaseException | None = None
+    connection = getattr(backup, "_temp_manifest_db_conn", None)
+    if connection is not None:
+        try:
+            _quiet_dependency_call(connection.close)
+        except BaseException as exc:
+            failure = exc
+        finally:
+            backup._temp_manifest_db_conn = None
+    manifest_lock = getattr(backup, "_tvtime_manifest_lock", None)
+    if manifest_lock is not None:
+        try:
+            manifest_lock.__exit__(None, None, None)
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+        finally:
+            backup._tvtime_manifest_lock = None
+    if failure is not None:
+        raise failure
+
+
+def _prepare_repository_owned_manifest(
+    backup: Any,
+    *,
+    encrypted_manifest: Path,
+    temp_root: Path,
+) -> None:
+    """Decrypt Manifest.db into a held private file and bind SQLite read-only."""
+
+    unlock = getattr(backup, "_read_and_unlock_keybag", None)
+    if not callable(unlock):
+        raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+    _quiet_dependency_call(unlock)
+    manifest = getattr(backup, "_manifest_plist", None)
+    keybag = getattr(backup, "_keybag", None)
+    manifest_key_value = manifest.get("ManifestKey") if isinstance(manifest, dict) else None
+    if not isinstance(manifest_key_value, bytes) or len(manifest_key_value) <= 4 or keybag is None:
+        raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+    manifest_class = struct.unpack("<l", manifest_key_value[:4])[0]
+    key = _quiet_dependency_call(
+        keybag.unwrapKeyForClass,
+        manifest_class,
+        manifest_key_value[4:],
+    )
+    if not isinstance(key, bytes) or len(key) not in {16, 24, 32}:
+        raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+
+    manifest_path = Path(str(getattr(backup, "_temp_decrypted_manifest_db_path", "")))
+    manifest_absolute = no_link_absolute_path(manifest_path)
+    try:
+        manifest_absolute.relative_to(no_link_absolute_path(temp_root))
+    except ValueError as exc:
+        raise UnsafePathError(
+            "The decrypted manifest staging path escaped the private recovery root."
+        ) from exc
+
+    descriptor = -1
+    manifest_lock: Any | None = None
+    try:
+        descriptor, identity = _create_private_staging_descriptor(manifest_absolute)
+        _decrypt_snapshot_to_descriptor(
+            encrypted_manifest,
+            descriptor,
+            key=key,
+            strip_padding=False,
+        )
+        _harden_private_staging_descriptor(
+            manifest_absolute,
+            descriptor,
+            expected_identity=identity,
+        )
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+
+        manifest_lock = regular_binary_reader(manifest_absolute, require_private=True)
+        manifest_lock.__enter__()
+        uri = f"{manifest_absolute.as_uri()}?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SELECT count(*) FROM Files;")
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        if not row or not isinstance(row[0], int) or row[0] <= 0:
+            connection.close()
+            raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE)
+        backup._temp_manifest_db_conn = connection
+        backup._tvtime_manifest_lock = manifest_lock
+        manifest_lock = None
+    except BaseException:
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
+        if manifest_lock is not None:
+            with suppress(Exception):
+                manifest_lock.__exit__(None, None, None)
+        raise
 
 
 def _copy_manifest_to_descriptor(
@@ -785,7 +1091,8 @@ def _copy_manifest_to_descriptor(
 ) -> None:
     """Copy the dependency's decrypted manifest into the held Windows file handle."""
 
-    _quiet_dependency_call(backup._decrypt_manifest_db_file)
+    if getattr(backup, "_tvtime_manifest_lock", None) is None:
+        _quiet_dependency_call(backup._decrypt_manifest_db_file)
     connection = getattr(backup, "_temp_manifest_db_conn", None)
     if connection is not None:
         try:
@@ -1255,6 +1562,12 @@ def _extract_backup(
         except Exception as exc:
             raise TVTimeError(DEPENDENCY_FAILURE_MESSAGE) from exc
         try:
+            if os.name == "nt":
+                _prepare_repository_owned_manifest(
+                    backup,
+                    encrypted_manifest=dependency_source_root / "Manifest.db",
+                    temp_root=layout.temp_root,
+                )
             _quiet_dependency_call(backup.test_decryption)
         except ValueError as exc:
             if str(exc) == "Failed to decrypt keys: incorrect passphrase?":

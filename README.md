@@ -25,7 +25,7 @@ access, and comply with applicable law and service terms.
 | --- | --- | --- |
 | Native macOS app | Most Mac users | macOS 14 or later and the v0.2.0 DMG matching the Mac's architecture |
 | Python CLI recovery | macOS, Linux, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
-| Private Windows app candidate | Local Android and export recovery | Windows 10 1809+, x64, device encryption or BitLocker, and a private source build; encrypted iOS recovery remains gated |
+| Private Windows app candidate | Encrypted iOS, local Android, and export recovery | Windows 11 x64 for encrypted iOS recovery, device encryption or BitLocker, and a private source build |
 | Android/export recovery | Mac, Windows, or CLI users with an already-preserved source | Supported legacy backup, allowlisted snapshot, or official ZIP/CSV export |
 
 The published native app is the normal Mac installation:
@@ -164,9 +164,9 @@ destination while recovery is active.
 ## Python CLI fallback
 
 The CLI is free and supports Python 3.10 through 3.13. The private candidate adds native Win32
-handle-bound fresh output; use its WinUI package for the strongest Windows containment. It also adds
-`recover-android-backup`, `recover-android-snapshot`, `recover-export`, `android-probe`, and the
-explicitly acknowledged `android-capture` command.
+handle binding for encrypted iOS source files and fresh output; use its WinUI package for the
+strongest Windows containment. It also adds `recover-android-backup`, `recover-android-snapshot`,
+`recover-export`, `android-probe`, and the explicitly acknowledged `android-capture` command.
 
 ### Install from a source checkout or ZIP
 
@@ -229,7 +229,9 @@ summary; `--json` is an explicit private automation option and is not the defaul
 For the unpublished private Windows candidate, build and install the local MSIX as documented in the
 [Windows guide](docs/windows.md). Nothing in that workflow uploads or publishes the package.
 Its direct and transitive WinUI dependencies are committed in locked mode; a floating NuGet restore
-is rejected.
+is rejected. Encrypted iOS recovery in that candidate requires Windows 11 x64 and remains blocked
+from merge until a synthetic Windows build, screenshot, and end-to-end smoke test confirm the native
+flow.
 
 Linux accepts only a conservative set of ordinary local filesystem types. FUSE, network, shared,
 virtual-machine shared-folder, temporary, overlay, and unknown filesystem types are refused with no

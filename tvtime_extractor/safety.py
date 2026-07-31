@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from . import windows_native as _windows_native
 from .errors import OutputExistsError, PartialExtractionError, UnsafePathError, UserInputError
 
 EXTRACTION_DIRECTORY_NAME = "TVTime-Extraction"
@@ -645,13 +646,15 @@ def require_fresh_output_platform_support() -> None:
 
 
 def require_encrypted_ios_source_platform_support() -> None:
-    """Fail before preflight or password entry where iOS source binding is unavailable."""
+    """Require the reviewed native source-binding primitives before password entry."""
 
     if _running_on_windows():
-        raise UnsafePathError(
-            "Encrypted iOS backup recovery is unavailable on Windows in this private candidate. "
-            "Use the notarized macOS app or the Python CLI on macOS or Linux."
-        )
+        try:
+            _windows_native.require_supported_runtime()
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError(
+                "Encrypted iOS recovery requires a supported 64-bit Windows 11 installation."
+            ) from exc
 
 
 def _windows_kernel32() -> Any:

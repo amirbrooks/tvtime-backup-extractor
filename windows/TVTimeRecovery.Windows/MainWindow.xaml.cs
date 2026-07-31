@@ -10,7 +10,7 @@ namespace TVTimeRecovery.Windows;
 public sealed partial class MainWindow : Window
 {
     private string? _backupPath;
-    private string _sourceKind = "android_legacy_backup";
+    private string _sourceKind = "ios_encrypted_backup";
     private CancellationTokenSource? _cancellation;
     private ValidatedRecoveryOutput? _completedOutput;
 
@@ -24,7 +24,7 @@ public sealed partial class MainWindow : Window
     private async void SelectBackup_Click(object sender, RoutedEventArgs e)
     {
         IStorageItem? selectedItem;
-        if (_sourceKind == "android_preserved_snapshot")
+        if (_sourceKind is "ios_encrypted_backup" or "android_preserved_snapshot")
         {
             var picker = new FolderPicker();
             picker.FileTypeFilter.Add("*");
@@ -58,18 +58,23 @@ public sealed partial class MainWindow : Window
         RecoverButton.IsEnabled = false;
         SelectBackupButton.Content = kind switch
         {
+            "ios_encrypted_backup" => "Select encrypted iOS backup folder",
             "android_preserved_snapshot" => "Select preserved Android database folder",
             "android_legacy_backup" => "Select Android backup file",
             _ => "Select official TV Time export",
         };
-        BackupPassword.Header = "Export password (only if the ZIP is encrypted)";
-        BackupPassword.IsEnabled = kind == "tvtime_official_export";
+        BackupPassword.Header = kind == "ios_encrypted_backup"
+            ? "Encrypted local-backup password"
+            : "Export password (only if the ZIP is encrypted)";
+        BackupPassword.IsEnabled = kind is "ios_encrypted_backup" or "tvtime_official_export";
         BackupPassword.Password = string.Empty;
     }
 
     private async void Recover_Click(object sender, RoutedEventArgs e)
     {
-        if (_backupPath is null || SensitiveConfirmation.IsChecked != true)
+        if (_backupPath is null ||
+            SensitiveConfirmation.IsChecked != true ||
+            (_sourceKind == "ios_encrypted_backup" && BackupPassword.Password.Length == 0))
         {
             StatusBar.Severity = InfoBarSeverity.Warning;
             StatusBar.Title = "Confirmation required";
