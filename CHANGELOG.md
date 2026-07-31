@@ -2,6 +2,25 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
+## Unreleased private cross-platform candidate
+
+- Added native source-neutral recovery for legacy Android backup containers, preserved Android
+  database snapshots, and official TV Time export ZIP/CSV files. These lanes reuse the normalized
+  analyzer, sealed completion contract, and synthetic-only test policy.
+- Added a Windows 10 1809+ x64 WinUI 3 app with explicit inherited handles, a separate secret
+  channel, Job Object cancellation, a BitLocker/device-encryption gate, app-managed output, strict
+  artifact validation, and private self-signed MSIX build/install scripts.
+- Bound the complete Windows App SDK dependency graph with exact NuGet ranges and content hashes,
+  added a real-reference cross-host C# compile check, and added validated Markdown, offline HTML,
+  and private-folder result actions without persisting source or output paths.
+- Added native macOS source selection for Android and official exports while preserving the
+  published v0.2.0 encrypted-iOS-backup workflow.
+- Added privacy-safe Android capability probing and explicitly acknowledged legacy-device capture.
+  Modern release apps, disabled backup policy, multiple devices, and unauthorized devices fail
+  closed.
+- This candidate is local and private. It has not been tagged, uploaded, published, or represented
+  as a successor release to v0.2.0.
+
 ## 0.2.0 - 2026-07-20
 
 Version 0.2.0 is published with Developer ID-signed, notarized, stapled Apple silicon and Intel

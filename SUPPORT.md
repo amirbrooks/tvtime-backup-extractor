@@ -9,6 +9,11 @@ Developer ID-signed, notarized, stapled macOS DMGs for Apple silicon and Intel, 
 packages. Download only from the official release, verify `SHA256SUMS`, and do not request help
 bypassing Gatekeeper for an unofficial or locally shared app.
 
+The Windows/Android expansion in the current checkout is an unpublished private candidate. It is
+supported only as a local source build with synthetic reproduction data; do not attach its private
+MSIX, backups, database snapshots, exports, recovered output, screenshots, or device identifiers to
+public support requests.
+
 Before opening an issue, read the platform guide, [privacy guide](docs/privacy.md),
 [output reference](docs/output-reference.md), and [troubleshooting guide](docs/troubleshooting.md).
 Search existing issues without pasting private data.

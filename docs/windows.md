@@ -1,93 +1,90 @@
 # Windows guide
 
-Windows can create the encrypted Apple backup and can inspect an already complete private
-extraction. Fresh `extract` and `recover` are deliberately unsupported in this release. iMazing is
-not required.
+Public v0.2.0 contains no Windows app. This checkout contains an unpublished private x64 WinUI 3
+candidate for Windows 10 version 1809 or later. It can recover a supported Android source or an
+official TV Time export without uploading anything. Encrypted iOS recovery remains unavailable in
+this candidate because the source-root binding is not yet implemented with native Windows handles.
 
-## 1. Make a completed encrypted backup
+## Security model
 
-Use Apple Devices on current Windows systems, or iTunes where Apple Devices is unavailable.
-Connect the iPhone or iPad, select a local backup, enable backup encryption, choose and save a unique
-password, and wait for the latest-backup time to update. Confirm the completed backup appears as
-encrypted in Apple's backup-management screen.
+The native launcher passes only explicitly allowlisted inherited handles to the frozen helper: a
+framed control pipe, sequenced event pipe, separate secret pipe, held destination-directory handle,
+and null diagnostic sink. A Job Object terminates the helper tree on cancellation or app exit. The
+helper atomically creates the fresh owner-only output below the held parent; file promotion uses the
+held file handle and does not replace an existing name.
 
-Eject the device in Apple software, wait for it to disappear, and disconnect it. Do not move,
-rename, edit, or clean the backup while Apple software is using it.
+Recovery is refused unless Windows reports active BitLocker or device-encryption protection for the
+app container volume. Output stays under the packaged app's local container. Completion is accepted
+only after the app reopens the marker and every bound artifact, rejects reparse traversal, and
+checks exact byte sizes and SHA-256 values. There is no network capability or telemetry.
+The packaged WinUI desktop process declares only the required restricted `runFullTrust` capability
+so it can launch the frozen local helper; it declares no internet, broad-filesystem, device, or
+privacy-sensitive capability.
 
-Common backup-parent locations are:
+After validation, the result screen can open the canonical Markdown report, open the offline HTML
+report, or show the private output folder. Opening a report can add its filename to browser/viewer
+history or Windows Recent Items. The app does not persist the selected source or completed-output
+path for a later session, and it never silently deletes incomplete or completed recovery output.
+Windows can remove packaged local data during uninstall, so review retained results before manually
+removing the private app. The installer refuses to uninstall or replace an existing package.
 
-```text
-%USERPROFILE%\Apple\MobileSync\Backup
-%APPDATA%\Apple Computer\MobileSync\Backup
+## Build and install privately
+
+Use a private Windows x64 machine with Python 3.13.12, a current Visual Studio installation
+including MSBuild/MSIX tooling, the .NET 8 SDK, and the Windows 10/11 SDK. The direct and transitive
+Windows App SDK dependencies are exact and content-hash bound in `packages.lock.json`; the build
+fails if restore would change that graph. From a clean PowerShell session in this source checkout:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\script\install_windows_private.ps1
 ```
 
-The individual backup is the child folder that directly contains `Manifest.plist`, `Manifest.db`,
-and `Status.plist`, not the parent `Backup` folder.
+The scripts install only hash-locked binary Python dependencies, freeze the architecture-specific
+helper, build one self-contained x64 MSIX, expand and privacy-scan it, create or reuse a per-user
+self-signed code-signing certificate, trust only its public certificate in the current user's
+`TrustedPeople` store, sign and verify the package, and install it for the current user. They do not
+create a tag, commit, release, upload, or public package.
 
-## 2. Why Windows fresh recovery fails closed
+The build also verifies every restored NuGet package against both its downloaded SHA-512 and the
+committed lock content hash, validates the exact Python distribution versions, and embeds their
+available license and notice texts with a content-hashed `Notices/MANIFEST.json`. The Windows SDK
+build-tools package remains build-host-only and is not copied into the MSIX.
 
-Recovery must create a brand-new directory and bind that exact filesystem object before any
-plaintext can be written. Python's supported Windows APIs cannot atomically create a directory and
-open its protective non-delete-sharing handle. Creating by pathname and opening afterward leaves a
-substitution interval, so this release refuses Windows `extract` and `recover` before creating the
-run directory, loading the decryption dependency, or writing plaintext.
+Generated build material stays in `dist-windows-private` and `.build-tools`; neither location is an
+appropriate place for recovered data. A repeated build fails closed if a previous generated helper
+exists, so it cannot silently replace review evidence.
 
-There is no unsafe override. A future Windows recovery path requires a reviewed native atomic design.
-The package therefore does not advertise a general Windows operating-system classifier.
+## iOS source
 
-## 3. Safe recovery route
+Encrypted iOS recovery is intentionally absent from the Windows source chooser and fails closed if
+requested through an unexpected internal call. Use the notarized macOS app or the Python CLI on
+macOS or Linux. Do not enter an iOS backup password into this private Windows candidate.
 
-Copy the intact encrypted backup to private storage on macOS or Linux and run recovery there. Keep
-the original encrypted backup until the result is validated. If transferring a completed extraction
-back to Windows, protect it with BitLocker and treat every title and history row as private.
+## Android and official-export sources
 
-For any fresh run path, the encrypted immediate parent must already exist and the proposed run child
-must not exist. This parent-exists/child-does-not rule applies on every platform; it does not enable
-Windows fresh recovery.
+The native app accepts:
 
-## 4. Install the supported Windows review tools
+- a compatible unencrypted legacy Android `.ab` container (including the bounded supported vendor
+  text envelope);
+- a preserved folder with one allowlisted `DioCache.db` and optional
+  `libCachedImageData.db`; or
+- an official export ZIP, `tracking-prod-records.csv`, or `tracking-prod-records-v2.csv`.
 
-Install an explicitly selected Python 3.10 through 3.13 from python.org or another trusted managed
-source. The examples prefer 3.13 so `py` cannot silently select unsupported Python 3.14. From the
-project folder in PowerShell:
+Unknown archive members, links, traversal, duplicate required databases, unsupported schemas,
+oversized inputs, and unsupported Android backup encryption fail closed. Modern Android release
+apps usually cannot be captured with `adb backup`; the tool does not root a phone or bypass app
+policy.
 
-```text
-py -3.13 -m venv .venv
-.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: --requirement requirements.lock
-.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: --requirement requirements-source-build.lock
-.venv\Scripts\python.exe -m pip install --no-index --no-build-isolation --no-deps .
-.venv\Scripts\python.exe -m pip check
-.venv\Scripts\python.exe -m tvtime_extractor --version
-```
+Advanced owners can use `android-probe --adb <reviewed-adb.exe>` to receive only coarse capability
+states, never a serial number. `android-capture` additionally requires
+`--acknowledge-device-capture` and a fresh private destination outside Git and synced folders.
 
-You may substitute an explicit `py -3.10`, `-3.11`, or `-3.12`. Do not use an unqualified `py -3`
-when it could select 3.14.
+## Existing-extraction CLI
 
-## 5. Analyze or report an existing complete extraction
+Python 3.10 through 3.13 can still run standalone `analyze` and `report`. Existing roots are opened
+without delete sharing, reparse points are rejected, and identity is revalidated at completion.
+Normal errors are sanitized; `--debug` is for a private terminal only.
 
-Use only an extraction that already has a valid complete extraction marker:
-
-```text
-.venv\Scripts\python.exe -m tvtime_extractor analyze --extraction "D:\Private\TVTime-Extraction"
-.venv\Scripts\python.exe -m tvtime_extractor report --extraction "D:\Private\TVTime-Extraction"
-```
-
-These standalone commands open the selected existing root without delete sharing, reject reparse
-points, compare its volume/file identity with the visible path, keep the handle open, and validate
-the identity again at completion. They never unlock an iOS backup.
-
-Running `extract` or `recover` on Windows returns a fixed unsupported-platform error. It must not
-prompt for the password or create the proposed output child.
-
-## 6. Private diagnostics and validation
-
-The normal CLI error is deliberately sanitized. `--debug` can expose backup paths, dependency
-details, recovered names, or password text in a chained third-party exception. Use it only in a
-private local terminal and never paste or share its traceback.
-
-For an existing complete extraction, confirm both `metadata\run_state.json` and
-`analysis\recovery_state.json` say `complete`. Never upload the extraction, reports, screenshots, or
-debug output.
-
-See the [output reference](output-reference.md), [privacy guide](privacy.md), and
-[troubleshooting guide](troubleshooting.md).
+Never upload a backup, export, database, output tree, report, marker, screenshot, device ID, or
+debug trace. See the [privacy guide](privacy.md) and [output reference](output-reference.md).

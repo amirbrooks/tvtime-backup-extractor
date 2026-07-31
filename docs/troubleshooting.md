@@ -4,19 +4,20 @@ Keep the source backup and every recovery output private while troubleshooting. 
 destination for each retry; never delete, empty, merge, rename, or edit an earlier run merely to make
 the tool accept the same path.
 
-## There is no downloadable v0.2.0 macOS app
+## Downloading the published v0.2.0 macOS app
 
-That is the expected repository state until release packaging is completed. The native app has been
-validated as a local ad-hoc development build, but no Developer ID-signed and notarized v0.2.0 DMG
-has been published.
+Version 0.2.0 is published with separate Developer ID-signed, notarized, and stapled DMGs for Apple
+silicon and Intel. Download only the matching DMG from the
+[official v0.2.0 release](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
+and verify it against the release's `SHA256SUMS`.
 
 Do not download an unsigned copy from an issue or unofficial mirror, and do not disable Gatekeeper.
-Use the [Python CLI fallback](../README.md#python-cli-fallback) or follow the contributor-only local
-build instructions in [CONTRIBUTING.md](../CONTRIBUTING.md).
+This checkout can contain a later unpublished candidate. A local ad-hoc candidate build is not the
+published v0.2.0 app and must not be shared or described as notarized.
 
 ## The published macOS app will not open
 
-First confirm that an official release actually exists and that the downloaded DMG matches the Mac:
+Confirm that the downloaded DMG matches the Mac:
 `Apple-Silicon-arm64` for Apple silicon or `Intel-x86_64` for Intel. Verify its SHA-256 checksum
 against the release's `SHA256SUMS`, install the app in Applications, and open that installed copy.
 
