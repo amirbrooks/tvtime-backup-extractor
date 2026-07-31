@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import plistlib
 import re
-from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+
+from .errors import UnsupportedSchemaError
 
 
 @dataclass(frozen=True)
@@ -93,8 +94,13 @@ def _integer(value: object) -> int:
         return 0
 
 
+def _user_id_from_path(path: str) -> str | None:
+    match = re.search(r"/user/(\d+)(?:/|$)", path)
+    return match.group(1) if match is not None else None
+
+
 def _owner_user_id(archives: Sequence[LegacyCacheArchive]) -> str | None:
-    candidates: Counter[str] = Counter()
+    candidates: set[str] = set()
     for archive in archives:
         path = urlsplit(archive.url).path
         if not any(
@@ -104,16 +110,25 @@ def _owner_user_id(archives: Sequence[LegacyCacheArchive]) -> str | None:
                 "/tracking/cgw/follows/user/",
                 "/tracking/watches/user/",
                 "/lists/cgw/user/",
+                "/v2/user/",
             )
         ):
             continue
-        match = re.search(r"/user/(\d+)", path)
-        if match is not None:
-            candidates[match.group(1)] += 1
-    return candidates.most_common(1)[0][0] if candidates else None
+        candidate = _user_id_from_path(path)
+        if candidate is not None:
+            candidates.add(candidate)
+    if len(candidates) > 1:
+        raise UnsupportedSchemaError(
+            "Legacy URL-cache records referenced multiple accounts and were not combined."
+        )
+    return next(iter(candidates), None)
 
 
-def _episodes_from_show(show: dict[str, Any]) -> list[dict[str, Any]]:
+def _episodes_from_show(
+    show: dict[str, Any],
+    *,
+    include_user_state: bool,
+) -> list[dict[str, Any]]:
     show_id = show.get("id", "")
     show_name = show.get("name", "")
     seasons = show.get("seasons")
@@ -137,24 +152,31 @@ def _episodes_from_show(show: dict[str, Any]) -> list[dict[str, Any]]:
                 episode_season = episode_season.get("number")
             if episode_season in (None, ""):
                 episode_season = season.get("number", "")
-            episodes.append(
-                {
-                    "id": episode.get("id", ""),
-                    "air_date": episode.get("air_date", ""),
-                    "show": {
-                        "id": episode_show.get("id") or show_id,
-                        "name": episode_show.get("name") or show_name,
-                    },
-                    "season_number": episode_season,
-                    "number": episode.get("number", ""),
-                    "name": episode.get("name", ""),
-                    "seen": episode.get("seen", ""),
-                    "seen_date": episode.get("seen_date", ""),
-                    "is_watched": episode.get("is_watched", ""),
-                    "is_special": episode.get("is_special", False),
-                    "runtime": episode.get("runtime", ""),
-                }
-            )
+            normalized_episode = {
+                "id": episode.get("id", ""),
+                "air_date": episode.get("air_date", ""),
+                "show": {
+                    "id": episode_show.get("id") or show_id,
+                    "name": episode_show.get("name") or show_name,
+                },
+                "season_number": episode_season,
+                "number": episode.get("number", ""),
+                "name": episode.get("name", ""),
+                "seen": "",
+                "seen_date": "",
+                "is_watched": "",
+                "is_special": episode.get("is_special", False),
+                "runtime": episode.get("runtime", ""),
+            }
+            if include_user_state:
+                normalized_episode.update(
+                    {
+                        "seen": episode.get("seen", ""),
+                        "seen_date": episode.get("seen_date", ""),
+                        "is_watched": episode.get("is_watched", ""),
+                    }
+                )
+            episodes.append(normalized_episode)
     return episodes
 
 
@@ -216,15 +238,17 @@ def normalize_legacy_archives(
     ordered = sorted(archives, key=lambda item: (item.observed_mtime_ns, item.source_id))
     owner_id = _owner_user_id(ordered)
     normalized: list[tuple[str, object]] = []
-    show_candidates: dict[int, list[dict[str, Any]]] = {}
-    episodes: list[dict[str, Any]] = []
-    normalized_source_id = ordered[-1].source_id if ordered else "legacy-cache"
+    show_candidates: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    episodes: list[tuple[str, dict[str, Any]]] = []
 
     for archive in ordered:
         path = urlsplit(archive.url).path
+        path_user_id = _user_id_from_path(path)
         data = _payload_data(archive.payload)
         if (
-            any(
+            owner_id is not None
+            and path_user_id == owner_id
+            and any(
                 marker in path
                 for marker in (
                     "/tracking/cgw/follows/user/",
@@ -241,7 +265,12 @@ def normalize_legacy_archives(
             )
             normalized.append((archive.source_id, {"data": copied_data}))
 
-        if "/lists/cgw/user/" in path and isinstance(data, list):
+        if (
+            owner_id is not None
+            and path_user_id == owner_id
+            and "/lists/cgw/user/" in path
+            and isinstance(data, list)
+        ):
             for item in data:
                 if (
                     isinstance(item, dict)
@@ -261,12 +290,17 @@ def normalize_legacy_archives(
                         )
                     )
 
-        if path.endswith("/allfollowing") and isinstance(data, list):
+        if (
+            owner_id is not None
+            and path_user_id == owner_id
+            and path.endswith("/allfollowing")
+            and isinstance(data, list)
+        ):
             for item in data:
                 if isinstance(item, dict):
                     show_id = _integer(item.get("id"))
                     if show_id > 0:
-                        show_candidates.setdefault(show_id, []).append(item)
+                        show_candidates.setdefault(show_id, []).append((archive.source_id, item))
 
         profile_match = re.fullmatch(r"/v2/user/(\d+)(?:/profile)?", path)
         if (
@@ -282,33 +316,44 @@ def normalize_legacy_archives(
                 show_id = _integer(item.get("id"))
                 if show_id <= 0:
                     continue
-                show_candidates.setdefault(show_id, []).append(item)
-                episodes.extend(_episodes_from_show(item))
+                show_candidates.setdefault(show_id, []).append((archive.source_id, item))
+                episodes.extend(
+                    (archive.source_id, episode)
+                    for episode in _episodes_from_show(item, include_user_state=True)
+                )
 
         if re.fullmatch(r"/v2/cacheable/show/\d+", path) and isinstance(data, dict):
             show_id = _integer(data.get("id"))
             if show_id > 0:
-                show_candidates.setdefault(show_id, []).append(data)
-                episodes.extend(_episodes_from_show(data))
+                show_candidates.setdefault(show_id, []).append((archive.source_id, data))
+                episodes.extend(
+                    (archive.source_id, episode)
+                    for episode in _episodes_from_show(data, include_user_state=False)
+                )
 
     valid_show_ids = {
         _integer(episode.get("show", {}).get("id"))
-        for episode in episodes
+        for _source_id, episode in episodes
         if isinstance(episode.get("show"), dict)
     }
     valid_show_ids.discard(0)
-    series = [
-        _series_object(_merge_show_candidates(show_candidates[series_id]))
-        for series_id in sorted(show_candidates)
-        if series_id in valid_show_ids
-    ]
-    if series:
-        normalized.append(
-            (
-                normalized_source_id,
-                {"data": {"type": "list", "objects": series}},
-            )
+    series_by_source: dict[str, list[dict[str, Any]]] = {}
+    for series_id in sorted(show_candidates):
+        if series_id not in valid_show_ids:
+            continue
+        candidates = show_candidates[series_id]
+        source_id = candidates[-1][0]
+        series_by_source.setdefault(source_id, []).append(
+            _series_object(_merge_show_candidates([item for _source_id, item in candidates]))
         )
-    if episodes:
-        normalized.append((normalized_source_id, {"data": episodes}))
+    for source_id in sorted(series_by_source):
+        normalized.append(
+            (source_id, {"data": {"type": "list", "objects": series_by_source[source_id]}})
+        )
+
+    episodes_by_source: dict[str, list[dict[str, Any]]] = {}
+    for source_id, episode in episodes:
+        episodes_by_source.setdefault(source_id, []).append(episode)
+    for source_id in sorted(episodes_by_source):
+        normalized.append((source_id, {"data": episodes_by_source[source_id]}))
     return normalized

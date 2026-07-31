@@ -17,8 +17,13 @@ from tests.helpers import (
 from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import UnsupportedSchemaError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
-from tvtime_extractor.legacy_cache import decode_legacy_cache_archive
+from tvtime_extractor.legacy_cache import (
+    LegacyCacheArchive,
+    decode_legacy_cache_archive,
+    normalize_legacy_archives,
+)
 from tvtime_extractor.report import build_report
+from tvtime_extractor.safety import private_source_id
 
 SYNTHETIC_OWNER_ID = "900000001"
 SERIES_ID = 7100
@@ -91,6 +96,77 @@ class LegacyURLCacheAnalysisTests(unittest.TestCase):
                     maximum_nodes=100,
                 )
             )
+
+    def test_multiple_legacy_account_ids_fail_closed(self) -> None:
+        archives = [
+            LegacyCacheArchive(
+                source_id=f"synthetic-source-{index}",
+                url=(
+                    "https://api.example.invalid/prod/v1/tracking/cgw/follows/user/"
+                    f"{user_id}?entity_type=movie"
+                ),
+                payload={"data": {"type": "list", "objects": []}},
+                payload_bytes=b'{"data":{"type":"list","objects":[]}}',
+                observed_mtime_ns=index,
+            )
+            for index, user_id in enumerate(("900000010", "900000011"), start=1)
+        ]
+
+        with self.assertRaisesRegex(UnsupportedSchemaError, "multiple accounts"):
+            normalize_legacy_archives(archives)
+
+    def test_accountless_show_catalog_does_not_supply_watch_state(self) -> None:
+        owner_archive = LegacyCacheArchive(
+            source_id="synthetic-owner-source",
+            url=(
+                "https://api.example.invalid/prod/v1/tracking/cgw/follows/user/"
+                f"{SYNTHETIC_OWNER_ID}?entity_type=movie"
+            ),
+            payload={"data": {"type": "list", "objects": []}},
+            payload_bytes=b'{"data":{"type":"list","objects":[]}}',
+            observed_mtime_ns=1,
+        )
+        show_archive = LegacyCacheArchive(
+            source_id="synthetic-show-source",
+            url=f"https://api.example.invalid/v2/cacheable/show/{SERIES_ID}",
+            payload={
+                "data": {
+                    "id": SERIES_ID,
+                    "name": "Synthetic Legacy Series",
+                    "seasons": [
+                        {
+                            "number": 1,
+                            "episodes": [
+                                {
+                                    "id": 710001,
+                                    "number": 1,
+                                    "air_date": "2020-01-01T00:00:00Z",
+                                    "seen": True,
+                                    "seen_date": "2020-02-01T00:00:00Z",
+                                    "is_watched": True,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            payload_bytes=b'{"data":{"id":7100}}',
+            observed_mtime_ns=2,
+        )
+
+        normalized = normalize_legacy_archives([owner_archive, show_archive])
+        episode_payloads = [
+            payload["data"]
+            for source_id, payload in normalized
+            if source_id == "synthetic-show-source"
+            and isinstance(payload, dict)
+            and isinstance(payload.get("data"), list)
+        ]
+
+        self.assertEqual(len(episode_payloads), 1)
+        self.assertEqual(episode_payloads[0][0]["seen"], "")
+        self.assertEqual(episode_payloads[0][0]["seen_date"], "")
+        self.assertEqual(episode_payloads[0][0]["is_watched"], "")
 
     def test_legacy_archives_share_the_cache_row_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -255,6 +331,11 @@ class LegacyURLCacheAnalysisTests(unittest.TestCase):
             self.assertEqual(summary["watch_events"], 1)
             self.assertEqual(summary["episode_cache_unique"], 2)
             analysis = extraction / "analysis"
+            episode_rows = read_csv_rows(analysis / "episode_cache.csv")
+            self.assertEqual(
+                {row["source_id"] for row in episode_rows},
+                {private_source_id("legacy-url-cache", "legacy-cache-profile")},
+            )
             movies = read_csv_rows(analysis / "movie_library.csv")
             self.assertEqual(
                 [row["name"] for row in movies],
