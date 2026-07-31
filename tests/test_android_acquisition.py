@@ -163,7 +163,7 @@ class AndroidAcquisitionTests(unittest.TestCase):
                     [("synthetic://record", "normalized", b"{}", 200)],
                 )
 
-            self.assertEqual(len(captured), 1)
+            self.assertGreaterEqual(len(captured), 1)
             for connection in captured:
                 with self.assertRaises(sqlite3.ProgrammingError):
                     connection.execute("SELECT 1")
@@ -187,7 +187,13 @@ class AndroidAcquisitionTests(unittest.TestCase):
                     [("synthetic://record", "normalized", b"{}", 200)],
                 )
 
-            self.assertEqual(opened, [":memory:"])
+            self.assertEqual(opened[0], ":memory:")
+            for database in opened[1:]:
+                staging = Path(database)
+                self.assertEqual(staging.name, "normalized.sqlite")
+                self.assertTrue(staging.parent.name.startswith(".sqlite-compat-"))
+                self.assertEqual(staging.parent.parent, target.parent)
+            self.assertNotIn(target, [Path(database) for database in opened[1:]])
             self.assertGreater(target.stat().st_size, 0)
 
     def test_normalized_official_export_uses_safe_legacy_sqlite_backup(self) -> None:

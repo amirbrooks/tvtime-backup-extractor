@@ -77,7 +77,6 @@ _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 _WINDOWS_OBJ_CASE_INSENSITIVE = 0x00000040
 _WINDOWS_STATUS_OBJECT_NAME_COLLISION = -1073741771
 _WINDOWS_SDDL_REVISION_1 = 1
-_WINDOWS_FILE_RENAME_INFO_CLASS = 3
 _LINUX_RENAME_NOREPLACE = 1
 _DARWIN_RENAME_EXCL = 0x00000004
 _REMOTE_FILESYSTEM_TYPES = frozenset(
@@ -209,15 +208,6 @@ class _WindowsSecurityAttributes(ctypes.Structure):
         ("length", ctypes.c_uint32),
         ("security_descriptor", ctypes.c_void_p),
         ("inherit_handle", ctypes.c_int),
-    ]
-
-
-class _WindowsFileRenameInfoHeader(ctypes.Structure):
-    _fields_ = [
-        ("replace_if_exists", ctypes.c_ubyte),
-        ("root_directory", ctypes.c_void_p),
-        ("file_name_length", ctypes.c_uint32),
-        ("file_name", ctypes.c_wchar * 1),
     ]
 
 
@@ -1008,44 +998,23 @@ def _windows_rename_handle_no_replace(
 
     parent_handle = -1
     try:
-        parent_handle, _parent_identity = _windows_open_locked_directory(destination.parent)
-        filename = destination.name.encode("utf-16-le")
-        offset = _WindowsFileRenameInfoHeader.file_name.offset
-        buffer = ctypes.create_string_buffer(offset + len(filename))
-        header = ctypes.cast(buffer, ctypes.POINTER(_WindowsFileRenameInfoHeader)).contents
-        header.replace_if_exists = 0
-        header.root_directory = ctypes.c_void_p(parent_handle)
-        header.file_name_length = len(filename)
-        ctypes.memmove(ctypes.addressof(buffer) + offset, filename, len(filename))
-        kernel32 = _windows_kernel32()
-        rename = kernel32.SetFileInformationByHandle
-        with suppress(AttributeError):
-            rename.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_uint32,
-            ]
-            rename.restype = ctypes.c_int
+        parent_handle, _parent_identity = _windows_open_locked_directory(
+            destination.parent,
+            allow_child_creation=True,
+        )
         try:
-            succeeded = rename(
-                ctypes.c_void_p(native_handle),
-                _WINDOWS_FILE_RENAME_INFO_CLASS,
-                ctypes.byref(buffer),
-                len(buffer),
+            _windows_native.rename_handle_relative(
+                native_handle,
+                parent_handle,
+                (destination.name,),
+                replace=False,
             )
-        except (OSError, TypeError, ValueError) as exc:
+        except _windows_native.WindowsObjectExistsError as exc:
+            raise OutputExistsError(
+                "The destination appeared before atomic promotion. Nothing was overwritten."
+            ) from exc
+        except _windows_native.WindowsNativeError as exc:
             raise UnsafePathError("The private Windows file could not be promoted safely.") from exc
-        if not succeeded:
-            try:
-                error_number = int(ctypes.get_last_error())
-            except (AttributeError, TypeError, ValueError):
-                error_number = 0
-            if error_number in {80, 183}:
-                raise OutputExistsError(
-                    "The destination appeared before atomic promotion. Nothing was overwritten."
-                )
-            raise _windows_error("The private Windows file could not be promoted safely.")
     finally:
         if parent_handle > 0:
             _windows_close_handle(parent_handle)

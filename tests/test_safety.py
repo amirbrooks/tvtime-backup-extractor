@@ -36,6 +36,7 @@ from tvtime_extractor.safety import (
     _windows_directory_identity,
     _windows_open_locked_directory,
     _windows_regular_file_information,
+    _windows_rename_handle_no_replace,
     anchored_bound_output_root,
     anchored_existing_extraction_root,
     extended_acl_state,
@@ -1245,6 +1246,34 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         share_mode = int(kernel32.create_calls[0][2])
         self.assertTrue(desired_access & _WINDOWS_DELETE)
         self.assertFalse(share_mode & _WINDOWS_FILE_SHARE_DELETE)
+
+    def test_handle_promotion_uses_the_isolated_windows_backend(self) -> None:
+        destination = Path("C:/Synthetic/Private/Analysis")
+        closed: list[int] = []
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_open_locked_directory",
+                return_value=(101, (7, 11)),
+            ) as open_parent,
+            mock.patch("tvtime_extractor.safety._windows_native.rename_handle_relative") as rename,
+            mock.patch(
+                "tvtime_extractor.safety._windows_close_handle",
+                side_effect=closed.append,
+            ),
+        ):
+            _windows_rename_handle_no_replace(202, destination)
+
+        open_parent.assert_called_once_with(
+            destination.parent,
+            allow_child_creation=True,
+        )
+        rename.assert_called_once_with(
+            202,
+            101,
+            ("Analysis",),
+            replace=False,
+        )
+        self.assertEqual(closed, [101])
 
     def test_visible_identity_reopen_shares_delete_with_retained_handle(self) -> None:
         kernel32 = self._Kernel32()
