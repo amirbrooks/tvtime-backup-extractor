@@ -7,7 +7,7 @@ struct RecoveryRootView: View {
   let folderPicker: FolderPicker
   let workspaceActions: WorkspaceActions
   let recoveryStore: AppManagedRecoveryStore
-  let diagnostics: any RecoveryDiagnosticsSink
+  let diagnostics: UnifiedRecoveryDiagnostics
   @State private var selectedSource = RecoverySourceChoice.iosBackup
 
   var body: some View {
@@ -74,10 +74,12 @@ struct RecoveryRootView: View {
       case .failed(let failure):
         RecoveryErrorView(
           failure: failure,
+          troubleshootingReport: diagnostics.troubleshootingReport,
           onPrimaryAction: session.recoverFromFailure,
           onStartOver: session.returnToBackupSelection,
           canRevealOutput: hasExistingOutput,
-          onRevealOutput: revealOutput
+          onRevealOutput: revealOutput,
+          onCopyTroubleshootingReport: workspaceActions.copyTroubleshootingReport
         )
       }
     }
@@ -114,8 +116,10 @@ struct RecoveryRootView: View {
 
       if selectedSource == .iosBackup {
         BackupStepView {
-          try await folderPicker.chooseBackup()
+          diagnostics.beginAttempt()
+          return try await folderPicker.chooseBackup()
         } onSelected: { url in
+          diagnostics.record(.milestone(.backupPicker, .backupAccepted))
           do {
             let destination = try recoveryStore.prepareDestination()
             diagnostics.record(.milestone(.preflight, .privateStoragePrepared))
@@ -125,6 +129,8 @@ struct RecoveryRootView: View {
             throw error
           }
         } onShowRecoveries: {
+          diagnostics.beginAttempt()
+          diagnostics.record(.milestone(.outputAccess, .requested))
           do {
             guard let destination = try recoveryStore.existingDestination() else {
               throw RootActionError.missingArtifact
@@ -134,19 +140,35 @@ struct RecoveryRootView: View {
             diagnostics.record(.failure(.outputAccess, .outputUnavailable))
             throw error
           }
+        } troubleshootingReport: {
+          diagnostics.troubleshootingReport
+        } onCopyTroubleshootingReport: {
+          try workspaceActions.copyTroubleshootingReport($0)
         }
       } else if let acquisitionKind = selectedSource.acquisitionKind {
         AcquisitionStepView(sourceKind: acquisitionKind) {
-          try await folderPicker.chooseAcquisitionSource(kind: acquisitionKind)
+          diagnostics.beginAttempt()
+          return try await folderPicker.chooseAcquisitionSource(kind: acquisitionKind)
         } onStart: { source, password, acknowledged in
-          let destination = try recoveryStore.prepareDestination()
-          session.startAcquisition(
-            sourceKind: acquisitionKind,
-            sourceURL: source,
-            appManagedDestinationParent: destination,
-            sourcePassword: password,
-            acknowledgeSensitiveOutput: acknowledged
-          )
+          diagnostics.beginSourceAttempt()
+          do {
+            let destination = try recoveryStore.prepareDestination()
+            diagnostics.record(.milestone(.recovery, .privateStoragePrepared))
+            session.startAcquisition(
+              sourceKind: acquisitionKind,
+              sourceURL: source,
+              appManagedDestinationParent: destination,
+              sourcePassword: password,
+              acknowledgeSensitiveOutput: acknowledged
+            )
+          } catch {
+            diagnostics.record(.failure(.recovery, .privateStorageUnavailable))
+            throw error
+          }
+        } troubleshootingReport: {
+          diagnostics.troubleshootingReport
+        } onCopyTroubleshootingReport: {
+          try workspaceActions.copyTroubleshootingReport($0)
         }
         .id(acquisitionKind.rawValue)
       }

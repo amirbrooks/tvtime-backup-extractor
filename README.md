@@ -17,7 +17,7 @@ backup, contact TV Time, restore data to the app, or provide an official cloud-a
 > v0.2.0.
 
 The [v0.3.0-alpha.1 release preparation record](docs/release-v0.3.0-alpha.1.md) tracks completed
-evidence and the native checks still required before publication.
+evidence, the intentionally limited public artifact set, and the remaining alpha release gates.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
@@ -42,14 +42,17 @@ Download it from the [official v0.2.0 release](https://github.com/amirbrooks/tvt
 See the [macOS guide](docs/macos.md) for installation and the
 [v0.2.0 release record](docs/release-v0.2.0.md) for the completed distribution gates.
 
-## What every recovery needs
+## What recovery needs
 
-- A **completed and encrypted** local iOS or iPadOS backup made with Finder, Apple Devices, or
-  iTunes
-- The encryption password for that backup
-- The phone safely ejected and disconnected after backup completion is confirmed
-- Enough free local space for manifest processing, the selected TV Time app data, and reports.
-  Recovery does not duplicate the whole device backup.
+Every route needs an owner-controlled local source, private local output storage, and enough free
+space for processing and reports.
+
+Encrypted iOS or iPadOS recovery also needs a completed encrypted local backup made with Finder,
+Apple Devices, or iTunes, its encryption password, and the phone safely ejected and disconnected
+after backup completion is confirmed. Recovery does not duplicate the whole device backup.
+
+Android and official-export routes use their own selected local source. They do not require an iOS
+backup or its password.
 
 Rooting a phone, bypassing Android backup policy, cloud-account scraping, and restoring recovered
 data to TV Time are not supported. Modern Android release apps commonly disable legacy backup; the
@@ -246,12 +249,20 @@ volumes, symbolic links, Windows reparse points, and cloud-hydrated placeholders
 source inspection. On Windows, the source must also be on private local NTFS storage so file
 identity checks remain trustworthy; copy an owner-controlled source there before recovery.
 
-The CLI commands are:
+The encrypted-iOS and core processing commands are:
 
 - `recover`: preflight, extract, analyze, and report in one workflow
 - `extract`: copy and inventory matching TV Time app-domain files only
 - `analyze`: build normalized private tables from one complete extraction
 - `report`: build readable and visual reports from one complete analysis
+
+The experimental Android and official-export commands are:
+
+- `recover-android-backup`: recover a compatible legacy Android backup container
+- `recover-android-snapshot`: recover an already-preserved Android database snapshot
+- `recover-export`: recover a supported official TV Time ZIP or CSV export
+- `android-probe`: report privacy-safe legacy backup capability
+- `android-capture`: explicitly capture a supported legacy Android backup
 
 Run `python -m tvtime_extractor <command> --help` through the virtual environment for exact options.
 `--debug` deliberately retains chained third-party exceptions and can expose backup paths,

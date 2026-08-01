@@ -1,3 +1,4 @@
+import AppKit
 import Charts
 import SwiftUI
 import TVTimeRecoveryCore
@@ -19,53 +20,69 @@ struct BackupStepView: View {
   let chooseBackup: () async throws -> URL?
   let onSelected: (URL) throws -> Void
   let onShowRecoveries: () throws -> Void
+  let troubleshootingReport: () -> RecoveryTroubleshootingReport
+  let onCopyTroubleshootingReport: (RecoveryTroubleshootingReport) throws -> Void
   @State private var presentedError: PresentedError?
+  @State private var showsTroubleshooting = false
 
   var body: some View {
-    VStack(spacing: 22) {
-      Image(systemName: "externaldrive")
-        .font(.system(size: 48))
-        .foregroundStyle(.tint)
-        .accessibilityHidden(true)
-      Text("Choose your encrypted local backup")
-        .font(.title2.weight(.semibold))
-        .phaseHeading()
-      Text(
-        "Select the completed Finder, Apple Devices, or iTunes backup. "
-          + "The app reads the backup without intentionally changing it."
-      )
-      .foregroundStyle(.secondary)
-      .multilineTextAlignment(.center)
-      .frame(maxWidth: 520)
-      Text(
-        "The picker normally opens at Apple’s Backup folder. If one backup is present, simply "
-          + "choose that folder. If several appear, open the backup you want first."
-      )
-      .font(.callout)
-      .foregroundStyle(.secondary)
-      .multilineTextAlignment(.center)
-      .frame(maxWidth: 520)
-      Button("Choose Backup…") {
-        Task {
-          do {
-            if let selected = try await chooseBackup() {
-              try onSelected(selected)
+    ScrollView {
+      VStack(spacing: 22) {
+        Image(systemName: "externaldrive")
+          .font(.system(size: 48))
+          .foregroundStyle(.tint)
+          .accessibilityHidden(true)
+        Text("Choose your encrypted local backup")
+          .font(.title2.weight(.semibold))
+          .phaseHeading()
+        Text(
+          "Select the completed Finder, Apple Devices, or iTunes backup. "
+            + "The app reads the backup without intentionally changing it."
+        )
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 520)
+        Text(
+          "The picker normally opens at Apple’s Backup folder. If one backup is present, simply "
+            + "choose that folder. If several appear, open the backup you want first."
+        )
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 520)
+        Button("Choose Backup…") {
+          showsTroubleshooting = false
+          Task {
+            do {
+              if let selected = try await chooseBackup() {
+                try onSelected(selected)
+              }
+            } catch {
+              presentedError = PresentedError(message: safeMessage(for: error))
+              showsTroubleshooting = true
             }
-          } catch {
-            presentedError = PresentedError(message: safeMessage(for: error))
           }
         }
-      }
-      .buttonStyle(.borderedProminent)
-      .controlSize(.large)
-      .keyboardShortcut(.defaultAction)
-      Button("Show Previous Recoveries") {
-        do {
-          try onShowRecoveries()
-        } catch {
-          presentedError = PresentedError(message: safeMessage(for: error))
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .keyboardShortcut(.defaultAction)
+        Button("Show Previous Recoveries") {
+          do {
+            try onShowRecoveries()
+          } catch {
+            presentedError = PresentedError(message: safeMessage(for: error))
+            showsTroubleshooting = true
+          }
+        }
+        if showsTroubleshooting, !troubleshootingReport().lines.isEmpty {
+          RecoveryTroubleshootingView(
+            report: troubleshootingReport(),
+            onCopy: onCopyTroubleshootingReport
+          )
         }
       }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 1)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .alert(item: $presentedError) { error in
@@ -79,53 +96,69 @@ struct AcquisitionStepView: View {
   let sourceKind: AcquisitionSourceKind
   let chooseSource: () async throws -> URL?
   let onStart: (URL, String, Bool) throws -> Void
+  let troubleshootingReport: () -> RecoveryTroubleshootingReport
+  let onCopyTroubleshootingReport: (RecoveryTroubleshootingReport) throws -> Void
   @State private var selectedSource: URL?
   @State private var password = ""
   @State private var acknowledgesSensitiveOutput = false
   @State private var presentedError: PresentedError?
+  @State private var showsTroubleshooting = false
 
   var body: some View {
-    VStack(spacing: 20) {
-      Image(systemName: "lock.doc")
-        .font(.system(size: 48))
-        .foregroundStyle(.tint)
-      Text(title).font(.title2.weight(.semibold)).phaseHeading()
-      Text(guidance)
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: 560)
-      Button(selectedSource == nil ? "Choose Source…" : "Choose Different Source…") {
-        Task {
-          do { selectedSource = try await chooseSource() ?? selectedSource } catch {
-            presentedError = PresentedError(message: safeMessage(for: error))
+    ScrollView {
+      VStack(spacing: 20) {
+        Image(systemName: "lock.doc")
+          .font(.system(size: 48))
+          .foregroundStyle(.tint)
+        Text(title).font(.title2.weight(.semibold)).phaseHeading()
+        Text(guidance)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 560)
+        Button(selectedSource == nil ? "Choose Source…" : "Choose Different Source…") {
+          showsTroubleshooting = false
+          Task {
+            do { selectedSource = try await chooseSource() ?? selectedSource } catch {
+              presentedError = PresentedError(message: safeMessage(for: error))
+              showsTroubleshooting = true
+            }
           }
         }
-      }
-      .buttonStyle(.borderedProminent)
-      if selectedSource != nil {
-        Label("Private local source selected", systemImage: "checkmark.circle.fill")
-          .foregroundStyle(.secondary)
-      }
-      if sourceKind == .tvTimeOfficialExport {
-        SecureField("Export password (only if the ZIP is encrypted)", text: $password)
-          .textFieldStyle(.roundedBorder)
-          .frame(maxWidth: 480)
-      }
-      Toggle(isOn: $acknowledgesSensitiveOutput) {
-        Text("I understand the recovered reports contain readable private viewing history.")
-      }
-      .frame(maxWidth: 560)
-      Button("Recover Privately") {
-        guard let selectedSource else { return }
-        let suppliedPassword = password
-        password.removeAll(keepingCapacity: false)
-        do { try onStart(selectedSource, suppliedPassword, acknowledgesSensitiveOutput) } catch {
-          presentedError = PresentedError(message: safeMessage(for: error))
+        .buttonStyle(.borderedProminent)
+        if selectedSource != nil {
+          Label("Private local source selected", systemImage: "checkmark.circle.fill")
+            .foregroundStyle(.secondary)
+        }
+        if sourceKind == .tvTimeOfficialExport {
+          SecureField("Export password (only if the ZIP is encrypted)", text: $password)
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: 480)
+        }
+        Toggle(isOn: $acknowledgesSensitiveOutput) {
+          Text("I understand the recovered reports contain readable private viewing history.")
+        }
+        .frame(maxWidth: 560)
+        Button("Recover Privately") {
+          guard let selectedSource else { return }
+          let suppliedPassword = password
+          password.removeAll(keepingCapacity: false)
+          do { try onStart(selectedSource, suppliedPassword, acknowledgesSensitiveOutput) } catch {
+            presentedError = PresentedError(message: safeMessage(for: error))
+            showsTroubleshooting = true
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.defaultAction)
+        .disabled(selectedSource == nil || !acknowledgesSensitiveOutput)
+        if showsTroubleshooting, !troubleshootingReport().lines.isEmpty {
+          RecoveryTroubleshootingView(
+            report: troubleshootingReport(),
+            onCopy: onCopyTroubleshootingReport
+          )
         }
       }
-      .buttonStyle(.borderedProminent)
-      .keyboardShortcut(.defaultAction)
-      .disabled(selectedSource == nil || !acknowledgesSensitiveOutput)
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 1)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .alert(item: $presentedError) { error in
@@ -716,10 +749,12 @@ struct RecoveryResultView: View {
 @MainActor
 struct RecoveryErrorView: View {
   let failure: RecoveryFailure
+  let troubleshootingReport: RecoveryTroubleshootingReport
   let onPrimaryAction: () -> Void
   let onStartOver: () -> Void
   let canRevealOutput: Bool
   let onRevealOutput: () throws -> Void
+  let onCopyTroubleshootingReport: (RecoveryTroubleshootingReport) throws -> Void
   @State private var presentedError: PresentedError?
 
   private var recoveryPlan: RecoveryFailureRecoveryPlan {
@@ -760,6 +795,12 @@ struct RecoveryErrorView: View {
           .textSelection(.enabled)
           .accessibilityLabel("Error reference")
           .accessibilityValue(failure.userVisibleReferenceCode)
+        if !troubleshootingReport.lines.isEmpty {
+          RecoveryTroubleshootingView(
+            report: troubleshootingReport,
+            onCopy: onCopyTroubleshootingReport
+          )
+        }
         if canRevealOutput {
           Text(
             "Incomplete output is preserved. Reveal it before starting over if you need to "
@@ -806,6 +847,59 @@ struct RecoveryErrorView: View {
         .keyboardShortcut(.defaultAction)
     }
     Button("Start Over", action: onStartOver)
+  }
+}
+
+@MainActor
+private struct RecoveryTroubleshootingView: View {
+  let report: RecoveryTroubleshootingReport
+  let onCopy: (RecoveryTroubleshootingReport) throws -> Void
+  @State private var copiedReportText: String?
+  @State private var presentedError: PresentedError?
+
+  var body: some View {
+    GroupBox {
+      VStack(alignment: .leading, spacing: 10) {
+        ScrollView {
+          Text(report.lines.joined(separator: "\n"))
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: 140)
+        HStack(spacing: 10) {
+          Button("Copy Safe Diagnostics") {
+            do {
+              try onCopy(report)
+              copiedReportText = report.text
+              NSAccessibility.post(
+                element: NSApp as Any,
+                notification: .announcementRequested,
+                userInfo: [
+                  .announcement: "Safe diagnostics copied",
+                  .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ]
+              )
+            } catch {
+              copiedReportText = nil
+              presentedError = PresentedError(message: safeMessage(for: error))
+            }
+          }
+          if copiedReportText == report.text {
+            Label("Copied", systemImage: "checkmark")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
+      }
+    } label: {
+      Label("Where recovery stopped", systemImage: "stethoscope")
+    }
+    .frame(maxWidth: 540)
+    .alert(item: $presentedError) { error in
+      Alert(title: Text("Copy unavailable"), message: Text(error.message))
+    }
   }
 }
 

@@ -51,6 +51,11 @@ The macOS app records only fixed operation, milestone, and allow-listed failure 
 local unified log. It does not log paths, backup identifiers, filenames, titles, recovered counts,
 passwords, or free-form error text, and it does not transmit telemetry.
 
+If the app reaches its failure screen, use **Copy Safe Diagnostics** under **Where recovery
+stopped**. The copied text shows the recent fixed operation, milestone, and failure codes for that
+attempt. Review it before sharing. Do not send a screenshot because the surrounding screen or other
+open apps can expose private information.
+
 For a contributor-built local app, run the repository's normal packaged build with its narrow
 telemetry filter:
 
@@ -64,8 +69,9 @@ failure contains an allow-listed `reason`; an unknown local error is only
 `unrecognized_failure`.
 
 Do not broaden the predicate, export a `.logarchive`, or attach terminal output to an issue. Other
-system logs can contain private data. Share only the app's displayed reference code and a manually
-paraphrased stage unless a maintainer provides a synthetic reproduction procedure.
+system logs can contain private data. Share only the copied Safe Diagnostics, the app's displayed
+reference code, and a manually paraphrased stage unless a maintainer provides a synthetic
+reproduction procedure.
 
 ## The backup is not marked finished
 

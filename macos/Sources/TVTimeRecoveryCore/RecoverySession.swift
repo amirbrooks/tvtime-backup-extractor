@@ -350,8 +350,6 @@ public final class RecoverySession {
     outputDirectory = freshOutputDirectory(in: appManagedDestinationParent)
     preflightSummary = nil
     backupReceipt = nil
-    diagnostics.record(.milestone(.backupPicker, .backupAccepted))
-    diagnostics.record(.milestone(.preflight, .requested))
     startPreflight()
   }
 
@@ -426,8 +424,7 @@ public final class RecoverySession {
       activeAction = nil
       sourceLease.stop()
       destinationLease.stop()
-      diagnostics.record(.failure(.recovery, RecoveryDiagnosticFailure(error: error)))
-      failSafely(error)
+      failSafely(error, operation: .recovery)
     }
   }
 
@@ -449,6 +446,7 @@ public final class RecoverySession {
       if let count = secret?.count, count > 0 { secret?.resetBytes(in: 0..<count) }
     }
     do {
+      diagnostics.record(.milestone(.recovery, .requested))
       let identity = try destinationEncryptionValidator(destination)
       backupDirectory = source
       destinationParent = destination
@@ -483,7 +481,7 @@ public final class RecoverySession {
     } catch {
       sourceLease.stop()
       destinationLease.stop()
-      failSafely(error)
+      failSafely(error, operation: .recovery)
     }
   }
 
@@ -667,6 +665,7 @@ public final class RecoverySession {
     }
     preflightSummary = nil
     backupReceipt = nil
+    diagnostics.record(.milestone(.preflight, .requested))
     let sourceLease = SecurityScopedResourceLease(url: backupDirectory)
     let destinationLease = SecurityScopedResourceLease(url: destinationParent)
     do {
@@ -698,11 +697,10 @@ public final class RecoverySession {
         retainDestinationOnSuccess: false
       )
     } catch {
-      diagnostics.record(.failure(.preflight, RecoveryDiagnosticFailure(error: error)))
       activeAction = nil
       sourceLease.stop()
       destinationLease.stop()
-      failSafely(error)
+      failSafely(error, operation: .preflight)
     }
   }
 
@@ -738,10 +736,6 @@ public final class RecoverySession {
       } catch {
         sourceLease.stop()
         destinationLease.stop()
-        diagnostics.record(
-          .failure(
-            activeAction?.diagnosticOperation ?? .recovery, RecoveryDiagnosticFailure(error: error))
-        )
         failSafely(error)
       }
       operationTask = nil
@@ -827,6 +821,8 @@ public final class RecoverySession {
             message: "Validating recovered output…"
           )
         )
+        diagnostics.record(.milestone(.recovery, .completed))
+        diagnostics.record(.milestone(.validation, .started))
         let validator = acquisitionOutputValidator
         let task = Task.detached(priority: .userInitiated) {
           try validator(summary, outputDirectory)
@@ -838,6 +834,7 @@ public final class RecoverySession {
           throw CancellationError()
         }
         phase = .acquisitionCompleted(summary)
+        diagnostics.record(.milestone(.validation, .completed))
       } catch is CancellationError {
         failValidationCancellation()
       } catch {
@@ -874,7 +871,12 @@ public final class RecoverySession {
     }
   }
 
-  private func failSafely(_ error: Error) {
+  private func failSafely(
+    _ error: Error,
+    operation explicitOperation: RecoveryDiagnosticOperation? = nil
+  ) {
+    let operation = explicitOperation ?? activeAction?.diagnosticOperation ?? .recovery
+    diagnostics.record(.failure(operation, RecoveryDiagnosticFailure(error: error)))
     cancelPendingInterruptionRequests()
     activeAction = nil
     backupReceipt = nil
@@ -1033,6 +1035,7 @@ public final class RecoverySession {
     cancellationSignalSent = false
     preflightSummary = nil
     backupReceipt = nil
+    diagnostics.beginAttempt()
     if useFreshOutput {
       outputDirectory = freshOutputDirectory(
         in: destinationParent,

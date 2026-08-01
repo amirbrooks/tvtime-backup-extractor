@@ -59,18 +59,23 @@ final class FolderPicker {
       diagnostics.record(.milestone(.backupPicker, .pickerCancelled))
       return nil
     }
-    let keys: Set<URLResourceKey> =
-      kind == .androidPreservedSnapshot
-      ? [.isDirectoryKey, .isSymbolicLinkKey]
-      : [.isRegularFileKey, .isSymbolicLinkKey]
-    let values = try selected.resourceValues(forKeys: keys)
-    guard values.isSymbolicLink != true else { throw FolderPickerError.invalidDirectory }
-    if kind == .androidPreservedSnapshot {
-      guard values.isDirectory == true else { throw FolderPickerError.invalidDirectory }
-    } else {
-      guard values.isRegularFile == true else { throw FolderPickerError.invalidDirectory }
+    do {
+      let keys: Set<URLResourceKey> =
+        kind == .androidPreservedSnapshot
+        ? [.isDirectoryKey, .isSymbolicLinkKey]
+        : [.isRegularFileKey, .isSymbolicLinkKey]
+      let values = try selected.resourceValues(forKeys: keys)
+      guard values.isSymbolicLink != true else { throw FolderPickerError.invalidDirectory }
+      if kind == .androidPreservedSnapshot {
+        guard values.isDirectory == true else { throw FolderPickerError.invalidDirectory }
+      } else {
+        guard values.isRegularFile == true else { throw FolderPickerError.invalidDirectory }
+      }
+      return selected.standardizedFileURL
+    } catch {
+      diagnostics.record(.failure(.backupPicker, diagnosticFailure(for: error)))
+      throw error
     }
-    return selected.standardizedFileURL
   }
 
   private func chooseDirectory(

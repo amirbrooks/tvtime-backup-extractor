@@ -130,10 +130,15 @@ password, free-form helper message, or report content. Unknown errors become
 `unrecognized_failure` instead of being stringified. The operating system controls unified-log
 retention.
 
-For support, prefer the safe reference code displayed by the app and a manual description of the
-stage. Do not export or upload a complete unified-log archive: unrelated processes can place private
-data in the same archive. Contributors can filter this app's bounded events locally as described in
-the troubleshooting guide.
+When recovery stops, the app shows the recent fixed-vocabulary events and can copy them as **Safe
+Diagnostics**. This short report contains the same bounded operation, milestone, and failure codes.
+It has no raw error text, timestamp, path, identifier, recovered value, or event count.
+
+For support, prefer this copied report, the displayed reference code, and a manual description of
+the stage. Review the text before sharing it. Do not send a screenshot of the recovery or results
+screen, and do not export or upload a complete unified-log archive: unrelated processes can place
+private data in the same archive. Contributors can filter this app's bounded events locally as
+described in the troubleshooting guide.
 
 Prefer the application or CLI version, operating system, Mac architecture when relevant, command or
 workflow stage, exit code, and a manually paraphrased error. Replace usernames, paths, IDs, titles,

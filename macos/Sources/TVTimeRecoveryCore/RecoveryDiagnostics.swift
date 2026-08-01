@@ -175,16 +175,40 @@ extension RecoveryAction {
 public enum RecoveryDiagnosticEvent: Equatable, Sendable {
   case milestone(RecoveryDiagnosticOperation, RecoveryDiagnosticMilestone)
   case failure(RecoveryDiagnosticOperation, RecoveryDiagnosticFailure)
+
+  fileprivate var safeLine: String {
+    switch self {
+    case .milestone(let operation, let milestone):
+      "operation=\(operation.rawValue) event=\(milestone.rawValue)"
+    case .failure(let operation, let failure):
+      "operation=\(operation.rawValue) event=failed reason=\(failure.rawValue)"
+    }
+  }
+}
+
+public struct RecoveryTroubleshootingReport: Equatable, Sendable {
+  public let lines: [String]
+
+  public var text: String {
+    (["TV Time Backup Extractor safe diagnostics"] + lines).joined(separator: "\n")
+  }
 }
 
 @MainActor
 public protocol RecoveryDiagnosticsSink: AnyObject {
+  func beginAttempt()
   func record(_ event: RecoveryDiagnosticEvent)
 }
 
 @MainActor
 public final class UnifiedRecoveryDiagnostics: RecoveryDiagnosticsSink {
+  private static let trailLimit = 16
   private let logger: Logger
+  private var recentEvents: [RecoveryDiagnosticEvent] = []
+
+  public var troubleshootingReport: RecoveryTroubleshootingReport {
+    RecoveryTroubleshootingReport(lines: recentEvents.map(\.safeLine))
+  }
 
   public init(
     subsystem: String = "com.amirbrooks.tvtime-backup-extractor",
@@ -193,7 +217,20 @@ public final class UnifiedRecoveryDiagnostics: RecoveryDiagnosticsSink {
     logger = Logger(subsystem: subsystem, category: category)
   }
 
+  public func beginAttempt() {
+    recentEvents.removeAll(keepingCapacity: true)
+  }
+
+  public func beginSourceAttempt() {
+    beginAttempt()
+    record(.milestone(.backupPicker, .backupAccepted))
+  }
+
   public func record(_ event: RecoveryDiagnosticEvent) {
+    recentEvents.append(event)
+    if recentEvents.count > Self.trailLimit {
+      recentEvents.removeFirst(recentEvents.count - Self.trailLimit)
+    }
     switch event {
     case .milestone(let operation, let milestone):
       logger.info(
