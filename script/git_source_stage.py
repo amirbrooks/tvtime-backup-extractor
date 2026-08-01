@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -82,7 +83,7 @@ def _run_windows_tree_acl(root: Path, *arguments: str) -> None:
 
 def _set_windows_tree_access(root: Path, rights: str) -> None:
     sid = _windows_user_sid()
-    _run_windows_tree_acl(root, "/inheritancelevel:r")
+    _run_windows_tree_acl(root, "/inheritance:r")
     _run_windows_tree_acl(root, "/grant:r", f"*{sid}:(OI)(CI){rights}")
 
 
@@ -355,7 +356,10 @@ def make_source_removable(source: Path) -> None:
     if not source.exists() or source.is_symlink():
         return
     if WINDOWS_HOST:
-        _remove_windows_tree_deny(source)
+        # A partially applied lock may not have created the deny ACE yet. The
+        # full-control reset and chmod walk still fail closed if it remains.
+        with suppress(RuntimeError):
+            _remove_windows_tree_deny(source)
         _set_windows_tree_access(source, "F")
     for current, directory_names, file_names in os.walk(source, topdown=False):
         if WINDOWS_HOST:

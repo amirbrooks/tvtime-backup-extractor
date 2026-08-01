@@ -1222,7 +1222,7 @@ class MacReleaseSourceProvenanceTests(unittest.TestCase):
         self.assertEqual(
             commands[0][2:],
             [
-                "/inheritancelevel:r",
+                "/inheritance:r",
                 "/T",
                 "/Q",
             ],
@@ -1253,6 +1253,23 @@ class MacReleaseSourceProvenanceTests(unittest.TestCase):
             make_source_removable(Path("C:/synthetic/source"))
 
         remove_deny.assert_called_once_with(Path("C:/synthetic/source"))
+        set_access.assert_called_once_with(Path("C:/synthetic/source"), "F")
+
+    def test_windows_partial_lock_cleanup_still_attempts_full_control(self) -> None:
+        with (
+            mock.patch.object(git_source_stage, "WINDOWS_HOST", True),
+            mock.patch.object(
+                git_source_stage,
+                "_remove_windows_tree_deny",
+                side_effect=RuntimeError("synthetic missing deny"),
+            ),
+            mock.patch.object(git_source_stage, "_set_windows_tree_access") as set_access,
+            mock.patch.object(git_source_stage.os, "walk", return_value=[]),
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch.object(Path, "is_symlink", return_value=False),
+        ):
+            make_source_removable(Path("C:/synthetic/source"))
+
         set_access.assert_called_once_with(Path("C:/synthetic/source"), "F")
 
     def test_release_builder_reexecutes_and_reverifies_the_committed_source_stage(self) -> None:
