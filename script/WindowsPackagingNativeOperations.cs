@@ -97,12 +97,17 @@ namespace TVTimeWindowsPackaging
             int rootOffset = IntPtr.Size == 8 ? 8 : 4;
             int lengthOffset = rootOffset + IntPtr.Size;
             int nameOffset = lengthOffset + 4;
-            IntPtr buffer = Marshal.AllocHGlobal(nameOffset + encoded.Length);
+            // FILE_RENAME_INFO declares FileName as WCHAR[1]. Retain that
+            // trailing UTF-16 slot in the buffer size even though
+            // FileNameLength excludes a terminator; omitting it makes the
+            // structure too short on Windows and rejects the relative rename.
+            int informationSize = checked(nameOffset + encoded.Length + sizeof(char));
+            IntPtr buffer = Marshal.AllocHGlobal(informationSize);
             bool rootReference = false;
             try
             {
                 destinationRoot.DangerousAddRef(ref rootReference);
-                for (int index = 0; index < nameOffset + encoded.Length; index++)
+                for (int index = 0; index < informationSize; index++)
                     Marshal.WriteByte(buffer, index, 0);
                 Marshal.WriteInt32(buffer, 0, 0);
                 Marshal.WriteIntPtr(
@@ -110,7 +115,7 @@ namespace TVTimeWindowsPackaging
                 Marshal.WriteInt32(buffer, lengthOffset, encoded.Length);
                 Marshal.Copy(encoded, 0, Add(buffer, nameOffset), encoded.Length);
                 if (!SetFileInformationByHandle(
-                    handle, FileRenameInfo, buffer, (uint)(nameOffset + encoded.Length)))
+                    handle, FileRenameInfo, buffer, (uint)informationSize))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
             }
             finally

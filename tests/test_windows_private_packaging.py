@@ -561,6 +561,14 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FileDirectoryFile", capabilities)
         self.assertIn("SetFileInformationByHandle", capabilities)
         self.assertIn("FileRenameInfo", capabilities)
+        self.assertIn(
+            "int informationSize = checked(nameOffset + encoded.Length + sizeof(char));",
+            capabilities,
+        )
+        self.assertIn(
+            "handle, FileRenameInfo, buffer, (uint)informationSize",
+            capabilities,
+        )
         self.assertIn("FileDispositionInfo", capabilities)
         self.assertIn("FileBasicInfo", capabilities)
         self.assertIn("LockTree", capabilities)
