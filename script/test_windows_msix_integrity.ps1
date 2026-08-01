@@ -25,7 +25,7 @@ try {
     } catch {
         $missingPackageRejected = $true
     }
-    if (-not $missingPackageRejected -or Test-Path -LiteralPath $missingPackage) {
+    if (-not $missingPackageRejected -or (Test-Path -LiteralPath $missingPackage)) {
         throw "A missing MSIX path was created while acquiring a read-only pin."
     }
 
@@ -39,7 +39,7 @@ try {
     } catch {
         $missingDirectoryRejected = $true
     }
-    if (-not $missingDirectoryRejected -or Test-Path -LiteralPath $missingDirectory) {
+    if (-not $missingDirectoryRejected -or (Test-Path -LiteralPath $missingDirectory)) {
         throw "A missing MSIX ancestor was created while acquiring a read-only pin."
     }
 

@@ -36,7 +36,7 @@ device, UI, packaging, and source-bound release validation.
 - Fixed intermittent macOS helper launches for source types that do not use the secret channel.
 - Separated the Windows 10 filesystem gate from the Windows 11 encrypted-iOS gate, rejected
   remote, shared, synced, reparse, and cloud-hydrated recovery or Refract sources at the root and
-  every traversed or consumed descendant, required private local NTFS sources, used no-recall
+  every traversed or consumed descendant, required private local NTFS sources, used no-recall regular-file
   Windows opens with pinned ancestor chains, and required the frozen helper to use reviewed x64
   Python.
 - Corrected the Windows NTFS regression harness and included it in the hosted Windows matrix.

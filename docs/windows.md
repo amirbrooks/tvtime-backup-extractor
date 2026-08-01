@@ -38,7 +38,8 @@ Every recovery lane requires a source on private local storage. Known cloud-sync
 nonlocal volumes, symbolic links, reparse points, and Windows cloud-placeholder hydration flags are
 rejected at the selected root and every traversed or consumed descendant. Unrelated Android
 snapshot entries are ignored rather than opened. The source volume must be NTFS so the held-file
-identity checks remain trustworthy, and source handles use the operating system's no-recall option.
+identity checks remain trustworthy. Directory traversal is handle-pinned and rejects reparse or cloud-hydrated
+metadata before enumeration; regular-file source opens use the operating system's no-recall option.
 Copy an owner-controlled source to a private local NTFS folder first; do not weaken or bypass these
 checks.
 

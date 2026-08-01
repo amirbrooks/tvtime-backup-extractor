@@ -904,12 +904,7 @@ def _open_relative_directory(
         desired_access=desired,
         share_access=share_access,
         disposition=FILE_OPEN,
-        options=(
-            FILE_DIRECTORY_FILE
-            | FILE_SYNCHRONOUS_IO_NONALERT
-            | FILE_OPEN_REPARSE_POINT
-            | FILE_OPEN_NO_RECALL
-        ),
+        options=(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT),
         file_attributes=FILE_ATTRIBUTE_NORMAL,
         security_descriptor=None,
     )
@@ -988,12 +983,12 @@ def _open_relative_for_delete(
     directory: bool,
 ) -> int:
     desired_access = DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
-    options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | FILE_OPEN_NO_RECALL
+    options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT
     if directory:
         desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE
         options |= FILE_DIRECTORY_FILE
     else:
-        options |= FILE_NON_DIRECTORY_FILE
+        options |= FILE_NON_DIRECTORY_FILE | FILE_OPEN_NO_RECALL
     handle, _ = _nt_create_relative(
         parent_handle,
         name,

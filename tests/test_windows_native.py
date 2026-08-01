@@ -202,7 +202,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         ):
             tuple(windows_native.iter_directory_entries(91))
 
-    def test_relative_source_opens_are_no_recall_and_reject_cloud_handles(self) -> None:
+    def test_relative_source_file_open_is_no_recall_and_all_handles_reject_cloud(self) -> None:
         directory_information = windows_native.WindowsHandleInformation(
             attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
             identity=(7, 11),
@@ -233,8 +233,12 @@ class WindowsNativeUnitTests(unittest.TestCase):
             )
             self.assertEqual(windows_native.open_relative_regular_file(101, "private.bin"), 102)
 
-        for call in create.call_args_list:
-            self.assertTrue(call.kwargs["options"] & windows_native.FILE_OPEN_NO_RECALL)
+        self.assertFalse(
+            create.call_args_list[0].kwargs["options"] & windows_native.FILE_OPEN_NO_RECALL
+        )
+        self.assertTrue(
+            create.call_args_list[1].kwargs["options"] & windows_native.FILE_OPEN_NO_RECALL
+        )
         self.assertTrue(
             create.call_args_list[0].kwargs["share_access"] & windows_native.FILE_SHARE_DELETE
         )
