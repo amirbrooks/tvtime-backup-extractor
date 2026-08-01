@@ -1444,7 +1444,10 @@ enum RecoveryOutputValidator {
     let candidate = escaped ? String(value.dropFirst(escapePrefix.count)) : value
     let requiresEscape =
       candidate.unicodeScalars.first.map { "=+-@\t\r\n".unicodeScalars.contains($0) } ?? false
-    guard escaped == requiresEscape, isSafeInventoryRelativePath(candidate) else { return nil }
+    // v0.2 inventories stored formula-leading paths verbatim. Their bytes are
+    // bound by the completed recovery marker, so accept that legacy read form
+    // while keeping the explicit escape mandatory when it is present.
+    guard !escaped || requiresEscape, isSafeInventoryRelativePath(candidate) else { return nil }
     return candidate
   }
 

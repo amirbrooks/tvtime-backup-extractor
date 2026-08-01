@@ -21,6 +21,12 @@ internal static class CompileCheckProgram
                 Require(File.Exists(accepted.MarkdownReport));
                 Require(File.Exists(accepted.HtmlReport));
             }
+            var legacyOutput = CreateValidOutput(temporaryRoot, useLegacyInventoryPath: true);
+            using (var accepted = RecoveryOutputValidator.ValidateCompletedOutput(legacyOutput))
+            {
+                Require(File.Exists(accepted.MarkdownReport));
+                Require(File.Exists(accepted.HtmlReport));
+            }
             RequireCancellation(output);
 
             var rejected = 0;
@@ -113,9 +119,13 @@ internal static class CompileCheckProgram
             RecoveryArtifactContract.MaximumGeneratedArtifactBytes);
     }
 
-    private static string CreateValidOutput(string temporaryRoot)
+    private static string CreateValidOutput(
+        string temporaryRoot,
+        bool useLegacyInventoryPath = false)
     {
-        var output = Path.Combine(temporaryRoot, "output");
+        var output = Path.Combine(
+            temporaryRoot,
+            useLegacyInventoryPath ? "legacy-output" : "output");
         var extraction = Path.Combine(output, "TVTime-Extraction");
         Directory.CreateDirectory(Path.Combine(extraction, "metadata"));
         Directory.CreateDirectory(Path.Combine(extraction, "analysis"));
@@ -128,7 +138,8 @@ internal static class CompileCheckProgram
         File.WriteAllBytes(Path.Combine(rawDocuments, "DioCache.db"), rawPayload);
         var inventoryPayload = Encoding.UTF8.GetBytes(
             "file_id,domain,relative_path,declared_size,actual_size,size_match,mtime,sha256\r\n" +
-            $"{new string('0', 40)},AppDomain-com.tozelabs.tvshowtime,./=Synthetic/DioCache.db," +
+            $"{new string('0', 40)},AppDomain-com.tozelabs.tvshowtime," +
+            $"{(useLegacyInventoryPath ? "=Synthetic/DioCache.db" : "./=Synthetic/DioCache.db")}," +
             $"{rawPayload.Length},{rawPayload.Length},True,,{rawHash}\r\n");
 
         var bindings = new List<Dictionary<string, object>>();

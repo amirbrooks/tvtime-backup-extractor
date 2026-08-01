@@ -1054,6 +1054,34 @@ final class RecoveryOutputValidatorTests {
   }
 
   @Test
+  func testAcceptsSealedV020FormulaLeadingInventoryPath() throws {
+    let summary = TestFixtures.summary()
+    let root = try trackedDirectory()
+    try TestFixtures.makePrivateOutput(
+      at: root,
+      summary: summary,
+      formulaLeadingInventoryPathPrefix: "="
+    )
+    let inventoryURL = root.appendingPathComponent(
+      "TVTime-Extraction/metadata/inventory.csv"
+    )
+    let escapedInventory = try #require(
+      String(data: Data(contentsOf: inventoryURL), encoding: .utf8)
+    )
+    try rebindInventory(
+      Data(
+        escapedInventory.replacingOccurrences(
+          of: "./=Synthetic-0001.bin",
+          with: "=Synthetic-0001.bin"
+        ).utf8
+      ),
+      beneath: root
+    )
+
+    _ = try RecoveryOutputValidator.validate(summary, beneath: root)
+  }
+
+  @Test
   func testRequiresExactSizeDiscrepanciesDerivedFromInventory() throws {
     let extraction = TestFixtures.extraction(
       selectedDeclaredBytes: 12_346,

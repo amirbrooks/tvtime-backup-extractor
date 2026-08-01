@@ -141,7 +141,10 @@ internal static partial class RecoveryOutputValidator
         var escaped = value.StartsWith(escapePrefix, StringComparison.Ordinal);
         var candidate = escaped ? value[escapePrefix.Length..] : value;
         var requiresEscape = candidate.Length > 0 && "=+-@\t\r\n".Contains(candidate[0]);
-        if (escaped != requiresEscape || string.IsNullOrEmpty(candidate) ||
+        // v0.2 inventories stored formula-leading paths verbatim. Their bytes are
+        // bound by the completed recovery marker, so accept that legacy read form
+        // while keeping the explicit escape mandatory when it is present.
+        if ((escaped && !requiresEscape) || string.IsNullOrEmpty(candidate) ||
             candidate.Contains('\\') || candidate.StartsWith('/') || candidate.EndsWith('/') ||
             candidate.Split('/').Any(part => !IsPortableComponent(part)))
             return null;
