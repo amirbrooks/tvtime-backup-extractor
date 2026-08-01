@@ -19,6 +19,7 @@ from tvtime_extractor import windows_native
 from tvtime_extractor.analyze import readonly_sqlite
 from tvtime_extractor.errors import UnsafePathError
 from tvtime_extractor.safety import (
+    _require_windows_visible_directory_identity,
     _windows_close_handle,
     _windows_create_private_directory_relative,
     _windows_open_locked_directory,
@@ -43,6 +44,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         attributes: int = windows_native.FILE_ATTRIBUTE_NORMAL,
         byte_size: int = 0,
         last_write_time: int = 19,
+        last_access_time: int = 17,
         short_name: str | None = None,
         continued: bool = False,
     ) -> bytes:
@@ -52,6 +54,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         header.file_name_length = len(encoded_name)
         header.end_of_file = byte_size
         header.last_write_time = last_write_time
+        header.last_access_time = last_access_time
         header.file_id = file_id
         if short_name is not None:
             encoded_short_name = short_name.encode("utf-16-le")
@@ -92,6 +95,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
             attributes=windows_native.FILE_ATTRIBUTE_RECALL_ON_OPEN,
             byte_size=37,
             last_write_time=29,
+            last_access_time=23,
         )
 
         entries = windows_native._directory_entries_from_buffer(
@@ -107,6 +111,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         self.assertEqual(entries[1].identity, (7, (1 << 64) - 1))
         self.assertEqual(entries[1].byte_size, 37)
         self.assertEqual(entries[1].last_write_time, 29)
+        self.assertEqual(entries[1].last_access_time, 23)
         self.assertTrue(entries[1].is_cloud_hydrated)
 
     def test_directory_record_parser_rejects_malformed_name_and_offset(self) -> None:
@@ -135,6 +140,59 @@ class WindowsNativeUnitTests(unittest.TestCase):
                 bytes(unsafe_offset) + b"x\x00",
                 volume_serial_number=7,
             )
+
+    def test_timestamp_restore_uses_pinned_handle_and_exact_filetimes(self) -> None:
+        calls: list[tuple[int, int, int]] = []
+
+        class Setter:
+            def __init__(self) -> None:
+                self.argtypes: object = None
+                self.restype: object = None
+
+            def __call__(
+                self,
+                handle: object,
+                creation_time: object,
+                access_time: object,
+                write_time: object,
+            ) -> int:
+                self_handle = getattr(handle, "value", handle)
+                access = access_time._obj
+                write = write_time._obj
+                assert creation_time is None
+                calls.append(
+                    (
+                        int(self_handle),
+                        (int(access.high) << 32) | int(access.low),
+                        (int(write.high) << 32) | int(write.low),
+                    )
+                )
+                return 1
+
+        setter = Setter()
+        with (
+            mock.patch.object(windows_native, "_require_windows"),
+            mock.patch.object(
+                windows_native,
+                "_dll",
+                return_value=types.SimpleNamespace(SetFileTime=setter),
+            ),
+        ):
+            windows_native.restore_handle_times(
+                91,
+                access_time_filetime=0,
+                write_time_filetime=windows_native.WINDOWS_FILETIME_UNIX_EPOCH - 1,
+            )
+
+        epoch = windows_native.WINDOWS_FILETIME_UNIX_EPOCH
+        self.assertEqual(calls, [(91, 0, epoch - 1)])
+
+    def test_timestamp_restore_rejects_out_of_range_filetime(self) -> None:
+        with self.assertRaisesRegex(
+            windows_native.WindowsNativeError,
+            "supported range",
+        ):
+            windows_native._filetime_from_ticks(-1)
 
     def test_held_directory_enumeration_restarts_then_resumes(self) -> None:
         payload = self._directory_record("private.bin", file_id=12, byte_size=17)
@@ -1177,7 +1235,10 @@ class WindowsNativeNtfsTests(unittest.TestCase):
                     database = root / "synthetic.sqlite"
                     database_descriptor = windows_create_private_staging_descriptor(database)
                     os.close(database_descriptor)
-                    with sqlite3.connect(database) as connection:
+                    with (
+                        contextlib.closing(sqlite3.connect(database)) as connection,
+                        connection,
+                    ):
                         connection.execute("PRAGMA journal_mode=OFF")
                         connection.execute("CREATE TABLE synthetic (value TEXT NOT NULL)")
                         connection.execute("INSERT INTO synthetic VALUES ('private')")
@@ -1243,14 +1304,11 @@ class WindowsNativeNtfsTests(unittest.TestCase):
                 )
                 winner_handle = next(handle for label, handle in outcomes if label == "created")
                 fresh = parent / "synthetic-fresh-root"
-                visible_handle, visible_identity = _windows_open_locked_directory(fresh)
-                try:
-                    self.assertEqual(
-                        windows_native.handle_information(winner_handle).identity,
-                        visible_identity,
-                    )
-                finally:
-                    _windows_close_handle(visible_handle)
+                winner_identity = windows_native.handle_information(winner_handle).identity
+                _require_windows_visible_directory_identity(
+                    fresh,
+                    expected_identity=winner_identity,
+                )
                 windows_native.validate_private_acl(winner_handle)
                 with self.assertRaises(OSError):
                     fresh.rmdir()

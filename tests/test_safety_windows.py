@@ -27,6 +27,7 @@ from tvtime_extractor.safety import (
     _WINDOWS_FILE_SHARE_DELETE,
     _WINDOWS_FILE_SHARE_READ,
     _WINDOWS_FILE_SHARE_WRITE,
+    _WINDOWS_FILE_WRITE_ATTRIBUTES,
     _WINDOWS_GENERIC_READ,
     _WINDOWS_READ_CONTROL,
     _WINDOWS_WRITE_DAC,
@@ -66,6 +67,8 @@ from tvtime_extractor.safety import (
     require_encrypted_ios_source_platform_support,
     secure_directory,
     secure_file,
+    windows_restore_bound_directory_times,
+    windows_timestamp_restore_directory,
 )
 from tvtime_extractor.windows_native import (
     WindowsDirectoryEntryInformation,
@@ -78,6 +81,11 @@ from tvtime_extractor.windows_native import (
 
 class WindowsDirectoryHandleContractTests(unittest.TestCase):
     @staticmethod
+    def _synthetic_absolute_path(*parts: str) -> Path:
+        anchor = "C:/" if os.name == "nt" else "/"
+        return Path(anchor, *parts)
+
+    @staticmethod
     def _native_entry(
         name: str,
         *,
@@ -85,6 +93,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         directory: bool = False,
         attributes: int = 0,
         byte_size: int = 0,
+        last_access_time: int = 116_444_736_000_000_000,
         short_name: str | None = None,
     ) -> WindowsDirectoryEntryInformation:
         if directory:
@@ -95,13 +104,18 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             identity=identity,
             byte_size=byte_size,
             last_write_time=116_444_736_000_000_000,
+            last_access_time=last_access_time,
             short_name=short_name,
         )
 
     def test_windows_relative_parent_pins_and_identity_binds_every_component(self) -> None:
         first = self._native_entry("Synthetic", identity=(7, 11), directory=True)
         second = self._native_entry("LocalRoot", identity=(7, 12), directory=True)
-        final = self._native_entry("private.bin", identity=(7, 13), byte_size=9)
+        final = self._native_entry(
+            "private.bin",
+            identity=(7, 13),
+            byte_size=9,
+        )
         entries_by_handle = {91: (first,), 101: (second,), 102: (final,)}
         closed: list[int] = []
 
@@ -160,7 +174,11 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
     def test_windows_relative_parent_attempts_every_close_and_preserves_body_failure(self) -> None:
         first = self._native_entry("Synthetic", identity=(7, 11), directory=True)
         second = self._native_entry("LocalRoot", identity=(7, 12), directory=True)
-        final = self._native_entry("private.bin", identity=(7, 13), byte_size=9)
+        final = self._native_entry(
+            "private.bin",
+            identity=(7, 13),
+            byte_size=9,
+        )
         entries_by_handle = {91: (first,), 101: (second,), 102: (final,)}
         closed: list[int] = []
 
@@ -197,7 +215,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(closed, [102, 101])
 
     def test_absolute_directory_pin_holds_root_and_final_through_the_body(self) -> None:
-        target = Path("/Synthetic/Private")
+        target = self._synthetic_absolute_path("Synthetic", "Private")
         final = self._native_entry("Private", identity=(7, 13), directory=True)
         parent_binding = mock.MagicMock()
         parent_binding.__enter__.return_value = (101, final)
@@ -240,7 +258,12 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
 
     def test_windows_path_metadata_preserves_enumerated_identity(self) -> None:
         target = Path("/Synthetic/private.bin")
-        final = self._native_entry("private.bin", identity=(7, 13), byte_size=9)
+        final = self._native_entry(
+            "private.bin",
+            identity=(7, 13),
+            byte_size=9,
+            last_access_time=116_444_736_000_000_005,
+        )
         binding = mock.MagicMock()
         binding.__enter__.return_value = (91, final)
 
@@ -252,6 +275,15 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
 
         self.assertEqual((metadata.st_dev, metadata.st_ino), (7, 13))
         self.assertEqual(metadata.st_size, 9)
+        self.assertEqual(metadata.st_atime_ns, 500)
+        self.assertEqual(
+            metadata.windows_last_access_time,
+            116_444_736_000_000_005,
+        )
+        self.assertEqual(
+            metadata.windows_last_write_time,
+            116_444_736_000_000_000,
+        )
 
     def test_windows_path_metadata_rejects_enumeration_only_recall_attribute(self) -> None:
         cloud_entry = self._native_entry(
@@ -290,7 +322,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         validate.assert_called_once_with(expected)
 
     def test_safe_directory_classifier_never_uses_following_direntry_queries(self) -> None:
-        root = Path("/Synthetic/LocalRoot")
+        root = self._synthetic_absolute_path("Synthetic", "LocalRoot")
         entry = self._native_entry("Nested", identity=(7, 12), directory=True)
         binding = mock.MagicMock()
         binding.__enter__.return_value = 91
@@ -476,6 +508,10 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         try:
             with (
                 mock.patch(
+                    "tvtime_extractor.safety.no_link_absolute_path",
+                    return_value=child,
+                ),
+                mock.patch(
                     "tvtime_extractor.safety._windows_open_locked_directory",
                     return_value=(101, (7, 13)),
                 ),
@@ -530,7 +566,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "real Win32 temporary-capability regression")
     def test_private_temporary_directory_releases_its_capability_before_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = secure_directory(Path(temporary))
             with anchored_existing_extraction_root(root):
                 with private_temporary_directory(
                     parent=root,
@@ -539,6 +575,47 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                     staged_path = staging
                     (staging / "synthetic.sqlite").write_bytes(b"synthetic")
                 self.assertFalse(staged_path.exists())
+
+    def test_unanchored_private_temporary_directory_binds_children_to_its_handle(self) -> None:
+        parent = Path("C:/Synthetic/Private")
+        expected = parent / ".tvtime-sqlite-fixed"
+        parent_binding = mock.MagicMock()
+        parent_binding.__enter__.return_value = 90
+
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety.secure_directory", return_value=parent),
+            mock.patch("tvtime_extractor.safety.secrets.token_hex", return_value="fixed"),
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_directory_handle",
+                return_value=parent_binding,
+            ),
+            mock.patch("tvtime_extractor.safety._windows_native.require_private_ntfs_volume"),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.create_fresh_directory",
+                return_value=91,
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                return_value=(7, 11),
+            ),
+            mock.patch("tvtime_extractor.safety._windows_delete_private_tree_handle") as delete,
+            private_temporary_directory(
+                parent=parent,
+                prefix=".tvtime-sqlite-",
+            ) as staging,
+        ):
+            self.assertEqual(staging, expected)
+            state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+            self.assertIsNotNone(state)
+            assert state is not None
+            self.assertEqual(
+                (state.visible_root, state.handle, state.identity),
+                (expected, 91, (7, 11)),
+            )
+
+        self.assertIsNone(_WINDOWS_BOUND_OUTPUT_STATE.get())
+        delete.assert_called_once_with(expected, handle=91, expected_identity=(7, 11))
 
     def test_windows_ios_gate_requires_reviewed_runtime_before_password(self) -> None:
         with (
@@ -685,6 +762,74 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertFalse(desired_access & _WINDOWS_FILE_LIST_DIRECTORY)
         self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertFalse(desired_access & _WINDOWS_DELETE)
+
+    def test_timestamp_restore_handle_adds_only_attribute_write_access(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_timestamp_restore=True,
+            )
+            _windows_close_handle(handle)
+
+        desired_access = int(kernel32.create_calls[0][1])
+        self.assertTrue(desired_access & _WINDOWS_FILE_WRITE_ATTRIBUTES)
+        self.assertTrue(desired_access & _WINDOWS_FILE_LIST_DIRECTORY)
+        self.assertFalse(desired_access & _WINDOWS_DELETE)
+        self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
+        self.assertFalse(desired_access & _WINDOWS_WRITE_DAC)
+
+    def test_bound_timestamp_restore_keeps_the_same_directory_identity(self) -> None:
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                side_effect=((7, 11), (7, 11)),
+            ),
+            mock.patch("tvtime_extractor.safety._windows_native.restore_handle_times") as restore,
+        ):
+            windows_restore_bound_directory_times(
+                91,
+                access_time_filetime=0,
+                write_time_filetime=700,
+            )
+
+        restore.assert_called_once_with(
+            91,
+            access_time_filetime=0,
+            write_time_filetime=700,
+        )
+
+    def test_timestamp_restore_borrows_an_exact_bound_root(self) -> None:
+        root = Path("C:/Synthetic/Private")
+        state = _WindowsBoundOutputState(
+            handle=91,
+            identity=(7, 11),
+            visible_root=root,
+        )
+        token = _WINDOWS_BOUND_OUTPUT_STATE.set(state)
+        try:
+            with (
+                mock.patch(
+                    "tvtime_extractor.safety._windows_directory_identity",
+                    return_value=(7, 11),
+                ),
+                mock.patch(
+                    "tvtime_extractor.safety._require_windows_visible_directory_identity",
+                ) as visible,
+                mock.patch(
+                    "tvtime_extractor.safety._windows_open_locked_directory",
+                ) as opened,
+                windows_timestamp_restore_directory(root) as binding,
+            ):
+                self.assertEqual(binding, (91, (7, 11)))
+        finally:
+            _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+
+        opened.assert_not_called()
+        visible.assert_called_once_with(root, expected_identity=(7, 11))
 
     def test_owner_rebind_handle_adds_only_owner_write_access(self) -> None:
         kernel32 = self._Kernel32()

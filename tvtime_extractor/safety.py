@@ -70,6 +70,7 @@ _WINDOWS_READ_CONTROL = 0x00020000
 _WINDOWS_WRITE_DAC = 0x00040000
 _WINDOWS_WRITE_OWNER = 0x00080000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_WRITE_ATTRIBUTES = 0x00000100
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_FILE_SHARE_DELETE = 0x00000004
@@ -198,6 +199,9 @@ class _WindowsEnumeratedMetadata:
     st_dev: int
     st_ino: int
     st_mtime_ns: int
+    st_atime_ns: int = 0
+    windows_last_write_time: int = 0
+    windows_last_access_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -700,15 +704,23 @@ def _windows_enumerated_metadata(
     entry: _windows_native.WindowsDirectoryEntryInformation,
 ) -> _WindowsEnumeratedMetadata:
     mode = stat.S_IFDIR if entry.is_directory else stat.S_IFREG
-    modified_ns = max(0, (entry.last_write_time - 116_444_736_000_000_000) * 100)
     return _WindowsEnumeratedMetadata(
         st_mode=mode,
         st_size=entry.byte_size,
         st_file_attributes=entry.attributes,
         st_dev=entry.identity[0],
         st_ino=entry.identity[1],
-        st_mtime_ns=modified_ns,
+        st_mtime_ns=_windows_filetime_to_unix_ns(entry.last_write_time),
+        st_atime_ns=_windows_filetime_to_unix_ns(entry.last_access_time),
+        windows_last_write_time=entry.last_write_time,
+        windows_last_access_time=entry.last_access_time,
     )
+
+
+def _windows_filetime_to_unix_ns(value: int) -> int:
+    """Convert one unsigned 100-nanosecond Windows FILETIME to Unix nanoseconds."""
+
+    return max(0, (value - 116_444_736_000_000_000) * 100)
 
 
 def _windows_enumerated_child(
@@ -929,10 +941,10 @@ def recovery_path_metadata(path: Path) -> os.stat_result | _WindowsEnumeratedMet
                 st_file_attributes=information.attributes,
                 st_dev=information.identity[0],
                 st_ino=information.identity[1],
-                st_mtime_ns=max(
-                    0,
-                    (information.last_write_time - 116_444_736_000_000_000) * 100,
-                ),
+                st_mtime_ns=_windows_filetime_to_unix_ns(information.last_write_time),
+                st_atime_ns=_windows_filetime_to_unix_ns(information.last_access_time),
+                windows_last_write_time=information.last_write_time,
+                windows_last_access_time=information.last_access_time,
             )
     return _windows_enumerated_path_metadata(candidate)
 
@@ -1173,12 +1185,15 @@ def _windows_create_file_directory_handle(
     allow_child_creation: bool = False,
     allow_acl_repair: bool = False,
     allow_owner_rebind: bool = False,
+    allow_timestamp_restore: bool = False,
     share_delete: bool = False,
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
 
-    if allow_acl_repair and (allow_rename or allow_child_creation):
-        raise ValueError("Windows ACL repair cannot include rename or child-creation access.")
+    if allow_acl_repair and (allow_rename or allow_child_creation or allow_timestamp_restore):
+        raise ValueError(
+            "Windows ACL repair cannot include rename, child-creation, or timestamp access."
+        )
     if allow_owner_rebind and not allow_acl_repair:
         raise ValueError("A Windows owner rebind requires the ACL repair capability.")
 
@@ -1208,6 +1223,8 @@ def _windows_create_file_directory_handle(
             desired_access |= _WINDOWS_DELETE
         if allow_child_creation:
             desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
+        if allow_timestamp_restore:
+            desired_access |= _WINDOWS_FILE_WRITE_ATTRIBUTES
         if allow_acl_repair:
             # Owner rebinding is a separate retry after owner inspection.
             desired_access |= _WINDOWS_WRITE_DAC
@@ -1836,6 +1853,7 @@ def _windows_open_locked_directory(
     allow_child_creation: bool = False,
     allow_acl_repair: bool = False,
     allow_owner_rebind: bool = False,
+    allow_timestamp_restore: bool = False,
     share_delete: bool = False,
 ) -> tuple[int, tuple[int, int]]:
     handle = _windows_create_file_directory_handle(
@@ -1844,6 +1862,7 @@ def _windows_open_locked_directory(
         allow_child_creation=allow_child_creation,
         allow_acl_repair=allow_acl_repair,
         allow_owner_rebind=allow_owner_rebind,
+        allow_timestamp_restore=allow_timestamp_restore,
         share_delete=share_delete,
     )
     try:
@@ -2161,6 +2180,51 @@ def bound_directory_free_bytes(path: Path, *, handle: int) -> int:
         return int(shutil.disk_usage(path).free)
     filesystem = os.fstatvfs(handle)
     return int(filesystem.f_bavail) * int(filesystem.f_frsize)
+
+
+def windows_restore_bound_directory_times(
+    handle: int,
+    *,
+    access_time_filetime: int,
+    write_time_filetime: int,
+) -> None:
+    """Restore timestamps without reopening an identity-pinned Windows directory."""
+
+    identity = _windows_directory_identity(handle)
+    try:
+        _windows_native.restore_handle_times(
+            handle,
+            access_time_filetime=access_time_filetime,
+            write_time_filetime=write_time_filetime,
+        )
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("Windows directory timestamps could not be restored safely.") from exc
+    if _windows_directory_identity(handle) != identity:
+        raise UnsafePathError("A Windows directory identity changed during timestamp restoration.")
+
+
+@contextmanager
+def windows_timestamp_restore_directory(
+    path: Path,
+) -> Iterator[tuple[int, tuple[int, int]]]:
+    """Borrow an exact writable root binding, or open one timestamp capability."""
+
+    candidate = no_link_absolute_path(path)
+    binding = _windows_bound_directory_binding(candidate)
+    if binding is not None:
+        _visible, handle, identity = binding
+        yield handle, identity
+        return
+
+    handle = -1
+    try:
+        handle, identity = _windows_open_locked_directory(
+            candidate,
+            allow_timestamp_restore=True,
+        )
+        yield handle, identity
+    finally:
+        _windows_close_handles((handle,))
 
 
 def require_private_local_destination(path: Path) -> Path:
@@ -3126,10 +3190,10 @@ def require_private_path(
                     st_file_attributes=information.attributes,
                     st_dev=information.identity[0],
                     st_ino=information.identity[1],
-                    st_mtime_ns=max(
-                        0,
-                        (information.last_write_time - 116_444_736_000_000_000) * 100,
-                    ),
+                    st_mtime_ns=_windows_filetime_to_unix_ns(information.last_write_time),
+                    st_atime_ns=_windows_filetime_to_unix_ns(information.last_access_time),
+                    windows_last_write_time=information.last_write_time,
+                    windows_last_access_time=information.last_access_time,
                 )
         if expected_type == stat.S_IFREG:
             with _windows_locked_regular_file_descriptor(path) as (descriptor, _native):
@@ -3254,6 +3318,44 @@ def secure_directory(path: Path) -> Path:
 
 
 @contextmanager
+def _windows_scoped_private_temporary_root(
+    directory: Path,
+    *,
+    handle: int,
+    identity: tuple[int, int],
+) -> Iterator[None]:
+    """Bind an unanchored temporary root so child I/O stays handle-relative."""
+
+    state = _WindowsBoundOutputState(
+        handle=handle,
+        identity=identity,
+        visible_root=directory,
+    )
+    token = _WINDOWS_BOUND_OUTPUT_STATE.set(state)
+    try:
+        yield
+    finally:
+        cleanup_error: BaseException | None = None
+        try:
+            _windows_close_bound_descendant_directories(state)
+        except BaseException as exc:
+            cleanup_error = exc
+        finally:
+            _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+        try:
+            _windows_delete_private_tree_handle(
+                directory,
+                handle=handle,
+                expected_identity=identity,
+            )
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
+
+
+@contextmanager
 def private_temporary_directory(
     *,
     parent: Path,
@@ -3299,11 +3401,20 @@ def private_temporary_directory(
         if directory is None or expected_identity is None:
             raise UnsafePathError("A private temporary directory could not be allocated safely.")
         try:
-            yield directory
+            if state is not None:
+                yield directory
+            else:
+                with _windows_scoped_private_temporary_root(
+                    directory,
+                    handle=local_handle,
+                    identity=expected_identity,
+                ):
+                    local_handle = -1
+                    yield directory
         finally:
             if state is not None:
                 windows_delete_bound_private_tree(directory)
-            else:
+            elif local_handle >= 0:
                 cleanup_handle = local_handle
                 local_handle = -1
                 _windows_delete_private_tree_handle(

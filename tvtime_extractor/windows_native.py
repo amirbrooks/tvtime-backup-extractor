@@ -44,6 +44,7 @@ class WindowsHandleInformation:
     identity: tuple[int, int]
     byte_size: int
     last_write_time: int
+    last_access_time: int = 0
 
     @property
     def is_directory(self) -> bool:
@@ -65,6 +66,7 @@ class WindowsDirectoryEntryInformation:
     identity: tuple[int, int]
     byte_size: int
     last_write_time: int
+    last_access_time: int = 0
     short_name: str | None = None
 
     @property
@@ -81,7 +83,10 @@ class WindowsDirectoryEntryInformation:
 
 
 class _FILETIME(ctypes.Structure):
-    _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+    # FILETIME is two exact-width Win32 DWORD values.  Keep the layout
+    # contract-testable on non-Windows hosts where wintypes.DWORD can follow
+    # the wider host C ``unsigned long`` representation.
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
 
 
 class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
@@ -210,6 +215,7 @@ FILE_FLAG_WRITE_THROUGH = 0x80000000
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 FILE_SHARE_DELETE = 0x00000004
+WINDOWS_FILETIME_UNIX_EPOCH = 116_444_736_000_000_000
 
 FILE_READ_DATA = 0x00000001
 FILE_LIST_DIRECTORY = 0x00000001
@@ -365,7 +371,50 @@ def handle_information(handle: int) -> WindowsHandleInformation:
         last_write_time=(
             (int(information.last_write_time.high) << 32) | int(information.last_write_time.low)
         ),
+        last_access_time=(
+            (int(information.last_access_time.high) << 32) | int(information.last_access_time.low)
+        ),
     )
+
+
+def _filetime_from_ticks(value: int) -> _FILETIME:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > (1 << 64) - 1:
+        raise WindowsNativeError("A Windows timestamp exceeded the supported range.")
+    return _FILETIME(
+        low=value & 0xFFFFFFFF,
+        high=(value >> 32) & 0xFFFFFFFF,
+    )
+
+
+def restore_handle_times(
+    handle: int,
+    *,
+    access_time_filetime: int,
+    write_time_filetime: int,
+) -> None:
+    """Restore exact timestamps through an already-pinned Windows handle."""
+
+    _require_windows()
+    if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
+        raise WindowsNativeError("A Windows capability handle was invalid.")
+    access_time = _filetime_from_ticks(access_time_filetime)
+    write_time = _filetime_from_ticks(write_time_filetime)
+    kernel32 = _dll("kernel32")
+    function = kernel32.SetFileTime
+    function.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+    ]
+    function.restype = wintypes.BOOL
+    if not function(
+        wintypes.HANDLE(handle),
+        None,
+        ctypes.byref(access_time),
+        ctypes.byref(write_time),
+    ):
+        raise _last_error("Windows timestamps could not be restored safely.")
 
 
 def _directory_entries_from_buffer(
@@ -412,7 +461,8 @@ def _directory_entries_from_buffer(
                 raise WindowsNativeError("Windows directory metadata had an unsafe short name.")
         byte_size = int(header.end_of_file)
         last_write_time = int(header.last_write_time)
-        if byte_size < 0 or last_write_time < 0:
+        last_access_time = int(header.last_access_time)
+        if byte_size < 0 or last_write_time < 0 or last_access_time < 0:
             raise WindowsNativeError("Windows directory metadata had unsafe file values.")
         entries.append(
             WindowsDirectoryEntryInformation(
@@ -424,6 +474,7 @@ def _directory_entries_from_buffer(
                 ),
                 byte_size=byte_size,
                 last_write_time=last_write_time,
+                last_access_time=last_access_time,
                 short_name=short_name,
             )
         )
