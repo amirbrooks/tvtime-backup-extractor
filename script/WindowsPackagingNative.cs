@@ -33,9 +33,9 @@ namespace TVTimeWindowsPackaging
         private const uint FileFlagBackupSemantics = 0x02000000;
         private const uint ObjCaseInsensitive = 0x00000040;
         private const int FileBasicInfo = 0;
-        private const int FileRenameInfo = 3;
         private const int FileDispositionInfo = 4;
         private const int FileIdInfo = 18;
+        private const int NtFileRenameInformation = 10;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct UnicodeString
@@ -132,6 +132,14 @@ namespace TVTimeWindowsPackaging
         [DllImport("ntdll.dll")]
         private static extern uint RtlNtStatusToDosError(int status);
 
+        [DllImport("ntdll.dll")]
+        private static extern int NtSetInformationFile(
+            SafeFileHandle fileHandle,
+            out IoStatusBlock ioStatusBlock,
+            IntPtr fileInformation,
+            uint length,
+            int fileInformationClass);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetFileInformationByHandle(
@@ -152,14 +160,6 @@ namespace TVTimeWindowsPackaging
             SafeFileHandle file,
             int informationClass,
             out FileBasicInformation information,
-            uint informationSize);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetFileInformationByHandle(
-            SafeFileHandle file,
-            int informationClass,
-            IntPtr information,
             uint informationSize);
 
         [DllImport("kernel32.dll", SetLastError = true)]

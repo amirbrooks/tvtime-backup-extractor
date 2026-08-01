@@ -115,9 +115,15 @@ namespace TVTimeWindowsPackaging
                     buffer, rootOffset, destinationRoot.DangerousGetHandle());
                 Marshal.WriteInt32(buffer, lengthOffset, encoded.Length);
                 Marshal.Copy(encoded, 0, Add(buffer, nameOffset), encoded.Length);
-                if (!SetFileInformationByHandle(
-                    handle, FileRenameInfo, buffer, (uint)informationSize))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                IoStatusBlock statusBlock;
+                int status = NtSetInformationFile(
+                    handle,
+                    out statusBlock,
+                    buffer,
+                    (uint)informationSize,
+                    NtFileRenameInformation);
+                if (status < 0)
+                    throw new Win32Exception((int)RtlNtStatusToDosError(status));
             }
             finally
             {

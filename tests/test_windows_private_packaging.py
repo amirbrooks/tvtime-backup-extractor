@@ -559,8 +559,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("owned.RestoreHandle(root)", capabilities)
         self.assertIn("FileCreate", capabilities)
         self.assertIn("FileDirectoryFile", capabilities)
-        self.assertIn("SetFileInformationByHandle", capabilities)
-        self.assertIn("FileRenameInfo", capabilities)
+        self.assertIn("NtSetInformationFile", capabilities)
+        self.assertIn("NtFileRenameInformation", capabilities)
         self.assertIn(
             "private struct FileRenameInformation",
             capabilities,
@@ -571,6 +571,10 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn(
             "encoded.Length + sizeof(char));",
+            capabilities,
+        )
+        self.assertIn(
+            "if (status < 0)",
             capabilities,
         )
         self.assertIn("FileDispositionInfo", capabilities)
