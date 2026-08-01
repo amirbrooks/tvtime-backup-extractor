@@ -226,13 +226,13 @@ struct RecoveryFailureRecoveryPlanTests {
   }
 
   @Test
-  func testReferenceCodeAllowsOnlyBoundedLowercaseProtocolIdentifiers() {
+  func testReferenceCodeUsesOnlyTheFixedDiagnosticAllowList() {
     let safeUnknownFailure = RecoveryFailure(
       code: "future_failure_2",
       message: "Hidden for unknown failures.",
       retryable: true
     )
-    expectEqual(safeUnknownFailure.userVisibleReferenceCode, "future_failure_2")
+    expectEqual(safeUnknownFailure.userVisibleReferenceCode, "unrecognized_failure")
 
     let rejectedCodes = [
       "", "UPPERCASE", "path/failure", "failure-name", String(repeating: "a", count: 65),

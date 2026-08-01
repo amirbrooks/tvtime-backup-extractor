@@ -28,6 +28,8 @@ evidence, release gates, and remaining native proof.
   published v0.2.0 encrypted-iOS-backup workflow.
 - Added a copyable, bounded Safe Diagnostics trail to the macOS failure screen. It reports only
   fixed operation, milestone, and failure codes and does not include raw errors or private values.
+  Displayed error references use the same exact allowlist; unknown helper values fail closed as
+  `unrecognized_failure`.
 - Added privacy-safe Android capability probing and explicitly acknowledged legacy-device capture.
   Modern release apps, disabled backup policy, multiple devices, and unauthorized devices fail
   closed.
