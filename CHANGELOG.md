@@ -2,7 +2,11 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
-## Unreleased private cross-platform candidate
+## Unreleased private cross-platform candidate — 0.3.0 alpha
+
+This is experimental Android/Windows capability work. It remains private and
+unreleased: successful synthetic checks do not replace the required Windows
+device, UI, packaging, and source-bound release validation.
 
 - Added native source-neutral recovery for legacy Android backup containers, preserved Android
   database snapshots, and official TV Time export ZIP/CSV files. These lanes reuse the normalized
@@ -12,7 +16,8 @@ All notable changes are documented here. The project follows semantic versioning
   artifact validation, and private self-signed MSIX build/install scripts.
 - Added encrypted iOS backup selection to the private WinUI app on Windows 11 x64. Source traversal
   uses held relative Win32 handles, and recovery consumes a preflight receipt before the password is
-  sent to a separate helper process. Merge still requires synthetic Windows UI and recovery proof.
+  sent to a separate helper process. Release readiness still requires synthetic Windows UI and
+  recovery proof.
 - Bound the complete Windows App SDK dependency graph with exact NuGet ranges and content hashes,
   added a real-reference cross-host C# compile check, and added validated Markdown, offline HTML,
   and private-folder result actions without persisting source or output paths.
@@ -25,8 +30,24 @@ All notable changes are documented here. The project follows semantic versioning
   records are no longer present in `DioCache.db`.
 - Added sealed owner-only TV Time Liberator ZIP exports with separate confirmed-state and explicitly
   estimated-progress variants generated offline.
+- Centralized formula-leading CSV neutralization and exact report/Refract reversal, including line
+  feeds and Suite TV exports; kept unsupported ZIP encryption distinct from an incorrect password;
+  and made acquisition failure messages source-neutral.
+- Fixed intermittent macOS helper launches for source types that do not use the secret channel.
+- Separated the Windows 10 filesystem gate from the Windows 11 encrypted-iOS gate, rejected
+  remote, shared, synced, reparse, and cloud-hydrated recovery or Refract sources at the root and
+  every traversed or consumed descendant, required private local NTFS sources, used no-recall regular-file
+  Windows opens with pinned ancestor chains, and required the frozen helper to use reviewed x64
+  Python.
+- Corrected the Windows NTFS regression harness and included it in the hosted Windows matrix.
+- Bound private Windows packaging to retained directory and no-follow MSIX file capabilities, exact
+  restored dependency membership, immutable tree manifests, and full unsigned/package block-map
+  digests through installation so namespace replacement or post-scan payload changes fail closed.
+  MSBuild producer-handle provenance remains an explicit Windows release-readiness gate.
+- Added a source-level Windows no-network/no-AI/no-WebView contract while keeping final transitive
+  MSIX membership as an explicit Windows release-readiness proof requirement.
 - Added an offline, owner-only Refract series converter using recovered tables. Import acceptance
-  still requires a synthetic Windows UI smoke test before merge.
+  still requires a synthetic Windows UI smoke test before it is considered release-ready.
 - Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
   in normalized tables.
 - This candidate is local and private. It has not been tagged, uploaded, published, or represented

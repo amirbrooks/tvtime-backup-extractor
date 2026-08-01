@@ -216,7 +216,8 @@ enum TestFixtures {
   static func makePrivateOutput(
     at root: URL,
     summary: RecoverySummary = summary(),
-    markerOverrides: [String: Any] = [:]
+    markerOverrides: [String: Any] = [:],
+    formulaLeadingInventoryPathPrefix: String? = nil
   ) throws {
     let fileManager = FileManager.default
     let extraction = root.appendingPathComponent(RecoveryArtifacts.expectedExtractionDirectory)
@@ -238,7 +239,8 @@ enum TestFixtures {
     let sourceSnapshot = try makeSyntheticRawTree(
       beneath: extraction,
       fileCount: summary.extraction.filesExtracted,
-      byteCount: summary.extraction.bytesExtracted
+      byteCount: summary.extraction.bytesExtracted,
+      formulaLeadingInventoryPathPrefix: formulaLeadingInventoryPathPrefix
     )
 
     try writePrivate(
@@ -378,12 +380,13 @@ enum TestFixtures {
 
   static func suiteTVArchive(
     showTVDBID: Int = 101,
-    favoritesPublic: Bool = false
+    favoritesPublic: Bool = false,
+    showTitle: String = "Synthetic Suite Series"
   ) throws -> Data {
     let show: [String: Any] = [
       "id": ["tvdb": showTVDBID, "imdb": "-1"],
       "uuid": "30000000-0000-4000-8000-000000000001",
-      "title": "Synthetic Suite Series",
+      "title": showTitle,
       "status": "not_started_yet",
       "seasons": [
         [
@@ -408,9 +411,12 @@ enum TestFixtures {
       "movies": [],
       "shows": [],
     ]
+    let escapedShowTitle =
+      showTitle.unicodeScalars.first.map { "=+-@\t\r\n".unicodeScalars.contains($0) } == true
+      ? "'\(showTitle)" : showTitle
     let activity = [
       "imdb_id,tvdb_id,type,title,season,episode,is_special,is_watched,watched_at,status,is_watchlisted,rating",
-      "-1,\(showTVDBID),show,Synthetic Suite Series,,,,,,not_started_yet,true,",
+      "-1,\(showTVDBID),show,\(escapedShowTitle),,,,,,not_started_yet,true,",
       "",
     ].joined(separator: "\r\n")
     let files: [(String, Data)] = [
@@ -671,7 +677,8 @@ enum TestFixtures {
   private static func makeSyntheticRawTree(
     beneath extraction: URL,
     fileCount: Int,
-    byteCount: Int64
+    byteCount: Int64,
+    formulaLeadingInventoryPathPrefix: String? = nil
   ) throws -> [String: Any] {
     guard
       fileCount >= 0,
@@ -696,15 +703,20 @@ enum TestFixtures {
     let remainder = fileCount == 0 ? 0 : byteCount % Int64(fileCount)
     for index in 0..<fileCount {
       let size = baseSize + (Int64(index) < remainder ? 1 : 0)
-      let filename = String(format: "Synthetic-%04d.bin", index + 1)
-      let relativePath = "Documents/\(filename)"
+      let formulaPrefix = index == 0 ? formulaLeadingInventoryPathPrefix : nil
+      let ordinaryFilename = String(format: "Synthetic-%04d.bin", index + 1)
+      let filename = formulaPrefix.map { "\($0)\(ordinaryFilename)" } ?? ordinaryFilename
+      let relativePath = formulaPrefix != nil ? filename : "Documents/\(filename)"
       let relativeRawPath = "\(domainName)/\(relativePath)"
       let payload = Data(repeating: UInt8((index % 251) + 1), count: Int(size))
       let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
-      try writePrivate(payload, at: documents.appendingPathComponent(filename))
+      let destination =
+        formulaPrefix != nil
+        ? domain.appendingPathComponent(filename) : documents.appendingPathComponent(filename)
+      try writePrivate(payload, at: destination)
       let fileID = String(format: "%040llx", UInt64(index + 1))
       rows.append(
-        "\(fileID),\(domainName),\(relativePath),\(size),\(size),True,2026-01-01T00:00:00Z,\(digest)"
+        "\(fileID),\(domainName),\(formulaPrefix != nil ? "./\(relativePath)" : relativePath),\(size),\(size),True,2026-01-01T00:00:00Z,\(digest)"
       )
 
       let pathData = Data(relativeRawPath.utf8)

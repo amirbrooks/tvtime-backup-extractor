@@ -30,8 +30,10 @@ from script.validate_recovery_output import (
     PRIVATE_STAGING_PREFIX,
     ValidationFailure,
     _bounded_pdf_decoders,
+    _copy_private_file,
     _media_rows,
     _pdf_report,
+    _private_staging_path,
     _semantic_pdf_text,
     _sqlite_snapshot,
     _State,
@@ -41,13 +43,19 @@ from script.validate_recovery_output import (
 from tests.helpers import (
     create_synthetic_extraction,
     refresh_synthetic_source_snapshot,
+    secure_synthetic_tree,
     write_legacy_archive,
 )
 from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import UnsafePathError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
 from tvtime_extractor.report import build_report
-from tvtime_extractor.safety import write_json_private_atomic
+from tvtime_extractor.safety import (
+    secure_directory,
+    secure_file,
+    windows_create_private_staging_descriptor,
+    write_json_private_atomic,
+)
 from tvtime_extractor.suite_tv import LIBERATOR_FILENAMES
 from tvtime_extractor.visual_report import HTML_REPORT_FILENAME, PDF_REPORT_FILENAME
 
@@ -74,16 +82,25 @@ def _tree_snapshot(root: Path) -> tuple[tuple[object, ...], ...]:
 
 
 class RecoveryOutputValidatorTests(unittest.TestCase):
+    class _WindowsOSProxy:
+        name = "nt"
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls._fixture_temporary = tempfile.TemporaryDirectory()
         cls.fixture = Path(cls._fixture_temporary.name) / "complete-output"
-        cls.fixture.mkdir(mode=0o700)
+        secure_directory(cls.fixture)
         extraction = create_synthetic_extraction(cls.fixture)
         analyze_extraction(extraction_directory=extraction)
         result = build_report(extraction_directory=extraction)
         if result["pdf_status"] != "generated":
             raise AssertionError("The ASCII validator fixture did not generate its PDF")
+        # Validate the untouched producer output before copies restore ACLs that
+        # shutil.copytree cannot preserve on Windows.
+        validate_recovery_output(cls.fixture)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -94,6 +111,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "candidate-output"
         shutil.copytree(self.fixture, output)
+        secure_synthetic_tree(output)
         return output
 
     def _marker(self, output: Path) -> tuple[Path, dict[str, object]]:
@@ -137,6 +155,68 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         )
         self.assertEqual(dict(result.counts)["series_library"], 1)
         self.assertEqual(dict(result.counts)["saved_movies"], 1)
+
+    def test_windows_staging_path_uses_the_native_private_directory_context(self) -> None:
+        root = Path("C:/Synthetic/Private")
+        staging = root / f"{PRIVATE_STAGING_PREFIX}fixed"
+        context = mock.MagicMock()
+        context.__enter__.return_value = staging
+        state = _State(output_root=root)
+
+        with (
+            mock.patch(
+                "script.validate_recovery_output.os",
+                self._WindowsOSProxy(),
+            ),
+            mock.patch(
+                "script.validate_recovery_output.private_temporary_directory",
+                return_value=context,
+            ) as private_temporary,
+            mock.patch("script.validate_recovery_output.tempfile.mkdtemp") as mkdtemp,
+            _private_staging_path(state) as observed,
+        ):
+            self.assertEqual(observed, staging)
+
+        private_temporary.assert_called_once_with(
+            parent=root,
+            prefix=PRIVATE_STAGING_PREFIX,
+        )
+        mkdtemp.assert_not_called()
+
+    def test_windows_staging_copy_uses_the_native_private_file_creator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = secure_directory(Path(temporary))
+            source = root / "synthetic-source.bin"
+            destination = root / "synthetic-destination.bin"
+            payload = b"synthetic private payload"
+            source.write_bytes(payload)
+            secure_file(source)
+
+            def create_private_file(path: Path) -> int:
+                self.assertEqual(path, destination)
+                if os.name == "nt":
+                    return windows_create_private_staging_descriptor(path)
+                return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+            with (
+                mock.patch(
+                    "script.validate_recovery_output.os",
+                    self._WindowsOSProxy(),
+                ),
+                mock.patch(
+                    "script.validate_recovery_output.windows_create_private_staging_descriptor",
+                    side_effect=create_private_file,
+                ) as create_private,
+            ):
+                copied = _copy_private_file(
+                    source,
+                    destination,
+                    maximum_bytes=len(payload),
+                )
+
+            self.assertEqual(copied, len(payload))
+            self.assertEqual(destination.read_bytes(), payload)
+            create_private.assert_called_once_with(destination)
 
     def test_suite_tv_archives_are_root_level_bound_and_tamper_evident(self) -> None:
         output = self._copy_fixture()
@@ -283,7 +363,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "unsupported-output"
-        output.mkdir(mode=0o700)
+        secure_directory(output)
         extraction = create_synthetic_extraction(output)
         database = extraction / "raw" / PRIMARY_DOMAIN / "Documents" / "DioCache.db"
         unsupported = json.dumps(
@@ -314,7 +394,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "text-affinity-output"
-        output.mkdir(mode=0o700)
+        secure_directory(output)
         extraction = create_synthetic_extraction(output)
         database = extraction / "raw" / PRIMARY_DOMAIN / "Documents" / "DioCache.db"
         with closing(sqlite3.connect(database)) as connection:
@@ -348,7 +428,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "legacy-cache-output"
-        output.mkdir(mode=0o700)
+        secure_directory(output)
         extraction = create_synthetic_extraction(output)
         documents = extraction / "raw" / PRIMARY_DOMAIN / "Documents"
         with closing(sqlite3.connect(documents / "DioCache.db")) as connection:
@@ -393,7 +473,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "deep-image-output"
-        output.mkdir(mode=0o700)
+        secure_directory(output)
         extraction = create_synthetic_extraction(output)
         image_database = (
             extraction
@@ -801,7 +881,7 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         output = Path(temporary.name) / "omitted-output"
-        output.mkdir(mode=0o700)
+        secure_directory(output)
         extraction = create_synthetic_extraction(output)
         database = extraction / "raw" / PRIMARY_DOMAIN / "Documents" / "DioCache.db"
         with closing(sqlite3.connect(database)) as connection:

@@ -74,14 +74,15 @@ jobs:
         run: "python -m pip install --require-hashes --only-binary=:all: --requirement requirements-dev.lock"
       - name: Verify the installed dependency graph
         run: python -m pip check
-      - name: Test only supported Windows existing-extraction and fail-closed contracts
+      - name: Test supported Windows analysis and native filesystem contracts
         run: >-
           python -m unittest -v
           tests.test_analyze_report
           tests.test_analysis_bounds_and_labels
           tests.test_cancellation_and_reports
           tests.test_recovery_output_validator
-          tests.test_safety.WindowsDirectoryHandleContractTests
+          tests.test_safety_windows.WindowsDirectoryHandleContractTests
+          tests.test_windows_native
           tests.test_cli.CliTests.test_debug_help_warns_that_tracebacks_can_expose_secrets_and_must_not_be_shared
       - name: Check installed review commands and documented refusal commands
         run: |
@@ -97,6 +98,25 @@ jobs:
     steps:
       - name: Check out the repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Exercise PowerShell 5.1 packaging identity and cleanup guards
+        shell: powershell
+        run: |
+          Get-ChildItem .\script -Filter *.ps1 | ForEach-Object {
+            $scriptPath = $_.FullName
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $scriptPath,
+              [ref]$tokens,
+              [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -ne 0) {
+              $messages = @($parseErrors | ForEach-Object { $_.Message }) -join " "
+              throw "Windows PowerShell 5.1 packaging script failed to parse ${scriptPath}: $messages"
+            }
+          }
+          .\script\test_windows_packaging_lib.ps1
+          .\script\test_windows_msix_integrity.ps1
       - name: Set up .NET 8
         uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
         with:

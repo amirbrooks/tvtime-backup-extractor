@@ -786,6 +786,27 @@ final class RecoveryOutputValidatorTests {
   }
 
   @Test
+  func testAcceptsSuiteTVArchiveWithSpreadsheetSafeRecoveredTitle() throws {
+    for title in ["=SYNTHETIC_FORMULA()", "=\u{0301}SYNTHETIC_FORMULA()"] {
+      let summary = TestFixtures.summary()
+      let root = try makeOutput(summary: summary)
+      let archive = root.appendingPathComponent(
+        "TVTime-Extraction/analysis/Suite-TV-Liberator-confirmed.zip"
+      )
+      try TestFixtures.writePrivate(
+        try TestFixtures.suiteTVArchive(showTitle: title),
+        at: archive
+      )
+      try TestFixtures.refreshArtifactBinding(
+        beneath: root,
+        id: "suite_tv_liberator_confirmed"
+      )
+
+      try RecoveryOutputValidator.validate(summary, beneath: root)
+    }
+  }
+
+  @Test
   func testRejectsMarkerHashSizeCountPDFAndArtifactSetMismatches() throws {
     let summary = TestFixtures.summary()
     let badHash = try makeOutput(summary: summary)
@@ -1016,6 +1037,48 @@ final class RecoveryOutputValidatorTests {
     assertValidationError(.incompleteOutput) {
       try RecoveryOutputValidator.validate(summary, beneath: mismatched)
     }
+  }
+
+  @Test
+  func testAcceptsReversiblyEscapedFormulaLeadingInventoryPath() throws {
+    let summary = TestFixtures.summary()
+    for prefix in ["=", "=\u{0301}"] {
+      let root = try trackedDirectory()
+      try TestFixtures.makePrivateOutput(
+        at: root,
+        summary: summary,
+        formulaLeadingInventoryPathPrefix: prefix
+      )
+      _ = try RecoveryOutputValidator.validate(summary, beneath: root)
+    }
+  }
+
+  @Test
+  func testAcceptsSealedV020FormulaLeadingInventoryPath() throws {
+    let summary = TestFixtures.summary()
+    let root = try trackedDirectory()
+    try TestFixtures.makePrivateOutput(
+      at: root,
+      summary: summary,
+      formulaLeadingInventoryPathPrefix: "="
+    )
+    let inventoryURL = root.appendingPathComponent(
+      "TVTime-Extraction/metadata/inventory.csv"
+    )
+    let escapedInventory = try #require(
+      String(data: Data(contentsOf: inventoryURL), encoding: .utf8)
+    )
+    try rebindInventory(
+      Data(
+        escapedInventory.replacingOccurrences(
+          of: "./=Synthetic-0001.bin",
+          with: "=Synthetic-0001.bin"
+        ).utf8
+      ),
+      beneath: root
+    )
+
+    _ = try RecoveryOutputValidator.validate(summary, beneath: root)
   }
 
   @Test

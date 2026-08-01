@@ -9,13 +9,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import create_synthetic_extraction
+from tests.helpers import create_synthetic_extraction, refresh_synthetic_source_snapshot
 from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import PartialExtractionError, TVTimeError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
-from tvtime_extractor.integrity import reconcile_raw_tree, source_snapshot_from_mapping
+from tvtime_extractor.integrity import (
+    canonical_inventory_relative_path,
+    reconcile_raw_tree,
+    source_snapshot_from_mapping,
+)
 from tvtime_extractor.report import build_report
-from tvtime_extractor.safety import write_bytes_private
+from tvtime_extractor.safety import (
+    write_bytes_private,
+    write_json_private_atomic,
+    write_text_private,
+)
 from tvtime_extractor.visual_report import write_visual_reports as write_real_visual_reports
 
 
@@ -41,6 +49,59 @@ class RawChainIntegrityTests(unittest.TestCase):
             )
             expected = source_snapshot_from_mapping(run_state["source_snapshot"])
             self.assertEqual(reconcile_raw_tree(extraction, expected=expected), expected)
+
+    def test_formula_leading_inventory_paths_are_reversible_through_report_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+            raw_domain = extraction / "raw" / PRIMARY_DOMAIN
+            expected_paths = [f"{prefix}synthetic-private-name.bin" for prefix in "=+-@"]
+            for relative_path in expected_paths:
+                write_bytes_private(raw_domain / relative_path, b"synthetic private payload")
+            refresh_synthetic_source_snapshot(extraction)
+
+            with (extraction / "metadata" / "inventory.csv").open(
+                encoding="utf-8",
+                newline="",
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            protected = {
+                row["relative_path"]
+                for row in rows
+                if canonical_inventory_relative_path(row["relative_path"]) in expected_paths
+            }
+            self.assertEqual(protected, {f"./{value}" for value in expected_paths})
+
+            reconcile_raw_tree(extraction)
+            analyze_extraction(extraction_directory=extraction)
+            build_report(extraction_directory=extraction)
+
+    def test_sealed_v020_formula_leading_inventory_path_remains_reportable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+            raw_path = extraction / "raw" / PRIMARY_DOMAIN / "=legacy-private-name.bin"
+            write_bytes_private(raw_path, b"synthetic private payload")
+            refresh_synthetic_source_snapshot(extraction)
+
+            inventory_path = extraction / "metadata" / "inventory.csv"
+            inventory = inventory_path.read_text(encoding="utf-8")
+            self.assertIn("./=legacy-private-name.bin", inventory)
+            write_text_private(
+                inventory_path,
+                inventory.replace("./=legacy-private-name.bin", "=legacy-private-name.bin"),
+            )
+
+            legacy_snapshot = reconcile_raw_tree(extraction)
+            run_state_path = extraction / "metadata" / "run_state.json"
+            run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            run_state["source_snapshot"] = legacy_snapshot.as_dict()
+            write_json_private_atomic(run_state_path, run_state)
+
+            self.assertEqual(
+                canonical_inventory_relative_path("=legacy-private-name.bin"),
+                "=legacy-private-name.bin",
+            )
+            analyze_extraction(extraction_directory=extraction)
+            build_report(extraction_directory=extraction)
 
     def test_analysis_rejects_changed_removed_and_extra_raw_files(self) -> None:
         mutations = ("changed", "removed", "extra_file", "extra_directory")

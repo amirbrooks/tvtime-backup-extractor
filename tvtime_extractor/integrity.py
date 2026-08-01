@@ -6,20 +6,23 @@ import io
 import os
 import stat
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .errors import PartialExtractionError, UnsafePathError
 from .safety import (
+    _safe_directory_entries,
     iter_regular_files,
     regular_binary_reader,
     safe_domain_component,
     safe_join,
     safe_manifest_relative_path,
     validate_file_id,
+    write_csv_private,
 )
+from .spreadsheet import spreadsheet_cell_needs_escape
 
 SOURCE_SNAPSHOT_CONTRACT = "tvtime-source-snapshot-v0.2"
 RAW_TREE_DIGEST_PREFIX = b"tvtime-raw-tree-digest-v0.2\x00"
@@ -35,6 +38,49 @@ INVENTORY_FIELDS = (
     "mtime",
     "sha256",
 )
+INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX = "./"
+
+
+def inventory_relative_path_cell(value: str) -> str:
+    """Encode one canonical path as a safe, reversibly marked CSV cell."""
+
+    relative = safe_manifest_relative_path(value)
+    if relative.as_posix() != value:
+        raise ValueError("The inventory path was not canonical.")
+    if spreadsheet_cell_needs_escape(value):
+        return INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX + value
+    return value
+
+
+def canonical_inventory_relative_path(value: str) -> str:
+    """Restore one inventory path, accepting the sealed pre-escape representation."""
+
+    if not isinstance(value, str):
+        raise ValueError("The inventory path cell was invalid.")
+    escaped = value.startswith(INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX)
+    candidate = value[len(INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX) :] if escaped else value
+    if escaped and not spreadsheet_cell_needs_escape(candidate):
+        raise ValueError("The inventory path cell had invalid spreadsheet-escape provenance.")
+    # v0.2 inventories stored formula-leading paths verbatim. Their inventory
+    # bytes remain bound by the extraction completion marker, so accepting that
+    # legacy representation preserves report rebuilding without permitting an
+    # ambiguous new escaped representation.
+    relative = safe_manifest_relative_path(candidate)
+    if relative.as_posix() != candidate:
+        raise ValueError("The inventory path was not canonical.")
+    return candidate
+
+
+def write_inventory_csv(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    """Write the sealed inventory with every backup-controlled path cell neutralized."""
+
+    def protected_rows() -> Iterable[dict[str, Any]]:
+        for row in rows:
+            protected = dict(row)
+            protected["relative_path"] = inventory_relative_path_cell(str(row["relative_path"]))
+            yield protected
+
+    write_csv_private(path, protected_rows(), INVENTORY_FIELDS, spreadsheet_safe=False)
 
 
 @dataclass(frozen=True)
@@ -153,7 +199,7 @@ def _parse_inventory(payload: bytes) -> list[_InventoryEntry]:
             domain = row["domain"]
             if domain != safe_domain_component(domain):
                 raise _integrity_failure()
-            relative_path = row["relative_path"]
+            relative_path = canonical_inventory_relative_path(row["relative_path"])
             relative = safe_manifest_relative_path(relative_path)
             if relative.as_posix() != relative_path:
                 raise _integrity_failure()
@@ -193,25 +239,13 @@ def _tree_membership(raw_root: Path) -> tuple[list[str], list[str]]:
         key=lambda value: value.encode("utf-8"),
     )
     directories: list[str] = []
-
-    def raise_walk_error(error: OSError) -> None:
-        raise UnsafePathError("The extracted raw directory tree could not be validated.") from error
-
-    for current_name, directory_names, _file_names in os.walk(
-        raw_root,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
-        current = Path(current_name)
-        for name in sorted(directory_names):
-            candidate = current / name
-            try:
-                metadata = candidate.lstat()
-            except OSError as exc:
-                raise _integrity_failure() from exc
-            if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-                raise UnsafePathError("The extracted raw data contained an unsafe directory.")
-            directories.append(candidate.relative_to(raw_root).as_posix())
+    pending = [raw_root]
+    while pending:
+        current = pending.pop()
+        child_directories, _files = _safe_directory_entries(current)
+        for entry in child_directories:
+            directories.append(entry.path.relative_to(raw_root).as_posix())
+        pending.extend(entry.path for entry in reversed(child_directories))
     return (
         sorted(directories, key=lambda value: value.encode("utf-8")),
         files,

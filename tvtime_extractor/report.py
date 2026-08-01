@@ -56,17 +56,23 @@ from .integrity import (
     MAXIMUM_CONTRACT_INTEGER,
     MAXIMUM_INVENTORY_BYTES,
     SourceSnapshot,
+    canonical_inventory_relative_path,
     reconcile_raw_tree,
     source_snapshot_from_mapping,
 )
 from .safety import (
     MAXIMUM_COMPLETION_MARKER_BYTES,
+    _safe_directory_entries,
     anchored_existing_extraction_root,
     no_link_absolute_path,
     promote_directory_no_replace_atomic,
     read_regular_bytes,
+    recovery_path_exists,
+    recovery_path_is_directory,
+    recovery_path_is_regular_file,
     regular_binary_reader,
     regular_text_reader,
+    require_non_hydrated_windows_metadata,
     require_private_descriptor,
     require_private_path,
     safe_domain_component,
@@ -80,6 +86,7 @@ from .safety import (
     write_json_private_atomic,
     write_text_private,
 )
+from .spreadsheet import spreadsheet_cell_needs_escape
 from .suite_tv import build_liberator_files, write_suite_tv_zip
 from .visual_report import (
     HTML_REPORT_FILENAME,
@@ -495,25 +502,26 @@ def _exact_private_directory_membership(
     if cancellation_check is not None:
         cancellation_check()
     directory_before = require_private_path(directory, expected_type=stat.S_IFDIR)
+    require_non_hydrated_windows_metadata(directory_before)
     observed: set[str] = set()
 
     if os.name == "nt":
         try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if cancellation_check is not None:
-                        cancellation_check()
-                    metadata = entry.stat(follow_symlinks=False)
-                    if entry.name not in expected_names:
-                        raise TVTimeError(
-                            f"The private {label} directory did not have exact sealed membership."
-                        )
-                    if not stat.S_ISREG(metadata.st_mode):
-                        raise UnsafePathError(
-                            f"The private {label} directory contained an unsafe artifact type."
-                        )
-                    require_private_path(directory / entry.name, expected_type=stat.S_IFREG)
-                    observed.add(entry.name)
+            child_directories, files = _safe_directory_entries(
+                directory,
+                cancellation_check=cancellation_check,
+            )
+            if child_directories:
+                raise TVTimeError(
+                    f"The private {label} directory did not have exact sealed membership."
+                )
+            for entry in files:
+                if entry.path.name not in expected_names:
+                    raise TVTimeError(
+                        f"The private {label} directory did not have exact sealed membership."
+                    )
+                require_private_path(entry.path, expected_type=stat.S_IFREG)
+                observed.add(entry.path.name)
         except TVTimeError:
             raise
         except OSError as exc:
@@ -521,6 +529,7 @@ def _exact_private_directory_membership(
                 f"The private {label} directory could not be enumerated safely."
             ) from exc
         directory_after = require_private_path(directory, expected_type=stat.S_IFDIR)
+        require_non_hydrated_windows_metadata(directory_after)
         if (directory_before.st_dev, directory_before.st_ino) != (
             directory_after.st_dev,
             directory_after.st_ino,
@@ -707,14 +716,15 @@ def _inventory_aggregate(
                 raise ValueError("noncanonical file identifier")
             if row["domain"] != safe_domain_component(row["domain"]):
                 raise ValueError("noncanonical domain")
-            relative = safe_manifest_relative_path(row["relative_path"])
-            if relative.as_posix() != row["relative_path"]:
+            relative_path = canonical_inventory_relative_path(row["relative_path"])
+            relative = safe_manifest_relative_path(relative_path)
+            if relative.as_posix() != relative_path:
                 raise ValueError("noncanonical relative path")
         except (KeyError, ValueError) as exc:
             raise TVTimeError(
                 "The private extraction inventory had an unsupported format."
             ) from exc
-        current_key = (row["domain"], row["relative_path"])
+        current_key = (row["domain"], relative_path)
         if previous_key is not None and current_key < previous_key:
             raise TVTimeError("The private extraction inventory had an unsupported order.")
         previous_key = current_key
@@ -738,7 +748,7 @@ def _inventory_aggregate(
             discrepancies.append(
                 {
                     "domain": row["domain"],
-                    "relative_path": row["relative_path"],
+                    "relative_path": relative_path,
                     "declared_size": declared,
                     "actual_size": actual,
                 }
@@ -1282,7 +1292,7 @@ def read_csv(
         value = rows[row_number - 1][field]
         if not isinstance(value, str) or not value.startswith("'") or len(value) < 2:
             raise TVTimeError("Analysis CSV escape metadata did not match the recovered table.")
-        if not value[1:].startswith(("=", "+", "-", "@", "\t", "\r")):
+        if not spreadsheet_cell_needs_escape(value[1:]):
             raise TVTimeError("Analysis CSV escape metadata did not match the recovered table.")
         rows[row_number - 1][field] = value[1:]
         seen.add(coordinate)
@@ -1633,7 +1643,7 @@ def _cache_payloads(
 
 
 def _image_cache_rows(image_db: Path) -> tuple[list[dict[str, Any]], str]:
-    if not image_db.is_file():
+    if not recovery_path_is_regular_file(image_db):
         return [], "not present"
     rows: list[dict[str, Any]] = []
     try:
@@ -1699,7 +1709,7 @@ def _build_report(
         cancellation_check=cancellation_check,
     )
     final_analysis = safe_join(extraction, "analysis")
-    if not final_analysis.is_dir() or final_analysis.is_symlink():
+    if not recovery_path_is_directory(final_analysis):
         raise TVTimeError("The complete analysis directory was not found. Run analyze first.")
     metadata_directory = safe_join(extraction, "metadata")
     pre_report_summary = _read_strict_json_mapping(
@@ -1758,7 +1768,7 @@ def _build_report(
             "and run a fresh recovery without --include-raw-cache for native validation."
         )
     cache_responses = final_analysis / "cache_responses"
-    if cache_responses.exists() or cache_responses.is_symlink():
+    if recovery_path_exists(cache_responses):
         raise TVTimeError(
             "Unexpected raw cache-response exports were present. Preserve this analysis and run "
             "a fresh recovery without --include-raw-cache for native validation."
@@ -1766,10 +1776,11 @@ def _build_report(
     manifest_directory = safe_join(extraction, "manifest")
     try:
         require_private_path(manifest_directory, expected_type=stat.S_IFDIR)
+        manifest_directories, manifest_files = _safe_directory_entries(manifest_directory)
         invalid_manifest_directory = (
-            not manifest_directory.is_dir()
-            or manifest_directory.is_symlink()
-            or next(manifest_directory.iterdir(), None) is not None
+            not recovery_path_is_directory(manifest_directory)
+            or bool(manifest_directories)
+            or bool(manifest_files)
         )
     except OSError as exc:
         raise TVTimeError("The private manifest directory could not be validated safely.") from exc
@@ -1780,7 +1791,7 @@ def _build_report(
             "native validation."
         )
     report_staging = safe_join(extraction, ".report-incomplete")
-    if report_staging.exists() or report_staging.is_symlink():
+    if recovery_path_exists(report_staging):
         raise OutputExistsError(
             "An incomplete report staging directory already exists. Preserve it for diagnosis and "
             "retry recovery into a fresh destination."
@@ -1797,10 +1808,7 @@ def _build_report(
         PDF_REPORT_FILENAME,
         "recovery_state.json",
     )
-    if any(
-        (final_analysis / name).exists() or (final_analysis / name).is_symlink()
-        for name in artifact_names
-    ):
+    if any(recovery_path_exists(final_analysis / name) for name in artifact_names):
         raise OutputExistsError(
             "Report output already exists. Refusing to overwrite or mix recovery artifacts."
         )
@@ -2139,7 +2147,7 @@ def _build_report(
                 cancellation_check=cancellation_check,
             )
         )
-    elif (analysis / PDF_REPORT_FILENAME).exists() or (analysis / PDF_REPORT_FILENAME).is_symlink():
+    elif recovery_path_exists(analysis / PDF_REPORT_FILENAME):
         raise TVTimeError("The omitted private PDF report unexpectedly existed.")
 
     recovery_state = {
@@ -2260,7 +2268,7 @@ def _build_report(
         )
     if cancellation_check is not None:
         cancellation_check()
-    if final_analysis.exists() or final_analysis.is_symlink():
+    if recovery_path_exists(final_analysis):
         raise OutputExistsError(
             "The final analysis path appeared during report generation; refusing to overwrite it."
         )
@@ -2312,7 +2320,10 @@ def build_report(
 
     try:
         visible_extraction = no_link_absolute_path(extraction_directory)
-        with anchored_existing_extraction_root(visible_extraction) as anchored_extraction:
+        with anchored_existing_extraction_root(
+            visible_extraction,
+            cancellation_check=cancellation_check,
+        ) as anchored_extraction:
             result = _build_report(
                 extraction_directory=anchored_extraction,
                 cancellation_check=cancellation_check,

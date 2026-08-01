@@ -33,25 +33,28 @@ from .errors import (
     is_insufficient_space_error,
 )
 from .extract import PRIMARY_DOMAIN, ExtractionResult
-from .integrity import reconcile_raw_tree
+from .integrity import reconcile_raw_tree, write_inventory_csv
 from .report import build_report
 from .safety import (
     EXTRACTION_DIRECTORY_NAME,
     EXTRACTION_RUN_STATE_CONTRACT,
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
+    _windows_enumerated_path_metadata,
     anchored_bound_output_root,
     harden_private_descriptor,
     held_destination_parent,
     is_within,
     nearest_git_root,
     no_link_absolute_path,
+    optional_local_recovery_regular_file,
     regular_binary_reader,
     require_bound_destination_parent,
+    require_local_recovery_source,
     require_private_local_destination,
     safe_join,
     secure_directory,
     secure_file,
-    write_csv_private,
+    windows_create_private_staging_descriptor,
     write_json_private_atomic,
     write_text_private,
 )
@@ -255,7 +258,7 @@ def inspect_android_backup(
     *,
     cancellation_check: Callable[[], None] | None = None,
 ) -> AcquisitionPreflight:
-    source = no_link_absolute_path(source)
+    source = require_local_recovery_source(source)
     byte_count, digest, identity = _source_file_snapshot(
         source,
         cancellation_check=cancellation_check,
@@ -456,7 +459,11 @@ def _open_private_binary_target(path: Path) -> tuple[int, BinaryIO]:
     secure_directory(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = (
+        windows_create_private_staging_descriptor(path)
+        if os.name == "nt"
+        else os.open(path, flags, 0o600)
+    )
     try:
         harden_private_descriptor(descriptor, expected_type=stat.S_IFREG, mode=0o600)
         handle = os.fdopen(descriptor, "wb")
@@ -582,21 +589,7 @@ def _seal_acquisition(
     cancellation_check: Callable[[], None] | None,
 ) -> ExtractionResult:
     inventory = sorted(inventory, key=lambda row: str(row["relative_path"]))
-    write_csv_private(
-        metadata_root / "inventory.csv",
-        inventory,
-        [
-            "file_id",
-            "domain",
-            "relative_path",
-            "declared_size",
-            "actual_size",
-            "size_match",
-            "mtime",
-            "sha256",
-        ],
-        spreadsheet_safe=False,
-    )
+    write_inventory_csv(metadata_root / "inventory.csv", inventory)
     write_text_private(metadata_root / "domains.txt", PRIMARY_DOMAIN + "\n")
     byte_count = sum(int(row["actual_size"]) for row in inventory)
     completed_utc = datetime.now(timezone.utc).isoformat()
@@ -755,15 +748,17 @@ def _select_snapshot_database(root: Path, filename: str) -> Path | None:
             raise UnsafePathError(
                 "The Android snapshot database path crossed an unsafe ancestor."
             ) from exc
-        if not candidate.exists():
+        protected = optional_local_recovery_regular_file(
+            candidate,
+            volume_already_validated=True,
+        )
+        if protected is None:
             continue
-        if candidate.is_symlink() or not candidate.is_file():
-            raise UnsafePathError("An Android snapshot database was not a regular file.")
         if selected is not None:
             raise UnsupportedSchemaError(
                 "The Android snapshot contained multiple candidates for one database."
             )
-        selected = candidate
+        selected = protected
     return selected
 
 
@@ -798,8 +793,14 @@ def inspect_android_snapshot(
     *,
     cancellation_check: Callable[[], None] | None = None,
 ) -> AcquisitionPreflight:
-    source = no_link_absolute_path(source)
-    if source.is_symlink() or not source.is_dir():
+    source = require_local_recovery_source(source)
+    try:
+        source_metadata = (
+            _windows_enumerated_path_metadata(source) if os.name == "nt" else source.lstat()
+        )
+    except OSError as exc:
+        raise UserInputError("The preserved Android snapshot directory was not found.") from exc
+    if not stat.S_ISDIR(source_metadata.st_mode):
         raise UserInputError("The preserved Android snapshot directory was not found.")
     source_files = _snapshot_android_databases(
         source,
@@ -876,7 +877,7 @@ def inspect_official_export(
     *,
     cancellation_check: Callable[[], None] | None = None,
 ) -> AcquisitionPreflight:
-    source = no_link_absolute_path(source)
+    source = require_local_recovery_source(source)
     byte_count, digest, identity = _source_file_snapshot(
         source,
         cancellation_check=cancellation_check,
@@ -939,13 +940,13 @@ def _read_official_export_payloads(
                                 pwd=bytes(password) if password else None,
                             ) as handle:
                                 payload = handle.read(OFFICIAL_EXPORT_MAXIMUM_CSV_BYTES + 1)
-                        except RuntimeError as exc:
-                            raise BackupPasswordError(
-                                "The official export password was rejected."
-                            ) from exc
                         except NotImplementedError as exc:
                             raise UnsupportedSchemaError(
                                 "The official export ZIP encryption is not supported safely."
+                            ) from exc
+                        except RuntimeError as exc:
+                            raise BackupPasswordError(
+                                "The official export password was rejected."
                             ) from exc
                         if len(payload) != member.file_size:
                             raise UnsupportedSchemaError(
@@ -1460,7 +1461,7 @@ def recover_acquired_source(
         raise UserInputError(
             "Recovery requires explicit acknowledgement that the output contains private data."
         )
-    source = no_link_absolute_path(source)
+    source = require_local_recovery_source(source)
     output = no_link_absolute_path(output_directory)
     if (destination_parent_descriptor is None) != (expected_parent_identity is None):
         raise UserInputError("The acquisition destination binding was incomplete.")
@@ -1486,7 +1487,7 @@ def recover_acquired_source(
             require_private_local_destination(visible_output)
             if is_within(visible_output, source) or is_within(source, visible_output):
                 raise UnsafePathError(
-                    "The Android source and recovery destination must not overlap."
+                    "The selected source and recovery destination must not overlap."
                 )
             if nearest_git_root(visible_output) is not None:
                 raise UnsafePathError("Refusing to place recovered data inside a Git repository.")
@@ -1560,4 +1561,4 @@ def recover_acquired_source(
     except OSError as exc:
         if is_insufficient_space_error(exc):
             raise insufficient_space_error() from exc
-        raise TVTimeError("Android acquisition failed safely.") from exc
+        raise TVTimeError("Local source acquisition failed safely.") from exc

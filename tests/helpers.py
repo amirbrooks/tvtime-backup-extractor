@@ -14,11 +14,10 @@ from tvtime_extractor.extract import (
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
     PRIMARY_DOMAIN,
 )
-from tvtime_extractor.integrity import reconcile_raw_tree
+from tvtime_extractor.integrity import reconcile_raw_tree, write_inventory_csv
 from tvtime_extractor.safety import (
     secure_directory,
     secure_file,
-    write_csv_private,
     write_json_private_atomic,
     write_text_private,
 )
@@ -57,6 +56,16 @@ def write_legacy_archive(
     }
     path.write_bytes(plistlib.dumps(archive, fmt=plistlib.FMT_BINARY))
     secure_file(path)
+
+
+def secure_synthetic_tree(root: Path) -> None:
+    """Apply the production private-path contract to one synthetic fixture tree."""
+
+    directories = [root, *(path for path in root.rglob("*") if path.is_dir())]
+    for directory in sorted(directories, key=lambda path: len(path.parts)):
+        secure_directory(directory)
+    for path in (path for path in root.rglob("*") if path.is_file()):
+        secure_file(path)
 
 
 def synthetic_payloads() -> list[tuple[str, str, bytes, int]]:
@@ -285,27 +294,10 @@ def create_synthetic_extraction(base: Path) -> Path:
     with (app_root / "Library" / "Preferences.plist").open("wb") as handle:
         plistlib.dump({"SyntheticFeatureEnabled": True}, handle)
 
-    for directory in [extraction, *(path for path in extraction.rglob("*") if path.is_dir())]:
-        secure_directory(directory)
-    for path in (path for path in extraction.rglob("*") if path.is_file()):
-        secure_file(path)
+    secure_synthetic_tree(extraction)
 
     inventory_rows = _synthetic_inventory_rows(extraction)
-    write_csv_private(
-        metadata / "inventory.csv",
-        inventory_rows,
-        [
-            "file_id",
-            "domain",
-            "relative_path",
-            "declared_size",
-            "actual_size",
-            "size_match",
-            "mtime",
-            "sha256",
-        ],
-        spreadsheet_safe=False,
-    )
+    write_inventory_csv(metadata / "inventory.csv", inventory_rows)
     source_snapshot = reconcile_raw_tree(extraction)
     extracted_bytes = source_snapshot.raw_tree_bytes
     extracted_files = source_snapshot.raw_tree_files
@@ -375,21 +367,7 @@ def refresh_synthetic_source_snapshot(extraction: Path) -> None:
     """Reseal a fixture after an intentional semantic raw-data mutation."""
 
     inventory_path = extraction / "metadata" / "inventory.csv"
-    write_csv_private(
-        inventory_path,
-        _synthetic_inventory_rows(extraction),
-        [
-            "file_id",
-            "domain",
-            "relative_path",
-            "declared_size",
-            "actual_size",
-            "size_match",
-            "mtime",
-            "sha256",
-        ],
-        spreadsheet_safe=False,
-    )
+    write_inventory_csv(inventory_path, _synthetic_inventory_rows(extraction))
     source_snapshot = reconcile_raw_tree(extraction)
     summary_path = extraction / "metadata" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))

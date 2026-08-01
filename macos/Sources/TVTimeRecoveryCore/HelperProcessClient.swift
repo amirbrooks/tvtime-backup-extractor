@@ -609,17 +609,9 @@ public final class HelperProcessClient: RecoveryHelperClient {
         throw HelperClientError.launchFailed
       }
     }
-    if !requiresSecret {
-      guard
-        posix_spawn_file_actions_addclose(
-          &fileActions,
-          HelperProtocolV3.secretFileDescriptor
-        ) == 0
-      else {
-        Self.closePipes(allocatedPipes)
-        throw HelperClientError.launchFailed
-      }
-    }
+    // Do not register a close action for an absent secret descriptor. File descriptors are
+    // process-wide, so descriptor 3 may close or be reused on another thread before posix_spawn.
+    // POSIX_SPAWN_CLOEXEC_DEFAULT already closes every descriptor that is not mapped below.
     let pipeDescriptors = allocatedPipes.flatMap { [$0.read, $0.write] }
     for descriptor in pipeDescriptors + [destinationParentDescriptor]
     where descriptor > HelperProtocolV3.destinationParentFileDescriptor {

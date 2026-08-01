@@ -45,6 +45,7 @@ from .models import (
 )
 from .report import build_report
 from .safety import (
+    _safe_directory_entries,
     anchored_bound_output_root,
     bound_directory_free_bytes,
     held_destination_parent,
@@ -95,41 +96,26 @@ def _backup_stats(
         cancellation.raise_if_cancelled()
         current = directories.pop()
         try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    try:
-                        metadata = entry.stat(follow_symlinks=False)
-                    except OSError as exc:
-                        raise TVTimeError("Could not inspect a backup entry safely.") from exc
-                    if _is_link_or_reparse(metadata):
-                        raise UnsafePathError(
-                            "The selected backup contains a symbolic link or reparse point; "
-                            "refusing to traverse it."
-                        )
-                    if stat.S_ISDIR(metadata.st_mode):
-                        directories.append(Path(entry.path))
-                    elif stat.S_ISREG(metadata.st_mode):
-                        file_count += 1
-                        logical_bytes += int(metadata.st_size)
-                        if file_count % 2_000 == 0:
-                            cancellation.raise_if_cancelled()
-                            _emit(
-                                progress,
-                                RecoveryEvent(
-                                    stage=RecoveryStage.PREFLIGHT,
-                                    kind=RecoveryEventKind.PROGRESS,
-                                    message=(
-                                        "Inspecting the selected backup without modifying it..."
-                                    ),
-                                    current=file_count,
-                                    details={"logical_bytes": logical_bytes},
-                                ),
-                            )
-                    else:
-                        raise UnsafePathError(
-                            "The selected backup contains a non-regular filesystem entry; "
-                            "refusing to traverse it."
-                        )
+            child_directories, files = _safe_directory_entries(
+                current,
+                cancellation_check=cancellation.raise_if_cancelled,
+            )
+            directories.extend(entry.path for entry in reversed(child_directories))
+            for entry in files:
+                file_count += 1
+                logical_bytes += int(entry.metadata.st_size)
+                if file_count % 2_000 == 0:
+                    cancellation.raise_if_cancelled()
+                    _emit(
+                        progress,
+                        RecoveryEvent(
+                            stage=RecoveryStage.PREFLIGHT,
+                            kind=RecoveryEventKind.PROGRESS,
+                            message="Inspecting the selected backup without modifying it...",
+                            current=file_count,
+                            details={"logical_bytes": logical_bytes},
+                        ),
+                    )
         except (TVTimeError, UnsafePathError):
             raise
         except OSError as exc:
@@ -220,7 +206,10 @@ def _capture_backup_preflight_snapshot(
     cancellation: CancellationToken,
 ) -> tuple[BackupPreflightSnapshot, bytes, bytes]:
     if os.name == "nt":
-        with _held_backup_root(backup) as (root_handle, root_identity, _visible):
+        with _held_backup_root(
+            backup,
+            cancellation_check=cancellation.raise_if_cancelled,
+        ) as (root_handle, root_identity, _visible):
             cancellation.raise_if_cancelled()
             manifest_plist, manifest_payload = _windows_source_payload(
                 Path("Manifest.plist"),
@@ -746,6 +735,7 @@ class RecoveryService:
         with _held_backup_root(
             source_backup,
             expected_identity=expected_source_identity,
+            cancellation_check=token.raise_if_cancelled,
         ) as (source_root_descriptor, source_root_identity, bound_backup):
             current_snapshot, _, _ = _capture_backup_preflight_snapshot(
                 bound_backup,

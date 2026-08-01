@@ -14,7 +14,7 @@ import tempfile
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
+from contextlib import closing, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -113,11 +113,10 @@ from tvtime_extractor.safety import (  # noqa: E402
     EXTRACTION_RUN_STATE_CONTRACT,
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
     MAXIMUM_COMPLETION_MARKER_BYTES,
-    _windows_close_handle,
     _windows_directory_identity,
-    _windows_open_locked_directory,
     no_link_absolute_path,
     private_source_id,
+    private_temporary_directory,
     regular_binary_reader,
     require_private_descriptor,
     require_private_path,
@@ -125,6 +124,9 @@ from tvtime_extractor.safety import (  # noqa: E402
     safe_manifest_relative_path,
     sanitize_public_url,
     validate_file_id,
+    windows_create_private_staging_descriptor,
+    windows_restore_bound_directory_times,
+    windows_timestamp_restore_directory,
 )
 from tvtime_extractor.suite_tv import (  # noqa: E402
     LIBERATOR_FILENAMES,
@@ -1120,6 +1122,30 @@ def _safe_remove_private_staging(
 
 
 @contextmanager
+def _private_staging_path(state: _State) -> Iterator[Path]:
+    """Create one staging path through the platform's private capability contract."""
+
+    if os.name == "nt":
+        with private_temporary_directory(
+            parent=state.output_root,
+            prefix=PRIVATE_STAGING_PREFIX,
+        ) as path:
+            yield path
+        return
+
+    path = Path(tempfile.mkdtemp(prefix=PRIVATE_STAGING_PREFIX, dir=state.output_root))
+    stage_identity = _identity(path.lstat())
+    try:
+        yield path
+    finally:
+        _safe_remove_private_staging(
+            path,
+            output_root=state.output_root,
+            expected_identity=stage_identity,
+        )
+
+
+@contextmanager
 def _private_staging_directory(state: _State) -> Iterator[Path]:
     """Create ephemeral private workspace only on the validated output volume."""
 
@@ -1128,42 +1154,38 @@ def _private_staging_directory(state: _State) -> Iterator[Path]:
         expected_type=stat.S_IFDIR,
         expected_mode=EXPECTED_DIRECTORY_MODE,
     )
-    windows_root_handle = -1
-    windows_root_identity: tuple[int, int] | None = None
-    if os.name == "nt":
-        windows_root_handle, windows_root_identity = _windows_open_locked_directory(
-            state.output_root
-        )
-    try:
-        path = Path(tempfile.mkdtemp(prefix=PRIVATE_STAGING_PREFIX, dir=state.output_root))
-        stage_identity = _identity(path.lstat())
+    windows_root = (
+        windows_timestamp_restore_directory(state.output_root)
+        if os.name == "nt"
+        else nullcontext((-1, None))
+    )
+    with windows_root as (windows_root_handle, windows_root_identity):
         try:
-            if path.parent != state.output_root or not path.name.startswith(PRIVATE_STAGING_PREFIX):
-                _fail()
-            _require_directory(path)
-            root_after = require_private_path(
-                state.output_root,
-                expected_type=stat.S_IFDIR,
-                expected_mode=EXPECTED_DIRECTORY_MODE,
-            )
-            if _identity(root_before) != _identity(root_after):
-                _fail()
-            yield path
+            with _private_staging_path(state) as path:
+                if path.parent != state.output_root or not path.name.startswith(
+                    PRIVATE_STAGING_PREFIX
+                ):
+                    _fail()
+                _require_directory(path)
+                root_after = require_private_path(
+                    state.output_root,
+                    expected_type=stat.S_IFDIR,
+                    expected_mode=EXPECTED_DIRECTORY_MODE,
+                )
+                if _identity(root_before) != _identity(root_after):
+                    _fail()
+                yield path
         finally:
-            _safe_remove_private_staging(
-                path,
-                output_root=state.output_root,
-                expected_identity=stage_identity,
-            )
             if os.name == "nt":
                 if (
                     windows_root_identity is None
                     or _windows_directory_identity(windows_root_handle) != windows_root_identity
                 ):
                     _fail()
-                os.utime(
-                    state.output_root,
-                    ns=(root_before.st_atime_ns, root_before.st_mtime_ns),
+                windows_restore_bound_directory_times(
+                    windows_root_handle,
+                    access_time_filetime=root_before.windows_last_access_time,
+                    write_time_filetime=root_before.windows_last_write_time,
                 )
                 if _windows_directory_identity(windows_root_handle) != windows_root_identity:
                     _fail()
@@ -1178,14 +1200,13 @@ def _private_staging_directory(state: _State) -> Iterator[Path]:
                 expected_type=stat.S_IFDIR,
                 expected_mode=EXPECTED_DIRECTORY_MODE,
             )
-            if (
-                _identity(root_before) != _identity(root_after_cleanup)
-                or root_after_cleanup.st_mtime_ns != root_before.st_mtime_ns
-            ):
+            write_time_changed = (
+                root_after_cleanup.windows_last_write_time != root_before.windows_last_write_time
+                if os.name == "nt"
+                else root_after_cleanup.st_mtime_ns != root_before.st_mtime_ns
+            )
+            if _identity(root_before) != _identity(root_after_cleanup) or write_time_changed:
                 _fail()
-    finally:
-        if windows_root_handle >= 0:
-            _windows_close_handle(windows_root_handle)
 
 
 def _copy_private_file(source: Path, destination: Path, *, maximum_bytes: int) -> int:
@@ -1208,10 +1229,14 @@ def _copy_private_file(source: Path, destination: Path, *, maximum_bytes: int) -
         )
         if _identity(before) != _identity(opened_source):
             _fail()
-        destination_descriptor = os.open(
-            destination,
-            destination_flags,
-            EXPECTED_FILE_MODE,
+        destination_descriptor = (
+            windows_create_private_staging_descriptor(destination)
+            if os.name == "nt"
+            else os.open(
+                destination,
+                destination_flags,
+                EXPECTED_FILE_MODE,
+            )
         )
         if os.name != "nt":
             os.fchmod(destination_descriptor, EXPECTED_FILE_MODE)

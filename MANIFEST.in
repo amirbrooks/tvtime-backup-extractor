@@ -27,6 +27,6 @@ prune windows/TVTimeRecovery.Windows.CompileCheck/bin
 prune windows/TVTimeRecovery.Windows.CompileCheck/obj
 include macos/Package.swift
 include macos/Package.resolved
-recursive-include script *.ps1 *.py *.sh *.swift
+recursive-include script *.cs *.ps1 *.py *.sh *.swift
 recursive-include scripts *.py
 recursive-include tests *.py

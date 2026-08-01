@@ -28,6 +28,10 @@ class WindowsUnsupportedError(WindowsNativeError):
     pass
 
 
+class WindowsPrivateOwnerRebindRequired(WindowsNativeError):
+    """The held directory needs the distinct owner-rebinding capability."""
+
+
 @dataclass(frozen=True)
 class WindowsVolumeCapabilities:
     filesystem_name: str
@@ -40,6 +44,7 @@ class WindowsHandleInformation:
     identity: tuple[int, int]
     byte_size: int
     last_write_time: int
+    last_access_time: int = 0
 
     @property
     def is_directory(self) -> bool:
@@ -49,9 +54,39 @@ class WindowsHandleInformation:
     def is_reparse_point(self) -> bool:
         return bool(self.attributes & FILE_ATTRIBUTE_REPARSE_POINT)
 
+    @property
+    def is_cloud_hydrated(self) -> bool:
+        return bool(self.attributes & FILE_ATTRIBUTE_CLOUD_HYDRATION)
+
+
+@dataclass(frozen=True)
+class WindowsDirectoryEntryInformation:
+    name: str
+    attributes: int
+    identity: tuple[int, int]
+    byte_size: int
+    last_write_time: int
+    last_access_time: int = 0
+    short_name: str | None = None
+
+    @property
+    def is_directory(self) -> bool:
+        return bool(self.attributes & FILE_ATTRIBUTE_DIRECTORY)
+
+    @property
+    def is_reparse_point(self) -> bool:
+        return bool(self.attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+
+    @property
+    def is_cloud_hydrated(self) -> bool:
+        return bool(self.attributes & FILE_ATTRIBUTE_CLOUD_HYDRATION)
+
 
 class _FILETIME(ctypes.Structure):
-    _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+    # FILETIME is two exact-width Win32 DWORD values.  Keep the layout
+    # contract-testable on non-Windows hosts where wintypes.DWORD can follow
+    # the wider host C ``unsigned long`` representation.
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
 
 
 class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
@@ -66,6 +101,28 @@ class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         ("number_of_links", wintypes.DWORD),
         ("file_index_high", wintypes.DWORD),
         ("file_index_low", wintypes.DWORD),
+    ]
+
+
+class _FILE_ID_BOTH_DIR_INFO_HEADER(ctypes.Structure):
+    _fields_ = [
+        # Use fixed Win32 widths so the record layout remains contract-testable
+        # from non-Windows hosts.  ``ctypes.wintypes.DWORD`` follows the host C
+        # ``unsigned long`` width on Unix and is therefore eight bytes on macOS.
+        ("next_entry_offset", ctypes.c_uint32),
+        ("file_index", ctypes.c_uint32),
+        ("creation_time", ctypes.c_int64),
+        ("last_access_time", ctypes.c_int64),
+        ("last_write_time", ctypes.c_int64),
+        ("change_time", ctypes.c_int64),
+        ("end_of_file", ctypes.c_int64),
+        ("allocation_size", ctypes.c_int64),
+        ("file_attributes", ctypes.c_uint32),
+        ("file_name_length", ctypes.c_uint32),
+        ("ea_size", ctypes.c_uint32),
+        ("short_name_length", ctypes.c_uint8),
+        ("short_name", ctypes.c_uint16 * 12),
+        ("file_id", ctypes.c_int64),
     ]
 
 
@@ -134,19 +191,31 @@ class _FILE_RENAME_INFO(ctypes.Structure):
     ]
 
 
+class _FILE_DISPOSITION_INFO(ctypes.Structure):
+    _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_TEMPORARY = 0x00000100
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+FILE_ATTRIBUTE_OFFLINE = 0x00001000
+FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+FILE_ATTRIBUTE_CLOUD_HYDRATION = (
+    FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_NO_RECALL = 0x00100000
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_FLAG_WRITE_THROUGH = 0x80000000
 
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 FILE_SHARE_DELETE = 0x00000004
+WINDOWS_FILETIME_UNIX_EPOCH = 116_444_736_000_000_000
 
 FILE_READ_DATA = 0x00000001
 FILE_LIST_DIRECTORY = 0x00000001
@@ -164,6 +233,7 @@ FILE_WRITE_ATTRIBUTES = 0x00000100
 DELETE = 0x00010000
 READ_CONTROL = 0x00020000
 WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
 SYNCHRONIZE = 0x00100000
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
@@ -178,6 +248,15 @@ FILE_WRITE_THROUGH = 0x00000002
 FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 FILE_NON_DIRECTORY_FILE = 0x00000040
 FILE_OPEN_REPARSE_POINT = 0x00200000
+FILE_OPEN_NO_RECALL = 0x00400000
+
+FILE_ID_BOTH_DIRECTORY_INFO = 10
+FILE_ID_BOTH_DIRECTORY_RESTART_INFO = 11
+ERROR_NO_MORE_FILES = 18
+FILE_BEGIN = 0
+FILE_DISPOSITION_INFO_CLASS = 4
+WINDOWS_DIRECTORY_ENUMERATION_BUFFER_BYTES = 64 * 1024
+MAXIMUM_DIRECTORY_ENTRIES = 250_000
 
 OBJ_CASE_INSENSITIVE = 0x00000040
 STATUS_OBJECT_NAME_COLLISION = 0xC0000035
@@ -193,6 +272,7 @@ FILE_RENAME_INFO_CLASS = 3
 SE_FILE_OBJECT = 1
 DACL_SECURITY_INFORMATION = 0x00000004
 OWNER_SECURITY_INFORMATION = 0x00000001
+PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 ACL_SIZE_INFORMATION_CLASS = 2
 SE_DACL_PROTECTED = 0x1000
 ACCESS_ALLOWED_ACE_TYPE = 0x00
@@ -208,7 +288,7 @@ def _require_windows() -> None:
         raise WindowsUnsupportedError("Windows native filesystem support is unavailable.")
 
 
-def require_supported_runtime() -> None:
+def require_filesystem_runtime() -> None:
     _require_windows()
     if ctypes.sizeof(ctypes.c_void_p) != 8 or platform.machine().casefold() not in {
         "amd64",
@@ -216,8 +296,17 @@ def require_supported_runtime() -> None:
     }:
         raise WindowsUnsupportedError("Windows recovery requires 64-bit x64 Python.")
     version = sys.getwindowsversion()
+    if version.major < 10 or version.build < 17763:
+        raise WindowsUnsupportedError("Windows recovery requires Windows 10 version 1809 or later.")
+
+
+def require_supported_runtime() -> None:
+    """Require the narrower Windows 11 runtime used by encrypted iOS recovery."""
+
+    require_filesystem_runtime()
+    version = sys.getwindowsversion()
     if version.major < 10 or version.build < 22000:
-        raise WindowsUnsupportedError("Windows recovery requires Windows 11 or later.")
+        raise WindowsUnsupportedError("Encrypted iOS recovery requires Windows 11 or later.")
 
 
 def validate_component(name: str) -> str:
@@ -282,7 +371,177 @@ def handle_information(handle: int) -> WindowsHandleInformation:
         last_write_time=(
             (int(information.last_write_time.high) << 32) | int(information.last_write_time.low)
         ),
+        last_access_time=(
+            (int(information.last_access_time.high) << 32) | int(information.last_access_time.low)
+        ),
     )
+
+
+def _filetime_from_ticks(value: int) -> _FILETIME:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > (1 << 64) - 1:
+        raise WindowsNativeError("A Windows timestamp exceeded the supported range.")
+    return _FILETIME(
+        low=value & 0xFFFFFFFF,
+        high=(value >> 32) & 0xFFFFFFFF,
+    )
+
+
+def restore_handle_times(
+    handle: int,
+    *,
+    access_time_filetime: int,
+    write_time_filetime: int,
+) -> None:
+    """Restore exact timestamps through an already-pinned Windows handle."""
+
+    _require_windows()
+    if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
+        raise WindowsNativeError("A Windows capability handle was invalid.")
+    access_time = _filetime_from_ticks(access_time_filetime)
+    write_time = _filetime_from_ticks(write_time_filetime)
+    kernel32 = _dll("kernel32")
+    function = kernel32.SetFileTime
+    function.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+    ]
+    function.restype = wintypes.BOOL
+    if not function(
+        wintypes.HANDLE(handle),
+        None,
+        ctypes.byref(access_time),
+        ctypes.byref(write_time),
+    ):
+        raise _last_error("Windows timestamps could not be restored safely.")
+
+
+def _directory_entries_from_buffer(
+    payload: bytes,
+    *,
+    volume_serial_number: int,
+) -> tuple[WindowsDirectoryEntryInformation, ...]:
+    """Decode one bounded FILE_ID_BOTH_DIR_INFO buffer without trusting offsets."""
+
+    header_bytes = ctypes.sizeof(_FILE_ID_BOTH_DIR_INFO_HEADER)
+    offset = 0
+    entries: list[WindowsDirectoryEntryInformation] = []
+    while True:
+        if offset < 0 or offset + header_bytes > len(payload):
+            raise WindowsNativeError("Windows directory metadata had an unsafe shape.")
+        header = _FILE_ID_BOTH_DIR_INFO_HEADER.from_buffer_copy(payload, offset)
+        name_bytes = int(header.file_name_length)
+        name_start = offset + header_bytes
+        name_end = name_start + name_bytes
+        if name_bytes <= 0 or name_bytes % 2 or name_end > len(payload):
+            raise WindowsNativeError("Windows directory metadata had an unsafe name.")
+        try:
+            name = payload[name_start:name_end].decode("utf-16-le", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise WindowsNativeError("Windows directory metadata had an unsafe name.") from exc
+        if "\x00" in name:
+            raise WindowsNativeError("Windows directory metadata had an unsafe name.")
+        short_name_bytes = int(header.short_name_length)
+        short_name_size = ctypes.sizeof(header.short_name)
+        if short_name_bytes < 0 or short_name_bytes > short_name_size or short_name_bytes % 2:
+            raise WindowsNativeError("Windows directory metadata had an unsafe short name.")
+        short_name: str | None = None
+        if short_name_bytes:
+            short_name_start = offset + _FILE_ID_BOTH_DIR_INFO_HEADER.short_name.offset
+            try:
+                short_name = payload[short_name_start : short_name_start + short_name_bytes].decode(
+                    "utf-16-le", errors="strict"
+                )
+            except UnicodeDecodeError as exc:
+                raise WindowsNativeError(
+                    "Windows directory metadata had an unsafe short name."
+                ) from exc
+            if "\x00" in short_name:
+                raise WindowsNativeError("Windows directory metadata had an unsafe short name.")
+        byte_size = int(header.end_of_file)
+        last_write_time = int(header.last_write_time)
+        last_access_time = int(header.last_access_time)
+        if byte_size < 0 or last_write_time < 0 or last_access_time < 0:
+            raise WindowsNativeError("Windows directory metadata had unsafe file values.")
+        entries.append(
+            WindowsDirectoryEntryInformation(
+                name=name,
+                attributes=int(header.file_attributes),
+                identity=(
+                    int(volume_serial_number),
+                    int(header.file_id) & ((1 << 64) - 1),
+                ),
+                byte_size=byte_size,
+                last_write_time=last_write_time,
+                last_access_time=last_access_time,
+                short_name=short_name,
+            )
+        )
+        next_offset = int(header.next_entry_offset)
+        if next_offset == 0:
+            return tuple(entries)
+        if (
+            next_offset % 8
+            or next_offset < header_bytes + name_bytes
+            or offset + next_offset <= offset
+            or offset + next_offset > len(payload)
+        ):
+            raise WindowsNativeError("Windows directory metadata had an unsafe shape.")
+        offset += next_offset
+
+
+def iter_directory_entries(handle: int) -> Iterator[WindowsDirectoryEntryInformation]:
+    """Stream one bounded held-directory enumeration without target-opening queries."""
+
+    directory = handle_information(handle)
+    if not directory.is_directory or directory.is_reparse_point or directory.is_cloud_hydrated:
+        raise WindowsNativeError("A Windows capability path was not a safe directory.")
+    kernel32 = _dll("kernel32")
+    function = kernel32.GetFileInformationByHandleEx
+    function.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    function.restype = wintypes.BOOL
+    entry_count = 0
+    information_class = FILE_ID_BOTH_DIRECTORY_RESTART_INFO
+    while True:
+        buffer = ctypes.create_string_buffer(WINDOWS_DIRECTORY_ENUMERATION_BUFFER_BYTES)
+        ctypes.set_last_error(0)
+        if not function(
+            wintypes.HANDLE(handle),
+            information_class,
+            buffer,
+            len(buffer),
+        ):
+            error = int(ctypes.get_last_error() or 0)
+            if error == ERROR_NO_MORE_FILES:
+                break
+            raise WindowsNativeError(
+                "A Windows directory could not be enumerated safely.",
+                winerror=error,
+            )
+        decoded = _directory_entries_from_buffer(
+            bytes(buffer),
+            volume_serial_number=directory.identity[0],
+        )
+        if not decoded:
+            raise WindowsNativeError("Windows directory enumeration made no safe progress.")
+        for entry in decoded:
+            if entry.name in {".", ".."}:
+                continue
+            validate_component(entry.name)
+            if entry.short_name is not None:
+                validate_component(entry.short_name)
+            entry_count += 1
+            if entry_count > MAXIMUM_DIRECTORY_ENTRIES:
+                raise WindowsNativeError("A Windows directory exceeded the safe entry limit.")
+            yield entry
+        information_class = FILE_ID_BOTH_DIRECTORY_INFO
+
+
+def directory_entries(handle: int) -> tuple[WindowsDirectoryEntryInformation, ...]:
+    """Materialize one bounded enumeration for narrow identity lookups and tests."""
+
+    return tuple(iter_directory_entries(handle))
 
 
 def volume_capabilities(handle: int) -> WindowsVolumeCapabilities:
@@ -328,10 +587,24 @@ def require_private_ntfs_volume(handle: int) -> None:
         )
 
 
+def require_source_ntfs_volume(handle: int) -> None:
+    """Restrict source identity binding to NTFS's collision-safe 64-bit file IDs."""
+
+    capabilities = volume_capabilities(handle)
+    if capabilities.filesystem_name.casefold() != "ntfs":
+        raise WindowsUnsupportedError(
+            "Windows recovery sources must be on private local NTFS storage."
+        )
+    if not capabilities.filesystem_flags & FILE_PERSISTENT_ACLS:
+        raise WindowsUnsupportedError(
+            "The Windows recovery source does not preserve access-control lists."
+        )
+
+
 def require_recovery_capabilities(handle: int) -> None:
     """Probe the non-mutating Windows contract before any password is requested."""
 
-    require_supported_runtime()
+    require_filesystem_runtime()
     information = handle_information(handle)
     if not information.is_directory or information.is_reparse_point:
         raise WindowsUnsupportedError("The Windows destination parent was not a safe directory.")
@@ -417,7 +690,7 @@ def private_security_descriptor() -> Iterator[wintypes.LPVOID]:
     """Create a protected current-user-and-SYSTEM descriptor for one atomic create."""
 
     sid = _current_user_sid_string()
-    sddl = f"O:{sid}D:P(A;;FA;;;SY)(A;;FA;;;{sid})"
+    sddl = f"O:{sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{sid})"
     advapi32 = _dll("advapi32")
     kernel32 = _dll("kernel32")
     descriptor = wintypes.LPVOID()
@@ -439,6 +712,141 @@ def private_security_descriptor() -> Iterator[wintypes.LPVOID]:
             local_free.argtypes = [wintypes.HLOCAL]
             local_free.restype = wintypes.HLOCAL
             local_free(descriptor)
+
+
+def _handle_has_owner(handle: int, expected_owner: wintypes.LPVOID) -> bool:
+    """Compare a pinned object's owner without resolving its visible path again."""
+
+    advapi32 = _dll("advapi32")
+    kernel32 = _dll("kernel32")
+    owner = wintypes.LPVOID()
+    descriptor = wintypes.LPVOID()
+    get_security = advapi32.GetSecurityInfo
+    get_security.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    get_security.restype = wintypes.DWORD
+    result = int(
+        get_security(
+            wintypes.HANDLE(handle),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            None,
+            None,
+            None,
+            ctypes.byref(descriptor),
+        )
+    )
+    if result:
+        raise WindowsNativeError(
+            "Private Windows access controls could not be inspected.",
+            winerror=result,
+        )
+    try:
+        if not descriptor or not owner:
+            raise WindowsNativeError("A private Windows access-control owner was missing.")
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = [wintypes.LPVOID, wintypes.LPVOID]
+        equal_sid.restype = wintypes.BOOL
+        return bool(equal_sid(owner, expected_owner))
+    finally:
+        if descriptor:
+            local_free = kernel32.LocalFree
+            local_free.argtypes = [wintypes.HLOCAL]
+            local_free.restype = wintypes.HLOCAL
+            local_free(descriptor)
+
+
+def apply_private_acl(handle: int, *, owner_rebind: bool = False) -> None:
+    """Bind a pinned directory to the private descriptor's owner and protected DACL.
+
+    DACL-only repair preserves an already-correct owner. The caller must reopen
+    with the separate owner-write capability only after this handle proves it is
+    needed, so owner-controlled directories remain repairable.
+    """
+
+    if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
+        raise WindowsNativeError("A Windows capability handle was invalid.")
+    if not isinstance(owner_rebind, bool):
+        raise TypeError("owner_rebind must be a boolean.")
+    advapi32 = _dll("advapi32")
+    get_dacl = advapi32.GetSecurityDescriptorDacl
+    get_dacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_dacl.restype = wintypes.BOOL
+    get_owner = advapi32.GetSecurityDescriptorOwner
+    get_owner.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_owner.restype = wintypes.BOOL
+    set_security = advapi32.SetSecurityInfo
+    set_security.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    set_security.restype = wintypes.DWORD
+    with private_security_descriptor() as descriptor:
+        owner = wintypes.LPVOID()
+        owner_defaulted = wintypes.BOOL()
+        if not get_owner(descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)):
+            raise _last_error("Private Windows access controls could not be prepared.")
+        if not owner:
+            raise WindowsNativeError("A private Windows access-control owner was missing.")
+        if not owner_rebind and not _handle_has_owner(handle, owner):
+            raise WindowsPrivateOwnerRebindRequired(
+                "Private Windows access controls needed owner rebinding."
+            )
+        dacl_present = wintypes.BOOL()
+        dacl = wintypes.LPVOID()
+        dacl_defaulted = wintypes.BOOL()
+        if not get_dacl(
+            descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise _last_error("Private Windows access controls could not be prepared.")
+        if not dacl_present.value or not dacl:
+            raise WindowsNativeError("A private Windows access-control list was missing.")
+        security_information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        if owner_rebind:
+            security_information |= OWNER_SECURITY_INFORMATION
+        result = int(
+            set_security(
+                wintypes.HANDLE(handle),
+                SE_FILE_OBJECT,
+                security_information,
+                owner if owner_rebind else None,
+                None,
+                dacl,
+                None,
+            )
+        )
+        if result:
+            raise WindowsNativeError(
+                "Private Windows access controls could not be applied.",
+                winerror=result,
+            )
+    validate_private_acl(handle)
 
 
 def _sid_string(sid: wintypes.LPVOID) -> str:
@@ -665,6 +1073,7 @@ def create_fresh_directory(parent_handle: int, name: str) -> int:
                 | FILE_TRAVERSE
                 | FILE_READ_ATTRIBUTES
                 | FILE_WRITE_ATTRIBUTES
+                | DELETE
                 | READ_CONTROL
                 | WRITE_DAC
                 | SYNCHRONIZE
@@ -675,13 +1084,66 @@ def create_fresh_directory(parent_handle: int, name: str) -> int:
             file_attributes=FILE_ATTRIBUTE_NORMAL,
             security_descriptor=descriptor,
         )
-    information = handle_information(handle)
-    if not information.is_directory or information.is_reparse_point:
+    try:
+        information = handle_information(handle)
+        if not information.is_directory or information.is_reparse_point:
+            raise WindowsNativeError("The fresh Windows destination was not a regular directory.")
+        validate_private_acl(handle)
+    except BaseException:
         with contextlib.suppress(Exception):
             close_handle(handle)
-        raise WindowsNativeError("The fresh Windows destination was not a regular directory.")
+        raise
+    return handle
+
+
+def _open_relative_directory(
+    parent_handle: int,
+    name: str,
+    *,
+    writable: bool,
+    acl_repair: bool,
+    owner_rebind: bool,
+    share_delete: bool,
+) -> int:
+    if writable and acl_repair:
+        raise ValueError(
+            "A Windows directory capability cannot combine data writes with ACL repair."
+        )
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+    if acl_repair:
+        # Security metadata and stable handle information need no list or
+        # traversal access to the directory contents.
+        desired = FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE
+        if owner_rebind:
+            desired |= WRITE_OWNER
+    else:
+        desired = (
+            FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+        )
+    if writable:
+        desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
+    share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
+    if share_delete:
+        share_access |= FILE_SHARE_DELETE
+    handle, _ = _nt_create_relative(
+        parent_handle,
+        name,
+        desired_access=desired,
+        share_access=share_access,
+        disposition=FILE_OPEN,
+        options=(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT),
+        file_attributes=FILE_ATTRIBUTE_NORMAL,
+        security_descriptor=None,
+    )
     try:
-        validate_private_acl(handle)
+        information = handle_information(handle)
+        if (
+            not information.is_directory
+            or information.is_reparse_point
+            or information.is_cloud_hydrated
+        ):
+            raise WindowsNativeError("A Windows capability path traversed an unsafe directory.")
     except BaseException:
         with contextlib.suppress(Exception):
             close_handle(handle)
@@ -690,170 +1152,263 @@ def create_fresh_directory(parent_handle: int, name: str) -> int:
 
 
 def open_relative_directory(parent_handle: int, name: str, *, writable: bool) -> int:
-    desired = (
-        FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
-    )
-    if writable:
-        desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
-    handle, _ = _nt_create_relative(
+    """Open a transient traversal handle that can coexist with retained capabilities."""
+
+    return _open_relative_directory(
         parent_handle,
         name,
-        desired_access=desired,
-        share_access=FILE_SHARE_READ | FILE_SHARE_WRITE,
-        disposition=FILE_OPEN,
-        options=FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
-        file_attributes=FILE_ATTRIBUTE_NORMAL,
-        security_descriptor=None,
+        writable=writable,
+        acl_repair=False,
+        owner_rebind=False,
+        share_delete=True,
     )
-    information = handle_information(handle)
-    if not information.is_directory or information.is_reparse_point:
-        with contextlib.suppress(Exception):
-            close_handle(handle)
-        raise WindowsNativeError("A Windows capability path traversed an unsafe directory.")
-    return handle
 
 
-def open_relative_directory_for_rename(root_handle: int, parts: Sequence[str]) -> int:
-    """Open one descendant directory with DELETE access while rejecting reparse traversal."""
-
-    components = validate_relative_parts(parts)
-    parent = root_handle
-    parent_owned = False
-    try:
-        for component in components[:-1]:
-            child = open_relative_directory(parent, component, writable=False)
-            if parent_owned:
-                close_handle(parent)
-            parent = child
-            parent_owned = True
-        handle, _ = _nt_create_relative(
-            parent,
-            components[-1],
-            desired_access=(
-                FILE_LIST_DIRECTORY
-                | FILE_TRAVERSE
-                | FILE_READ_ATTRIBUTES
-                | READ_CONTROL
-                | DELETE
-                | SYNCHRONIZE
-            ),
-            share_access=FILE_SHARE_READ | FILE_SHARE_WRITE,
-            disposition=FILE_OPEN,
-            options=(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT),
-            file_attributes=FILE_ATTRIBUTE_NORMAL,
-            security_descriptor=None,
-        )
-        information = handle_information(handle)
-        if not information.is_directory or information.is_reparse_point:
-            with contextlib.suppress(Exception):
-                close_handle(handle)
-            raise WindowsNativeError("A Windows promotion source was not a safe directory.")
-        return handle
-    finally:
-        if parent_owned:
-            close_handle(parent)
-
-
-def ensure_relative_directory(
+def open_relative_retained_directory(
     parent_handle: int,
     name: str,
     *,
-    require_existing_private_acl: bool = True,
-) -> tuple[int, bool]:
-    with private_security_descriptor() as descriptor:
-        handle, result = _nt_create_relative(
-            parent_handle,
-            name,
-            desired_access=(
-                FILE_LIST_DIRECTORY
-                | FILE_ADD_FILE
-                | FILE_ADD_SUBDIRECTORY
-                | FILE_TRAVERSE
-                | FILE_READ_ATTRIBUTES
-                | FILE_WRITE_ATTRIBUTES
-                | READ_CONTROL
-                | WRITE_DAC
-                | SYNCHRONIZE
-            ),
-            share_access=FILE_SHARE_READ | FILE_SHARE_WRITE,
-            disposition=FILE_OPEN_IF,
-            options=(FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT),
-            file_attributes=FILE_ATTRIBUTE_NORMAL,
-            security_descriptor=descriptor,
-        )
-    information = handle_information(handle)
-    if not information.is_directory or information.is_reparse_point:
-        with contextlib.suppress(Exception):
-            close_handle(handle)
-        raise WindowsNativeError("A private Windows directory was unsafe.")
-    created = result == FILE_CREATED
-    if created or require_existing_private_acl:
-        try:
-            validate_private_acl(handle)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                close_handle(handle)
-            raise
-    return handle, created
+    writable: bool,
+) -> int:
+    """Open and pin a final directory against rename or replacement."""
+
+    return _open_relative_directory(
+        parent_handle,
+        name,
+        writable=writable,
+        acl_repair=False,
+        owner_rebind=False,
+        share_delete=False,
+    )
 
 
-def open_relative_regular_file(parent_handle: int, name: str) -> int:
+def open_relative_acl_repair_directory(
+    parent_handle: int,
+    name: str,
+    *,
+    owner_rebind: bool = False,
+    coexist_with_retained_delete: bool = False,
+) -> int:
+    """Open one directory for ACL repair without child or data-write access.
+
+    Delete sharing is safe only when another retained capability already pins
+    the exact directory against rename and replacement.
+    """
+
+    return _open_relative_directory(
+        parent_handle,
+        name,
+        writable=False,
+        acl_repair=True,
+        owner_rebind=owner_rebind,
+        share_delete=coexist_with_retained_delete,
+    )
+
+
+def _open_relative_regular_file(
+    parent_handle: int,
+    name: str,
+    *,
+    acl_repair: bool,
+    owner_rebind: bool,
+) -> int:
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+    if acl_repair:
+        # Repair can change only security-descriptor metadata. No file-content
+        # read/write, attribute-write, or delete access is requested.
+        desired_access = FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE
+        share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
+        if owner_rebind:
+            desired_access |= WRITE_OWNER
+    else:
+        desired_access = GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+        share_access = FILE_SHARE_READ
     handle, _ = _nt_create_relative(
         parent_handle,
         name,
-        desired_access=GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        share_access=FILE_SHARE_READ,
+        desired_access=desired_access,
+        share_access=share_access,
         disposition=FILE_OPEN,
-        options=FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+        options=(
+            FILE_NON_DIRECTORY_FILE
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | FILE_OPEN_REPARSE_POINT
+            | FILE_OPEN_NO_RECALL
+        ),
         file_attributes=FILE_ATTRIBUTE_NORMAL,
         security_descriptor=None,
     )
-    information = handle_information(handle)
-    if information.is_directory or information.is_reparse_point:
-        with contextlib.suppress(Exception):
-            close_handle(handle)
-        raise WindowsNativeError("A Windows capability file was not a regular file.")
-    return handle
-
-
-def create_fresh_regular_file(parent_handle: int, name: str, *, temporary: bool = False) -> int:
-    attributes = FILE_ATTRIBUTE_NORMAL | (FILE_ATTRIBUTE_TEMPORARY if temporary else 0)
-    with private_security_descriptor() as descriptor:
-        handle, _ = _nt_create_relative(
-            parent_handle,
-            name,
-            desired_access=(
-                GENERIC_READ
-                | GENERIC_WRITE
-                | DELETE
-                | FILE_READ_ATTRIBUTES
-                | FILE_WRITE_ATTRIBUTES
-                | READ_CONTROL
-                | SYNCHRONIZE
-            ),
-            share_access=0,
-            disposition=FILE_CREATE,
-            options=(
-                FILE_NON_DIRECTORY_FILE
-                | FILE_SYNCHRONOUS_IO_NONALERT
-                | FILE_OPEN_REPARSE_POINT
-                | FILE_WRITE_THROUGH
-            ),
-            file_attributes=attributes,
-            security_descriptor=descriptor,
-        )
-    information = handle_information(handle)
-    if information.is_directory or information.is_reparse_point:
-        with contextlib.suppress(Exception):
-            close_handle(handle)
-        raise WindowsNativeError("A fresh private Windows file was unsafe.")
     try:
-        validate_private_acl(handle)
+        information = handle_information(handle)
+        if (
+            information.is_directory
+            or information.is_reparse_point
+            or information.is_cloud_hydrated
+        ):
+            raise WindowsNativeError("A Windows capability file was not a regular file.")
     except BaseException:
         with contextlib.suppress(Exception):
             close_handle(handle)
         raise
     return handle
+
+
+def open_relative_regular_file(parent_handle: int, name: str) -> int:
+    """Open one private regular file for read-only, no-recall access."""
+
+    return _open_relative_regular_file(
+        parent_handle,
+        name,
+        acl_repair=False,
+        owner_rebind=False,
+    )
+
+
+def open_relative_retained_regular_file(
+    parent_handle: int,
+    name: str,
+    *,
+    owner_rebind: bool = False,
+) -> int:
+    """Pin one regular file while granting only ACL-repair metadata writes."""
+
+    return _open_relative_regular_file(
+        parent_handle,
+        name,
+        acl_repair=True,
+        owner_rebind=owner_rebind,
+    )
+
+
+def _open_relative_for_delete(
+    parent_handle: int,
+    name: str,
+    *,
+    directory: bool,
+) -> int:
+    desired_access = DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+    options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT
+    if directory:
+        desired_access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE
+        options |= FILE_DIRECTORY_FILE
+    else:
+        options |= FILE_NON_DIRECTORY_FILE | FILE_OPEN_NO_RECALL
+    handle, _ = _nt_create_relative(
+        parent_handle,
+        name,
+        desired_access=desired_access,
+        # Deny delete sharing so this exact child cannot be renamed out of the
+        # held tree while its descendants are being removed.
+        share_access=FILE_SHARE_READ | FILE_SHARE_WRITE,
+        disposition=FILE_OPEN,
+        options=options,
+        file_attributes=FILE_ATTRIBUTE_NORMAL,
+        security_descriptor=None,
+    )
+    try:
+        information = handle_information(handle)
+        if information.is_directory != directory:
+            raise WindowsNativeError("A private Windows cleanup entry changed type.")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            close_handle(handle)
+        raise
+    return handle
+
+
+def _mark_handle_for_deletion(handle: int) -> None:
+    information = _FILE_DISPOSITION_INFO(DeleteFile=True)
+    kernel32 = _dll("kernel32")
+    function = kernel32.SetFileInformationByHandle
+    function.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    function.restype = wintypes.BOOL
+    if not function(
+        wintypes.HANDLE(handle),
+        FILE_DISPOSITION_INFO_CLASS,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise _last_error("A private Windows temporary entry could not be removed safely.")
+
+
+def delete_private_tree(root_handle: int) -> None:
+    """Delete one exact held tree without performing a destructive path reopen."""
+
+    root = handle_information(root_handle)
+    if not root.is_directory or root.is_reparse_point or root.is_cloud_hydrated:
+        raise WindowsNativeError("A private Windows temporary root was unsafe.")
+    stack: list[tuple[int, tuple[WindowsDirectoryEntryInformation, ...], int, bool]] = [
+        (root_handle, directory_entries(root_handle), 0, False)
+    ]
+    observed_entries = 0
+    try:
+        while stack:
+            directory_handle, entries, index, owned = stack[-1]
+            if index >= len(entries):
+                _mark_handle_for_deletion(directory_handle)
+                stack.pop()
+                if owned:
+                    close_handle(directory_handle)
+                continue
+            entry = entries[index]
+            stack[-1] = (directory_handle, entries, index + 1, owned)
+            observed_entries += 1
+            if observed_entries > MAXIMUM_DIRECTORY_ENTRIES:
+                raise WindowsNativeError("A private Windows temporary tree was too large.")
+            if entry.is_cloud_hydrated:
+                raise WindowsNativeError("A private Windows temporary entry was not local.")
+            child_handle = _open_relative_for_delete(
+                directory_handle,
+                entry.name,
+                directory=entry.is_directory,
+            )
+            try:
+                child = handle_information(child_handle)
+                if (
+                    child.identity != entry.identity
+                    or child.is_reparse_point != entry.is_reparse_point
+                    or child.is_cloud_hydrated
+                ):
+                    raise WindowsNativeError(
+                        "A private Windows temporary entry changed before cleanup."
+                    )
+                if entry.is_directory and not entry.is_reparse_point:
+                    child_entries = directory_entries(child_handle)
+                    stack.append((child_handle, child_entries, 0, True))
+                    child_handle = -1
+                else:
+                    _mark_handle_for_deletion(child_handle)
+            finally:
+                if child_handle > 0:
+                    close_handle(child_handle)
+    except BaseException:
+        for handle, _entries, _index, owned in reversed(stack):
+            if owned:
+                with contextlib.suppress(Exception):
+                    close_handle(handle)
+        raise
+
+
+def _truncate_regular_file(handle: int) -> None:
+    """Truncate one already-validated held file without reopening its path."""
+
+    kernel32 = _dll("kernel32")
+    seek = kernel32.SetFilePointerEx
+    seek.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    seek.restype = wintypes.BOOL
+    if not seek(wintypes.HANDLE(handle), 0, None, FILE_BEGIN):
+        raise _last_error("A private Windows file could not be prepared safely.")
+    truncate = kernel32.SetEndOfFile
+    truncate.argtypes = [wintypes.HANDLE]
+    truncate.restype = wintypes.BOOL
+    if not truncate(wintypes.HANDLE(handle)):
+        raise _last_error("A private Windows file could not be prepared safely.")
 
 
 def create_or_replace_regular_file(
@@ -862,96 +1417,58 @@ def create_or_replace_regular_file(
     *,
     exclusive: bool,
     temporary: bool = False,
+    allow_path_reopen: bool = False,
 ) -> int:
-    """Create a private file, or atomically truncate the existing regular file."""
+    """Create a private file, or validate and then truncate an existing file."""
 
     attributes = FILE_ATTRIBUTE_NORMAL | (FILE_ATTRIBUTE_TEMPORARY if temporary else 0)
+    desired_access = (
+        GENERIC_READ
+        | GENERIC_WRITE
+        | FILE_READ_ATTRIBUTES
+        | FILE_WRITE_ATTRIBUTES
+        | READ_CONTROL
+        | WRITE_DAC
+        | SYNCHRONIZE
+    )
+    if not allow_path_reopen:
+        desired_access |= DELETE
     with private_security_descriptor() as descriptor:
         handle, _ = _nt_create_relative(
             parent_handle,
             name,
-            desired_access=(
-                GENERIC_READ
-                | GENERIC_WRITE
-                | DELETE
-                | FILE_READ_ATTRIBUTES
-                | FILE_WRITE_ATTRIBUTES
-                | READ_CONTROL
-                | WRITE_DAC
-                | SYNCHRONIZE
-            ),
-            share_access=0,
-            disposition=FILE_CREATE if exclusive else FILE_OVERWRITE_IF,
+            desired_access=desired_access,
+            share_access=(FILE_SHARE_READ | FILE_SHARE_WRITE) if allow_path_reopen else 0,
+            # FILE_OVERWRITE_IF mutates an existing file before its ACL can be
+            # validated.  FILE_OPEN_IF holds it unchanged until validation,
+            # after which truncation occurs through this exact handle.
+            disposition=FILE_CREATE if exclusive else FILE_OPEN_IF,
             options=(
                 FILE_NON_DIRECTORY_FILE
                 | FILE_SYNCHRONOUS_IO_NONALERT
                 | FILE_OPEN_REPARSE_POINT
+                | FILE_OPEN_NO_RECALL
                 | FILE_WRITE_THROUGH
             ),
             file_attributes=attributes,
             security_descriptor=descriptor,
         )
-    information = handle_information(handle)
-    if information.is_directory or information.is_reparse_point:
-        with contextlib.suppress(Exception):
-            close_handle(handle)
-        raise WindowsNativeError("A private Windows file was unsafe.")
     try:
+        information = handle_information(handle)
+        if (
+            information.is_directory
+            or information.is_reparse_point
+            or information.is_cloud_hydrated
+        ):
+            raise WindowsNativeError("A private Windows file was unsafe.")
         validate_private_acl(handle)
+        if not exclusive:
+            _truncate_regular_file(handle)
     except BaseException:
         with contextlib.suppress(Exception):
             close_handle(handle)
         raise
     return handle
-
-
-def open_relative_path(root_handle: int, parts: Sequence[str], *, directory: bool = False) -> int:
-    components = validate_relative_parts(parts)
-    current = root_handle
-    owned = False
-    try:
-        for component in components[:-1]:
-            child = open_relative_directory(current, component, writable=False)
-            if owned:
-                close_handle(current)
-            current = child
-            owned = True
-        result = (
-            open_relative_directory(current, components[-1], writable=False)
-            if directory
-            else open_relative_regular_file(current, components[-1])
-        )
-        return result
-    finally:
-        if owned:
-            close_handle(current)
-
-
-def ensure_relative_directory_path(
-    root_handle: int,
-    parts: Sequence[str],
-    *,
-    require_existing_private_acl: bool = True,
-) -> int:
-    components = validate_relative_parts(parts)
-    current = root_handle
-    owned = False
-    try:
-        for component in components:
-            child, _created = ensure_relative_directory(
-                current,
-                component,
-                require_existing_private_acl=require_existing_private_acl,
-            )
-            if owned:
-                close_handle(current)
-            current = child
-            owned = True
-        owned = False
-        return current
-    finally:
-        if owned:
-            close_handle(current)
 
 
 def create_relative_regular_file_path(
@@ -960,28 +1477,41 @@ def create_relative_regular_file_path(
     *,
     temporary: bool = False,
     exclusive: bool = True,
-    require_existing_private_acl: bool = True,
+    allow_path_reopen: bool = False,
 ) -> int:
     components = validate_relative_parts(parts)
     parent = root_handle
-    owned = False
+    owned: list[int] = []
+    result = -1
     try:
-        if len(components) > 1:
-            parent = ensure_relative_directory_path(
-                root_handle,
-                components[:-1],
-                require_existing_private_acl=require_existing_private_acl,
-            )
-            owned = True
-        return create_or_replace_regular_file(
+        for component in components[:-1]:
+            child = open_relative_directory(parent, component, writable=True)
+            try:
+                validate_private_acl(child)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    close_handle(child)
+                raise
+            owned.append(child)
+            parent = child
+        result = create_or_replace_regular_file(
             parent,
             components[-1],
             exclusive=exclusive,
             temporary=temporary,
+            allow_path_reopen=allow_path_reopen,
         )
-    finally:
-        if owned:
-            close_handle(parent)
+        while owned:
+            close_handle(owned.pop())
+        return result
+    except BaseException:
+        for handle in reversed(owned):
+            with contextlib.suppress(Exception):
+                close_handle(handle)
+        if result > 0:
+            with contextlib.suppress(Exception):
+                close_handle(result)
+        raise
 
 
 def handle_to_file_descriptor(handle: int, *, flags: int) -> int:
@@ -999,15 +1529,6 @@ def handle_to_file_descriptor(handle: int, *, flags: int) -> int:
             close_handle(handle)
         raise WindowsNativeError("A Windows handle could not be bound to Python safely.")
     return descriptor
-
-
-def flush_handle(handle: int) -> None:
-    kernel32 = _dll("kernel32")
-    function = kernel32.FlushFileBuffers
-    function.argtypes = [wintypes.HANDLE]
-    function.restype = wintypes.BOOL
-    if not function(wintypes.HANDLE(handle)):
-        raise _last_error("A private Windows file could not be flushed safely.")
 
 
 def final_path_from_handle(handle: int) -> str:

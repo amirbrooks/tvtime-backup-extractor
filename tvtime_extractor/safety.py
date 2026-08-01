@@ -24,6 +24,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import windows_native as _windows_native
 from .errors import OutputExistsError, PartialExtractionError, UnsafePathError, UserInputError
+from .spreadsheet import spreadsheet_cell_needs_escape, spreadsheet_safe_cell
 
 EXTRACTION_DIRECTORY_NAME = "TVTime-Extraction"
 WINDOWS_INVALID_CHARACTERS = frozenset('<>:"|?*')
@@ -54,15 +55,27 @@ _DARWIN_TRUSTED_ROOT_ALIASES = {
 _DARWIN_MNT_LOCAL = 0x00001000
 _WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_FILE_ATTRIBUTE_OFFLINE = 0x00001000
+_WINDOWS_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
+_WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+_WINDOWS_CLOUD_HYDRATION_ATTRIBUTES = (
+    _WINDOWS_FILE_ATTRIBUTE_OFFLINE
+    | _WINDOWS_FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | _WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_GENERIC_WRITE = 0x40000000
 _WINDOWS_DELETE = 0x00010000
+_WINDOWS_READ_CONTROL = 0x00020000
+_WINDOWS_WRITE_DAC = 0x00040000
+_WINDOWS_WRITE_OWNER = 0x00080000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_WRITE_ATTRIBUTES = 0x00000100
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_FILE_SHARE_DELETE = 0x00000004
 _WINDOWS_OPEN_EXISTING = 3
-_WINDOWS_CREATE_NEW = 1
+_WINDOWS_FILE_FLAG_OPEN_NO_RECALL = 0x00100000
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -71,12 +84,6 @@ _WINDOWS_FILE_ADD_SUBDIRECTORY = 0x00000004
 _WINDOWS_FILE_TRAVERSE = 0x00000020
 _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS = _WINDOWS_FILE_ADD_SUBDIRECTORY | _WINDOWS_FILE_TRAVERSE
 _WINDOWS_SYNCHRONIZE = 0x00100000
-_WINDOWS_FILE_CREATE = 2
-_WINDOWS_FILE_DIRECTORY_FILE = 0x00000001
-_WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
-_WINDOWS_OBJ_CASE_INSENSITIVE = 0x00000040
-_WINDOWS_STATUS_OBJECT_NAME_COLLISION = -1073741771
-_WINDOWS_SDDL_REVISION_1 = 1
 _LINUX_RENAME_NOREPLACE = 1
 _DARWIN_RENAME_EXCL = 0x00000004
 _REMOTE_FILESYSTEM_TYPES = frozenset(
@@ -177,45 +184,24 @@ class _WindowsByHandleFileInformation(ctypes.Structure):
     ]
 
 
-class _WindowsUnicodeString(ctypes.Structure):
-    _fields_ = [
-        ("length", ctypes.c_ushort),
-        ("maximum_length", ctypes.c_ushort),
-        ("buffer", ctypes.c_void_p),
-    ]
-
-
-class _WindowsObjectAttributes(ctypes.Structure):
-    _fields_ = [
-        ("length", ctypes.c_ulong),
-        ("root_directory", ctypes.c_void_p),
-        ("object_name", ctypes.POINTER(_WindowsUnicodeString)),
-        ("attributes", ctypes.c_ulong),
-        ("security_descriptor", ctypes.c_void_p),
-        ("security_quality_of_service", ctypes.c_void_p),
-    ]
-
-
-class _WindowsIOStatusBlock(ctypes.Structure):
-    _fields_ = [
-        ("status", ctypes.c_ssize_t),
-        ("information", ctypes.c_size_t),
-    ]
-
-
-class _WindowsSecurityAttributes(ctypes.Structure):
-    _fields_ = [
-        ("length", ctypes.c_uint32),
-        ("security_descriptor", ctypes.c_void_p),
-        ("inherit_handle", ctypes.c_int),
-    ]
-
-
 @dataclass(frozen=True)
 class _WindowsRegularFileInformation:
     identity: tuple[int, int]
     byte_size: int
     last_write_time: int
+
+
+@dataclass(frozen=True)
+class _WindowsEnumeratedMetadata:
+    st_mode: int
+    st_size: int
+    st_file_attributes: int
+    st_dev: int
+    st_ino: int
+    st_mtime_ns: int
+    st_atime_ns: int = 0
+    windows_last_write_time: int = 0
+    windows_last_access_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -247,6 +233,12 @@ class _LinuxMountRecord:
     source: str
     mount_options: frozenset[str]
     super_options: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _SafeDirectoryEntry:
+    path: Path
+    metadata: os.stat_result | _WindowsEnumeratedMetadata
 
 
 @dataclass(frozen=True)
@@ -283,6 +275,8 @@ def set_private_umask() -> None:
 
 
 def canonical_path(path: Path) -> Path:
+    if _running_on_windows():
+        return no_link_absolute_path(path)
     if _ANCHORED_OUTPUT_STATE.get() is not None and not path.expanduser().is_absolute():
         return no_link_absolute_path(path)
     return path.expanduser().resolve(strict=False)
@@ -395,6 +389,9 @@ def no_link_absolute_path(path: Path) -> Path:
     expanded = path.expanduser()
     absolute = Path(os.path.abspath(os.fspath(expanded)))
     absolute = _normalize_trusted_darwin_root_alias(absolute)
+    if _running_on_windows():
+        _windows_require_safe_existing_ancestors(absolute)
+        return absolute
     current = Path(absolute.anchor)
     for component in absolute.parts[1:]:
         current /= component
@@ -410,6 +407,7 @@ def no_link_absolute_path(path: Path) -> Path:
             raise UnsafePathError(
                 f"Refusing a path through a symbolic link or reparse point: {current}"
             )
+        require_non_hydrated_windows_metadata(metadata)
     return absolute
 
 
@@ -434,11 +432,27 @@ def is_known_synced_or_shared_path(
 ) -> bool:
     """Return whether a lexical path is a known cloud-sync or shared location."""
 
-    candidate = Path(os.path.abspath(os.fspath(path.expanduser())))
-    home = Path(os.path.abspath(os.fspath((home_directory or Path.home()).expanduser())))
     values = os.environ if environment is None else environment
+    try:
+        candidate = Path(os.path.abspath(os.fspath(path.expanduser())))
+    except (OSError, RuntimeError):
+        # An unresolved home-relative path is not safe to classify as private local storage.
+        return True
 
-    if _is_within_casefolded(candidate, home):
+    home: Path | None
+    if home_directory is not None:
+        try:
+            home = Path(os.path.abspath(os.fspath(home_directory.expanduser())))
+        except (OSError, RuntimeError):
+            home = None
+    else:
+        try:
+            home = Path(os.path.abspath(os.fspath(Path.home())))
+        except (OSError, RuntimeError):
+            # The packaged Windows helper intentionally receives no profile environment.
+            home = None
+
+    if home is not None and _is_within_casefolded(candidate, home):
         relative = os.path.relpath(os.fspath(candidate), os.fspath(home))
         parts = tuple(part.casefold() for part in Path(relative).parts if part not in (".", ""))
         if parts:
@@ -462,6 +476,33 @@ def is_known_synced_or_shared_path(
             "fileprovider",
         ):
             return True
+    elif home is None:
+        # Without a trusted home root, reject recognizable provider/shared components anywhere
+        # in the absolute path. False positives fail closed instead of disabling the offline gate.
+        parts = tuple(part.casefold() for part in candidate.parts if part not in (".", ""))
+        if any(
+            part in _HOME_SYNC_ROOT_NAMES
+            or part.startswith("onedrive - ")
+            or part.startswith("dropbox (")
+            or part.startswith("icloud drive (")
+            for part in parts
+        ):
+            return True
+        if any(
+            parts[index : index + 2]
+            in {
+                ("library", "cloudstorage"),
+                ("library", "fileprovider"),
+                ("library", "mobile documents"),
+            }
+            for index in range(max(0, len(parts) - 1))
+        ):
+            return True
+        if any(
+            parts[index : index + 3] == ("library", "application support", "fileprovider")
+            for index in range(max(0, len(parts) - 2))
+        ):
+            return True
 
     for key in (
         "BOX_SYNC",
@@ -474,8 +515,13 @@ def is_known_synced_or_shared_path(
         "PUBLIC",
     ):
         configured = values.get(key)
-        if configured and _is_within_casefolded(candidate, Path(configured).expanduser()):
-            return True
+        if configured:
+            try:
+                configured_path = Path(configured).expanduser()
+            except (OSError, RuntimeError):
+                return True
+            if _is_within_casefolded(candidate, configured_path):
+                return True
 
     if sys.platform == "darwin" and (
         _is_within_casefolded(candidate, Path("/Network"))
@@ -611,6 +657,23 @@ def _windows_volume_is_local(path: Path) -> bool:
     return drive_type in (2, 3)
 
 
+def _windows_require_source_ntfs_volume(path: Path) -> None:
+    """Require the source volume whose 64-bit file identities we bind to be NTFS."""
+
+    if not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A Windows recovery source path was invalid.")
+    root_handle = -1
+    try:
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        _windows_native.require_source_ntfs_volume(root_handle)
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError(
+            "Windows recovery sources must be on private local NTFS storage."
+        ) from exc
+    finally:
+        _windows_close_handles((root_handle,))
+
+
 def _volume_is_local(path: Path) -> bool:
     if sys.platform == "darwin":
         return _darwin_volume_is_local(path)
@@ -627,13 +690,423 @@ def _running_on_windows() -> bool:
     return os.name == "nt"
 
 
+def require_non_hydrated_windows_metadata(metadata: os.stat_result) -> None:
+    """Reject an entry whose contents are not confirmed fully present on Windows."""
+
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    if _running_on_windows() and attributes & _WINDOWS_CLOUD_HYDRATION_ATTRIBUTES:
+        raise UnsafePathError(
+            "Refusing a cloud-backed file or directory that is not fully present on local storage."
+        )
+
+
+def _windows_enumerated_metadata(
+    entry: _windows_native.WindowsDirectoryEntryInformation,
+) -> _WindowsEnumeratedMetadata:
+    mode = stat.S_IFDIR if entry.is_directory else stat.S_IFREG
+    return _WindowsEnumeratedMetadata(
+        st_mode=mode,
+        st_size=entry.byte_size,
+        st_file_attributes=entry.attributes,
+        st_dev=entry.identity[0],
+        st_ino=entry.identity[1],
+        st_mtime_ns=_windows_filetime_to_unix_ns(entry.last_write_time),
+        st_atime_ns=_windows_filetime_to_unix_ns(entry.last_access_time),
+        windows_last_write_time=entry.last_write_time,
+        windows_last_access_time=entry.last_access_time,
+    )
+
+
+def _windows_filetime_to_unix_ns(value: int) -> int:
+    """Convert one unsigned 100-nanosecond Windows FILETIME to Unix nanoseconds."""
+
+    return max(0, (value - 116_444_736_000_000_000) * 100)
+
+
+def _windows_enumerated_child(
+    parent_handle: int,
+    component: str,
+) -> _windows_native.WindowsDirectoryEntryInformation:
+    try:
+        matches = tuple(
+            entry
+            for entry in _windows_native.directory_entries(parent_handle)
+            if entry.name.casefold() == component.casefold()
+            or (
+                entry.short_name is not None and entry.short_name.casefold() == component.casefold()
+            )
+        )
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("A Windows directory could not be enumerated safely.") from exc
+    if not matches:
+        raise FileNotFoundError(component)
+    if len(matches) != 1:
+        raise UnsafePathError("A Windows directory contained an ambiguous path component.")
+    entry = matches[0]
+    if entry.is_reparse_point:
+        raise UnsafePathError("Refusing a symbolic-link or reparse-point recovery source.")
+    if entry.is_cloud_hydrated:
+        raise UnsafePathError(
+            "Refusing a cloud-backed file or directory that is not fully present on local storage."
+        )
+    return entry
+
+
+def _windows_open_enumerated_directory(
+    parent_handle: int,
+    entry: _windows_native.WindowsDirectoryEntryInformation,
+) -> int:
+    """Open one enumerated child and bind it to the same visible identity."""
+
+    if not entry.is_directory:
+        raise UnsafePathError("A Windows path contained an unsafe non-directory component.")
+    try:
+        child = _windows_native.open_relative_directory(
+            parent_handle,
+            entry.name,
+            writable=False,
+        )
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError(
+            "A Windows recovery-source directory could not be opened safely."
+        ) from exc
+    try:
+        identity = _windows_directory_identity(child)
+        visible = _windows_enumerated_child(parent_handle, entry.name)
+        if identity != entry.identity or identity != visible.identity:
+            raise UnsafePathError(
+                "A Windows recovery-source directory changed while it was opened."
+            )
+    except BaseException:
+        _windows_close_handle(child)
+        raise
+    return child
+
+
+def _windows_require_safe_existing_ancestors(path: Path) -> None:
+    """Validate existing Win32 components without ordinary path-stat opens."""
+
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A Windows path was invalid.")
+    root_handle = -1
+    owned: list[int] = []
+    try:
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        current = root_handle
+        components = path.parts[1:]
+        for index, component in enumerate(components):
+            try:
+                _windows_native.validate_component(component)
+                entry = _windows_enumerated_child(current, component)
+            except FileNotFoundError:
+                return
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError("A Windows path component was invalid.") from exc
+            if index == len(components) - 1:
+                return
+            child = _windows_open_enumerated_directory(current, entry)
+            owned.append(child)
+            current = child
+    finally:
+        _windows_close_handles((*reversed(owned), root_handle))
+
+
+@contextmanager
+def _windows_pinned_relative_parent(
+    root_handle: int,
+    components: Sequence[str],
+) -> Iterator[tuple[int, _windows_native.WindowsDirectoryEntryInformation]]:
+    """Pin every ancestor and yield one identity-bound final directory entry."""
+
+    try:
+        validated_components = _windows_native.validate_relative_parts(components)
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("A Windows recovery source path was invalid.") from exc
+    if not validated_components:
+        raise UnsafePathError("A Windows recovery source path was invalid.")
+    current = root_handle
+    owned: list[int] = []
+    try:
+        for component in validated_components[:-1]:
+            entry = _windows_enumerated_child(current, component)
+            child = _windows_open_enumerated_directory(current, entry)
+            owned.append(child)
+            current = child
+        yield current, _windows_enumerated_child(current, validated_components[-1])
+    finally:
+        _windows_close_handles(reversed(owned))
+
+
+@contextmanager
+def _windows_pinned_absolute_parent(
+    path: Path,
+) -> Iterator[tuple[int, _windows_native.WindowsDirectoryEntryInformation]]:
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A Windows recovery source path was invalid.")
+    components = path.parts[1:]
+    if not components:
+        raise UnsafePathError("A Windows volume root was not a regular recovery source file.")
+    root_handle = -1
+    try:
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        with _windows_pinned_relative_parent(root_handle, components) as binding:
+            yield binding
+    finally:
+        _windows_close_handles((root_handle,))
+
+
+@contextmanager
+def _windows_pinned_absolute_directory_handle(
+    path: Path,
+    *,
+    writable: bool = False,
+    acl_repair: bool = False,
+    owner_rebind: bool = False,
+    coexist_with_retained_delete: bool = False,
+) -> Iterator[int]:
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A Windows recovery source path was invalid.")
+    if writable and acl_repair:
+        raise ValueError(
+            "A Windows directory capability cannot combine data writes with ACL repair."
+        )
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+    if coexist_with_retained_delete and not acl_repair:
+        raise ValueError("Delete sharing requires the ACL repair capability.")
+    root_handle = -1
+    directory_handle = -1
+    try:
+        root_handle, _identity = _windows_open_locked_directory(
+            Path(path.anchor),
+            allow_child_creation=writable and len(path.parts) == 1,
+            allow_acl_repair=acl_repair and len(path.parts) == 1,
+            allow_owner_rebind=owner_rebind and len(path.parts) == 1,
+            share_delete=coexist_with_retained_delete and len(path.parts) == 1,
+        )
+        if len(path.parts) == 1:
+            yield root_handle
+            return
+        with _windows_pinned_relative_parent(root_handle, path.parts[1:]) as (
+            parent_handle,
+            entry,
+        ):
+            if not entry.is_directory:
+                raise UnsafePathError("A directory tree contained an unsafe directory.")
+            try:
+                if acl_repair:
+                    directory_handle = _windows_native.open_relative_acl_repair_directory(
+                        parent_handle,
+                        entry.name,
+                        owner_rebind=owner_rebind,
+                        coexist_with_retained_delete=coexist_with_retained_delete,
+                    )
+                else:
+                    directory_handle = _windows_native.open_relative_retained_directory(
+                        parent_handle,
+                        entry.name,
+                        writable=writable,
+                    )
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError("A directory tree could not be opened safely.") from exc
+            identity = _windows_directory_identity(directory_handle)
+            visible = _windows_enumerated_child(parent_handle, entry.name)
+            if identity != entry.identity or identity != visible.identity:
+                raise UnsafePathError("A directory tree changed while it was opened.")
+            yield directory_handle
+    finally:
+        _windows_close_handles((directory_handle, root_handle))
+
+
+def _windows_enumerated_path_metadata(path: Path) -> _WindowsEnumeratedMetadata:
+    """Return identity-bearing metadata from a pinned parent directory enumeration."""
+
+    with _windows_pinned_absolute_parent(path) as (_parent_handle, entry):
+        return _windows_enumerated_metadata(entry)
+
+
+def recovery_path_metadata(path: Path) -> os.stat_result | _WindowsEnumeratedMetadata:
+    """Inspect one recovery path without following links or recalling Windows placeholders."""
+
+    candidate = no_link_absolute_path(path)
+    if not _running_on_windows():
+        return candidate.lstat()
+    if len(candidate.parts) == 1:
+        with _windows_pinned_absolute_directory_handle(candidate) as handle:
+            information = _windows_native.handle_information(handle)
+            mode = stat.S_IFDIR if information.is_directory else stat.S_IFREG
+            return _WindowsEnumeratedMetadata(
+                st_mode=mode,
+                st_size=information.byte_size,
+                st_file_attributes=information.attributes,
+                st_dev=information.identity[0],
+                st_ino=information.identity[1],
+                st_mtime_ns=_windows_filetime_to_unix_ns(information.last_write_time),
+                st_atime_ns=_windows_filetime_to_unix_ns(information.last_access_time),
+                windows_last_write_time=information.last_write_time,
+                windows_last_access_time=information.last_access_time,
+            )
+    return _windows_enumerated_path_metadata(candidate)
+
+
+def recovery_path_exists(path: Path) -> bool:
+    try:
+        recovery_path_metadata(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def recovery_path_is_directory(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(recovery_path_metadata(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def recovery_path_is_regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(recovery_path_metadata(path).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _windows_bound_directory_binding(
+    path: Path,
+) -> tuple[Path, int, tuple[int, int]] | None:
+    """Return one validated exact binding from the active output state."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        return None
+    key = _casefolded_path(path)
+    if key == _casefolded_path(state.visible_root):
+        binding = (state.visible_root, state.handle, state.identity)
+    else:
+        binding = state.descendant_handles.get(key)
+    if binding is None:
+        return None
+    visible, handle, identity = binding
+    if _windows_directory_identity(handle) != identity:
+        raise UnsafePathError("A held Windows recovery directory identity changed.")
+    _require_windows_visible_directory_identity(
+        visible,
+        expected_identity=identity,
+    )
+    return binding
+
+
+@contextmanager
+def _windows_borrow_or_pin_directory_handle(path: Path) -> Iterator[int]:
+    """Borrow an exact bound handle, or pin an otherwise unbound directory."""
+
+    binding = _windows_bound_directory_binding(path)
+    if binding is not None:
+        _visible, handle, _identity = binding
+        yield handle
+        return
+
+    with _windows_pinned_absolute_directory_handle(path) as handle:
+        yield handle
+
+
+def _safe_directory_entries(
+    directory: Path,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> tuple[tuple[_SafeDirectoryEntry, ...], tuple[_SafeDirectoryEntry, ...]]:
+    """Classify one directory without following links or querying entry targets."""
+
+    if _running_on_windows():
+        try:
+            with _windows_borrow_or_pin_directory_handle(directory) as handle:
+                observed = []
+                for entry_number, entry in enumerate(
+                    _windows_native.iter_directory_entries(handle),
+                    1,
+                ):
+                    if cancellation_check is not None and entry_number % 2_000 == 0:
+                        cancellation_check()
+                    if entry.is_reparse_point:
+                        raise UnsafePathError(
+                            "A directory tree contained a symbolic link or reparse point."
+                        )
+                    if entry.is_cloud_hydrated:
+                        raise UnsafePathError(
+                            "Refusing a cloud-backed file or directory that is not fully present "
+                            "on local storage."
+                        )
+                    metadata = _windows_enumerated_metadata(entry)
+                    observed.append(
+                        _SafeDirectoryEntry(path=directory / entry.name, metadata=metadata)
+                    )
+        except UnsafePathError:
+            raise
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError("A directory tree could not be enumerated safely.") from exc
+    else:
+        try:
+            directory_metadata = directory.lstat()
+            if _is_link_or_reparse_metadata(directory_metadata) or not stat.S_ISDIR(
+                directory_metadata.st_mode
+            ):
+                raise UnsafePathError("A directory tree contained an unsafe directory.")
+            with os.scandir(directory) as entries:
+                observed = []
+                for entry_number, entry in enumerate(entries, 1):
+                    if entry_number > _windows_native.MAXIMUM_DIRECTORY_ENTRIES:
+                        raise UnsafePathError("A directory exceeded the safe entry limit.")
+                    if cancellation_check is not None and entry_number % 2_000 == 0:
+                        cancellation_check()
+                    metadata = entry.stat(follow_symlinks=False)
+                    if _is_link_or_reparse_metadata(metadata):
+                        raise UnsafePathError(
+                            "A directory tree contained a symbolic link or reparse point."
+                        )
+                    if not stat.S_ISDIR(metadata.st_mode) and not stat.S_ISREG(metadata.st_mode):
+                        raise UnsafePathError(
+                            "A directory tree contained an unexpected filesystem entry."
+                        )
+                    observed.append(
+                        _SafeDirectoryEntry(path=directory / entry.name, metadata=metadata)
+                    )
+        except UnsafePathError:
+            raise
+        except OSError as exc:
+            raise UnsafePathError("A directory tree could not be enumerated safely.") from exc
+
+    ordered = sorted(observed, key=lambda item: item.path.name.encode("utf-8"))
+    directories = tuple(item for item in ordered if stat.S_ISDIR(item.metadata.st_mode))
+    files = tuple(item for item in ordered if stat.S_ISREG(item.metadata.st_mode))
+    return directories, files
+
+
+def _require_safe_local_directory_tree(
+    root: Path,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> None:
+    """Exhaustively reject linked, special, or cloud-backed descendants."""
+
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        if cancellation_check is not None:
+            cancellation_check()
+        directories, _files = _safe_directory_entries(
+            current,
+            cancellation_check=cancellation_check,
+        )
+        pending.extend(entry.path for entry in reversed(directories))
+
+
 def require_fresh_output_platform_support() -> None:
     """Require one platform with a reviewed fresh-root anchoring implementation."""
 
     if _running_on_windows():
         # Loading both libraries here keeps failure before password entry or
-        # plaintext creation. The actual atomic operation remains in
-        # _windows_create_private_directory_relative.
+        # plaintext creation. The atomic operation is owned by
+        # windows_native.create_fresh_directory.
         _windows_kernel32()
         _windows_ntdll()
 
@@ -674,143 +1147,17 @@ def _windows_ntdll() -> Any:
         raise UnsafePathError("Windows atomic directory creation was unavailable.") from exc
 
 
-def _windows_private_security_descriptor() -> tuple[int, Callable[[], None]]:
-    loader = getattr(ctypes, "WinDLL", None)
-    if loader is None:
-        raise UnsafePathError("Windows private ACL creation was unavailable.")
-    try:
-        advapi32 = loader("advapi32", use_last_error=True)
-        kernel32 = _windows_kernel32()
-        convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
-        convert.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_uint32,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_uint32),
-        ]
-        convert.restype = ctypes.c_int
-        local_free = kernel32.LocalFree
-        local_free.argtypes = [ctypes.c_void_p]
-        local_free.restype = ctypes.c_void_p
-    except (AttributeError, OSError, TypeError) as exc:
-        raise UnsafePathError("Windows private ACL creation was unavailable.") from exc
-    descriptor = ctypes.c_void_p()
-    # Protected DACL. The creator/owner and SYSTEM receive full control, with
-    # object/container inheritance so every recovered descendant stays private.
-    sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
-    try:
-        succeeded = convert(
-            sddl,
-            _WINDOWS_SDDL_REVISION_1,
-            ctypes.byref(descriptor),
-            None,
-        )
-    except (OSError, TypeError, ValueError) as exc:
-        raise UnsafePathError("Windows private ACL creation was unavailable.") from exc
-    if not succeeded or not descriptor.value:
-        raise _windows_error("Windows private ACL creation failed.")
-
-    def release() -> None:
-        if descriptor.value:
-            local_free(descriptor)
-            descriptor.value = None
-
-    return int(descriptor.value), release
-
-
 def _windows_create_private_directory_relative(parent_handle: int, name: str) -> int:
-    """Atomically create and open one private child beneath an already-held parent."""
+    """Translate the single native relative-directory capability creator."""
 
-    if (
-        not isinstance(parent_handle, int)
-        or isinstance(parent_handle, bool)
-        or parent_handle <= 0
-        or not name
-        or name in {".", ".."}
-        or "\\" in name
-        or "/" in name
-        or "\x00" in name
-    ):
-        raise UnsafePathError("The Windows destination child name was invalid.")
-    encoded = name.encode("utf-16-le")
-    if len(encoded) > 65_534:
-        raise UnsafePathError("The Windows destination child name was too long.")
-    name_buffer = ctypes.create_unicode_buffer(name)
-    unicode_name = _WindowsUnicodeString(
-        length=len(encoded),
-        maximum_length=len(encoded) + 2,
-        buffer=ctypes.cast(name_buffer, ctypes.c_void_p),
-    )
-    security_descriptor, release_security_descriptor = _windows_private_security_descriptor()
-    attributes = _WindowsObjectAttributes(
-        length=ctypes.sizeof(_WindowsObjectAttributes),
-        root_directory=ctypes.c_void_p(parent_handle),
-        object_name=ctypes.pointer(unicode_name),
-        attributes=_WINDOWS_OBJ_CASE_INSENSITIVE,
-        security_descriptor=ctypes.c_void_p(security_descriptor),
-        security_quality_of_service=None,
-    )
-    status_block = _WindowsIOStatusBlock()
-    opened = ctypes.c_void_p()
-    ntdll = _windows_ntdll()
     try:
-        create_file = ntdll.NtCreateFile
-        create_file.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.c_uint32,
-            ctypes.POINTER(_WindowsObjectAttributes),
-            ctypes.POINTER(_WindowsIOStatusBlock),
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-        ]
-        create_file.restype = ctypes.c_long
-        status = int(
-            create_file(
-                ctypes.byref(opened),
-                _WINDOWS_FILE_LIST_DIRECTORY
-                | _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
-                | _WINDOWS_FILE_READ_ATTRIBUTES
-                | _WINDOWS_DELETE
-                | _WINDOWS_SYNCHRONIZE,
-                ctypes.byref(attributes),
-                ctypes.byref(status_block),
-                None,
-                _WINDOWS_FILE_ATTRIBUTE_DIRECTORY,
-                _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
-                _WINDOWS_FILE_CREATE,
-                _WINDOWS_FILE_DIRECTORY_FILE
-                | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
-                | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
-                None,
-                0,
-            )
-        )
-    except (AttributeError, OSError, TypeError, ValueError) as exc:
-        raise UnsafePathError("The fresh Windows destination could not be created safely.") from exc
-    finally:
-        release_security_descriptor()
-    handle = _windows_handle_value(opened)
-    if status == _WINDOWS_STATUS_OBJECT_NAME_COLLISION:
-        if handle > 0:
-            _windows_close_handle(handle)
+        return _windows_native.create_fresh_directory(parent_handle, name)
+    except _windows_native.WindowsObjectExistsError as exc:
         raise OutputExistsError(
             "The destination already exists. Choose a fresh private recovery folder."
-        )
-    if status < 0 or handle in {-1, 0, _WINDOWS_INVALID_HANDLE_VALUE}:
-        if handle > 0:
-            _windows_close_handle(handle)
-        raise UnsafePathError("The fresh Windows destination could not be created safely.")
-    try:
-        _windows_directory_identity(handle)
-    except BaseException:
-        _windows_close_handle(handle)
-        raise
-    return handle
+        ) from exc
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("The fresh Windows destination could not be created safely.") from exc
 
 
 def _windows_error(message: str) -> UnsafePathError:
@@ -836,9 +1183,19 @@ def _windows_create_file_directory_handle(
     *,
     allow_rename: bool = False,
     allow_child_creation: bool = False,
+    allow_acl_repair: bool = False,
+    allow_owner_rebind: bool = False,
+    allow_timestamp_restore: bool = False,
     share_delete: bool = False,
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
+
+    if allow_acl_repair and (allow_rename or allow_child_creation or allow_timestamp_restore):
+        raise ValueError(
+            "Windows ACL repair cannot include rename, child-creation, or timestamp access."
+        )
+    if allow_owner_rebind and not allow_acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
 
     kernel32 = _windows_kernel32()
     create_file = kernel32.CreateFileW
@@ -857,18 +1214,31 @@ def _windows_create_file_directory_handle(
         share_mode = _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE
         if share_delete:
             share_mode |= _WINDOWS_FILE_SHARE_DELETE
-        desired_access = _WINDOWS_FILE_READ_ATTRIBUTES
+        desired_access = _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_READ_CONTROL
+        if not allow_acl_repair:
+            # Directory enumeration requires list access. ACL repair uses a
+            # separate metadata-only capability below.
+            desired_access |= _WINDOWS_FILE_LIST_DIRECTORY
         if allow_rename:
             desired_access |= _WINDOWS_DELETE
         if allow_child_creation:
             desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
+        if allow_timestamp_restore:
+            desired_access |= _WINDOWS_FILE_WRITE_ATTRIBUTES
+        if allow_acl_repair:
+            # Owner rebinding is a separate retry after owner inspection.
+            desired_access |= _WINDOWS_WRITE_DAC
+            if allow_owner_rebind:
+                desired_access |= _WINDOWS_WRITE_OWNER
         opened = create_file(
             os.fspath(path),
             desired_access,
             share_mode,
             None,
             _WINDOWS_OPEN_EXISTING,
-            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_NO_RECALL
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -902,7 +1272,7 @@ def _windows_create_file_regular_handle(path: Path) -> int:
             _WINDOWS_FILE_SHARE_READ,
             None,
             _WINDOWS_OPEN_EXISTING,
-            _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            _WINDOWS_FILE_FLAG_OPEN_NO_RECALL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -913,62 +1283,75 @@ def _windows_create_file_regular_handle(path: Path) -> int:
     return handle
 
 
-def _windows_create_private_file_descriptor(path: Path, *, desired_access: int) -> int:
+def _windows_create_private_file_descriptor(
+    path: Path,
+    *,
+    exclusive: bool,
+    temporary: bool = False,
+    allow_path_reopen: bool = False,
+) -> int:
+    """Create one private file relative to a held, identity-bound parent."""
+
     if not _running_on_windows():
         raise UnsafePathError("Windows private staging is unavailable on this platform.")
-    security_descriptor, release_security_descriptor = _windows_private_security_descriptor()
-    attributes = _WindowsSecurityAttributes(
-        length=ctypes.sizeof(_WindowsSecurityAttributes),
-        security_descriptor=ctypes.c_void_p(security_descriptor),
-        inherit_handle=False,
-    )
-    kernel32 = _windows_kernel32()
-    create_file = kernel32.CreateFileW
-    with suppress(AttributeError):
-        create_file.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.POINTER(_WindowsSecurityAttributes),
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-        ]
-        create_file.restype = ctypes.c_void_p
+    candidate = no_link_absolute_path(path)
+    native_handle = -1
+    descriptor = -1
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
     try:
-        opened = create_file(
-            os.fspath(path),
-            desired_access,
-            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
-            ctypes.byref(attributes),
-            _WINDOWS_CREATE_NEW,
-            _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    except (OSError, TypeError, ValueError) as exc:
-        raise UnsafePathError(
-            "A private Windows staging file could not be created safely."
-        ) from exc
-    finally:
-        release_security_descriptor()
-    handle = _windows_handle_value(opened)
-    if handle in {-1, 0, _WINDOWS_INVALID_HANDLE_VALUE}:
-        raise _windows_error("A private Windows staging file could not be created safely.")
-    try:
-        information = _windows_regular_file_information(handle)
-        if information.byte_size != 0:
-            raise UnsafePathError("A private Windows staging file was not fresh.")
-        import msvcrt
-
-        descriptor = msvcrt.open_osfhandle(
-            handle,
-            os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
-        )
-        handle = -1
+        if state is not None:
+            if candidate == state.visible_root or not _is_within_casefolded(
+                candidate, state.visible_root
+            ):
+                raise UnsafePathError("A private Windows file escaped its held output root.")
+            parent_key = _casefolded_path(candidate.parent)
+            root_key = _casefolded_path(state.visible_root)
+            if parent_key != root_key and parent_key not in state.descendant_handles:
+                raise UnsafePathError(
+                    "A private Windows file parent was not retained before creation."
+                )
+            relative_parts = candidate.parts[len(state.visible_root.parts) :]
+            native_handle = _windows_native.create_relative_regular_file_path(
+                state.handle,
+                relative_parts,
+                exclusive=exclusive,
+                temporary=temporary,
+                allow_path_reopen=allow_path_reopen,
+            )
+        else:
+            with _windows_pinned_absolute_directory_handle(
+                candidate.parent,
+                writable=True,
+            ) as parent_handle:
+                _windows_native.require_private_ntfs_volume(parent_handle)
+                native_handle = _windows_native.create_or_replace_regular_file(
+                    parent_handle,
+                    candidate.name,
+                    exclusive=exclusive,
+                    temporary=temporary,
+                    allow_path_reopen=allow_path_reopen,
+                )
+        try:
+            descriptor = _windows_native.handle_to_file_descriptor(
+                native_handle,
+                flags=os.O_RDWR | getattr(os, "O_BINARY", 0),
+            )
+        finally:
+            # handle_to_file_descriptor consumes the native handle whether it
+            # succeeds or fails.
+            native_handle = -1
         return descriptor
+    except _windows_native.WindowsObjectExistsError as exc:
+        raise FileExistsError("A private Windows file already existed.") from exc
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("A private Windows file could not be created safely.") from exc
     except BaseException:
-        if handle > 0:
-            _windows_close_handle(handle)
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
+        elif native_handle > 0:
+            with suppress(Exception):
+                _windows_close_handle(native_handle)
         raise
 
 
@@ -977,7 +1360,8 @@ def windows_create_private_staging_descriptor(path: Path) -> int:
 
     return _windows_create_private_file_descriptor(
         path,
-        desired_access=_WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE | _WINDOWS_DELETE,
+        exclusive=True,
+        temporary=True,
     )
 
 
@@ -986,7 +1370,17 @@ def windows_create_private_capture_descriptor(path: Path) -> int:
 
     return _windows_create_private_file_descriptor(
         path,
-        desired_access=_WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE,
+        exclusive=True,
+        allow_path_reopen=True,
+    )
+
+
+def windows_open_private_output_descriptor(path: Path, *, exclusive: bool) -> int:
+    """Open one ordinary private output without mutating an unvalidated file."""
+
+    return _windows_create_private_file_descriptor(
+        path,
+        exclusive=exclusive,
     )
 
 
@@ -1016,8 +1410,7 @@ def _windows_rename_handle_no_replace(
         except _windows_native.WindowsNativeError as exc:
             raise UnsafePathError("The private Windows file could not be promoted safely.") from exc
     finally:
-        if parent_handle > 0:
-            _windows_close_handle(parent_handle)
+        _windows_close_handles((parent_handle,))
 
 
 def _windows_promote_held_file_no_replace(
@@ -1092,6 +1485,7 @@ def _windows_resume_bound_descendants(
             allow_child_creation=True,
         )
         try:
+            _windows_require_private_acl(handle)
             if identity != expected_identity:
                 raise UnsafePathError(
                     "A Windows recovery directory changed during atomic promotion."
@@ -1169,6 +1563,10 @@ def _windows_regular_file_information(handle: int) -> _WindowsRegularFileInforma
         raise UnsafePathError("A required private data file was not a regular file.")
     if attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
         raise UnsafePathError("A required private data file was a reparse point.")
+    if attributes & _WINDOWS_CLOUD_HYDRATION_ATTRIBUTES:
+        raise UnsafePathError(
+            "A required private data file was not fully present on local storage."
+        )
     file_index = (int(information.file_index_high) << 32) | int(information.file_index_low)
     byte_size = (int(information.file_size_high) << 32) | int(information.file_size_low)
     last_write_time = (int(information.last_write_time.high) << 32) | int(
@@ -1182,47 +1580,141 @@ def _windows_regular_file_information(handle: int) -> _WindowsRegularFileInforma
 
 
 @contextmanager
+def _windows_locked_relative_regular_file_descriptor(
+    root_handle: int,
+    components: Sequence[str],
+) -> Iterator[tuple[int, _WindowsRegularFileInformation]]:
+    """Read one identity-bound relative file while every ancestor remains pinned."""
+
+    handle = -1
+    descriptor = -1
+    with _windows_pinned_relative_parent(root_handle, components) as (parent_handle, entry):
+        if entry.is_directory:
+            raise UnsafePathError("A required private data file was not a regular file.")
+        try:
+            try:
+                handle = _windows_native.open_relative_regular_file(parent_handle, entry.name)
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "A required private data file could not be opened safely."
+                ) from exc
+            before = _windows_regular_file_information(handle)
+            visible = _windows_enumerated_child(parent_handle, entry.name)
+            if (
+                before.identity != entry.identity
+                or before.identity != visible.identity
+                or before.byte_size != entry.byte_size
+                or before.byte_size != visible.byte_size
+                or before.last_write_time != entry.last_write_time
+                or before.last_write_time != visible.last_write_time
+            ):
+                raise UnsafePathError("A required private data file changed while it was opened.")
+            try:
+                import msvcrt
+
+                descriptor = msvcrt.open_osfhandle(
+                    handle,
+                    os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
+                )
+            except (ImportError, OSError, TypeError, ValueError) as exc:
+                raise UnsafePathError(
+                    "A required private data file could not be opened safely."
+                ) from exc
+            handle = -1  # Ownership moved to the CRT descriptor.
+            yield descriptor, before
+            try:
+                native_handle = msvcrt.get_osfhandle(descriptor)
+            except (OSError, TypeError, ValueError) as exc:
+                raise UnsafePathError(
+                    "A required private data file could not be validated safely."
+                ) from exc
+            after = _windows_regular_file_information(int(native_handle))
+            visible_after = _windows_enumerated_child(parent_handle, entry.name)
+            if (
+                after != before
+                or after.identity != visible_after.identity
+                or after.byte_size != visible_after.byte_size
+                or after.last_write_time != visible_after.last_write_time
+            ):
+                raise UnsafePathError("A required private data file changed while it was read.")
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    raise UnsafePathError(
+                        "A required private data file could not be closed safely."
+                    ) from exc
+            elif handle > 0:
+                _windows_close_handle(handle)
+
+
+@contextmanager
 def _windows_locked_regular_file_descriptor(
     path: Path,
 ) -> Iterator[tuple[int, _WindowsRegularFileInformation]]:
-    """Hold an immutable, no-reparse Win32 file handle through bounded descriptor reads."""
+    """Hold a relative-open file and its complete absolute ancestor chain."""
 
-    handle = _windows_create_file_regular_handle(path)
-    descriptor = -1
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A required private data file path was invalid.")
+    root_handle = -1
     try:
-        before = _windows_regular_file_information(handle)
-        try:
-            import msvcrt
-
-            descriptor = msvcrt.open_osfhandle(
-                handle,
-                os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0),
-            )
-        except (ImportError, OSError, TypeError, ValueError) as exc:
-            raise UnsafePathError(
-                "A required private data file could not be opened safely."
-            ) from exc
-        handle = -1  # Ownership moved to the CRT descriptor.
-        yield descriptor, before
-        try:
-            native_handle = msvcrt.get_osfhandle(descriptor)
-        except (OSError, TypeError, ValueError) as exc:
-            raise UnsafePathError(
-                "A required private data file could not be validated safely."
-            ) from exc
-        after = _windows_regular_file_information(int(native_handle))
-        if after != before:
-            raise UnsafePathError("A required private data file changed while it was read.")
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        with _windows_locked_relative_regular_file_descriptor(
+            root_handle,
+            path.parts[1:],
+        ) as binding:
+            yield binding
     finally:
-        if descriptor >= 0:
+        _windows_close_handles((root_handle,))
+
+
+@contextmanager
+def _windows_pinned_absolute_regular_file_acl_handle(
+    path: Path,
+    *,
+    owner_rebind: bool = False,
+) -> Iterator[int]:
+    """Pin one regular file for private ACL repair without data-write access."""
+
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A private Windows recovery file path was invalid.")
+    root_handle = -1
+    file_handle = -1
+    try:
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        with _windows_pinned_relative_parent(root_handle, path.parts[1:]) as (
+            parent_handle,
+            entry,
+        ):
+            if entry.is_directory:
+                raise UnsafePathError("A private Windows recovery file was not a regular file.")
             try:
-                os.close(descriptor)
-            except OSError as exc:
+                file_handle = _windows_native.open_relative_retained_regular_file(
+                    parent_handle,
+                    entry.name,
+                    owner_rebind=owner_rebind,
+                )
+            except _windows_native.WindowsNativeError as exc:
                 raise UnsafePathError(
-                    "A required private data file could not be closed safely."
+                    "A private Windows recovery file could not be opened safely."
                 ) from exc
-        elif handle > 0:
-            _windows_close_handle(handle)
+            information = _windows_regular_file_information(file_handle)
+            visible = _windows_enumerated_child(parent_handle, entry.name)
+            if (
+                information.identity != entry.identity
+                or information.identity != visible.identity
+                or information.byte_size != entry.byte_size
+                or information.byte_size != visible.byte_size
+                or information.last_write_time != entry.last_write_time
+                or information.last_write_time != visible.last_write_time
+            ):
+                raise UnsafePathError(
+                    "A private Windows recovery file changed while it was opened."
+                )
+            yield file_handle
+    finally:
+        _windows_close_handles((file_handle, root_handle))
 
 
 def _windows_directory_identity(handle: int) -> tuple[int, int]:
@@ -1253,6 +1745,8 @@ def _windows_directory_identity(handle: int) -> tuple[int, int]:
         raise UnsafePathError("A trusted Windows directory handle did not name a directory.")
     if attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
         raise UnsafePathError("Refusing a Windows directory reparse point.")
+    if attributes & _WINDOWS_CLOUD_HYDRATION_ATTRIBUTES:
+        raise UnsafePathError("A Windows directory was not fully present on local storage.")
     file_index = (int(information.file_index_high) << 32) | int(information.file_index_low)
     return int(information.volume_serial_number), file_index
 
@@ -1273,20 +1767,112 @@ def _windows_close_handle(handle: int) -> None:
         raise _windows_error("A Windows directory handle could not be closed safely.")
 
 
+def _windows_close_handles(handles: Iterable[int]) -> None:
+    """Attempt every close without replacing an exception already leaving the protected body."""
+
+    active_error = sys.exc_info()[1]
+    cleanup_error: BaseException | None = None
+    for handle in handles:
+        if handle <= 0:
+            continue
+        try:
+            _windows_close_handle(handle)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+    if active_error is None and cleanup_error is not None:
+        raise cleanup_error
+
+
+def _windows_require_private_acl(handle: int) -> None:
+    try:
+        _windows_native.validate_private_acl(handle)
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("A private Windows recovery artifact was not owner-only.") from exc
+
+
+def _windows_apply_private_acl_with_owner_rebind(
+    *,
+    open_handle: Callable[[bool], Any],
+    identity: Callable[[int], tuple[int, int]],
+    changed_message: str,
+    securing_message: str,
+) -> None:
+    """Apply the private ACL without reopening a mismatched owner unpinned."""
+
+    try:
+        with open_handle(False) as handle:
+            try:
+                _windows_native.apply_private_acl(handle)
+            except _windows_native.WindowsPrivateOwnerRebindRequired:
+                expected_identity = identity(handle)
+                with open_handle(True) as owner_handle:
+                    if identity(owner_handle) != expected_identity:
+                        raise UnsafePathError(changed_message) from None
+                    _windows_native.apply_private_acl(owner_handle, owner_rebind=True)
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError(securing_message) from exc
+
+
+def _windows_apply_private_directory_acl(path: Path) -> None:
+    """Apply the private owner/DACL contract through pinned directory handles."""
+
+    retained_pin = _windows_bound_directory_binding(path) is not None
+
+    _windows_apply_private_acl_with_owner_rebind(
+        open_handle=lambda owner_rebind: _windows_pinned_absolute_directory_handle(
+            path,
+            acl_repair=True,
+            owner_rebind=owner_rebind,
+            coexist_with_retained_delete=retained_pin,
+        ),
+        identity=_windows_directory_identity,
+        changed_message="A private Windows recovery directory changed.",
+        securing_message="A private Windows recovery directory could not be secured.",
+    )
+
+
+def _windows_apply_private_file_acl(path: Path) -> None:
+    """Apply the private owner/DACL contract through pinned regular-file handles."""
+
+    _windows_apply_private_acl_with_owner_rebind(
+        open_handle=lambda owner_rebind: _windows_pinned_absolute_regular_file_acl_handle(
+            path,
+            owner_rebind=owner_rebind,
+        ),
+        identity=lambda handle: _windows_regular_file_information(handle).identity,
+        changed_message="A private Windows recovery file changed.",
+        securing_message="A private Windows recovery file could not be secured.",
+    )
+
+
 def _windows_open_locked_directory(
     path: Path,
     *,
     allow_rename: bool = False,
     allow_child_creation: bool = False,
+    allow_acl_repair: bool = False,
+    allow_owner_rebind: bool = False,
+    allow_timestamp_restore: bool = False,
     share_delete: bool = False,
 ) -> tuple[int, tuple[int, int]]:
     handle = _windows_create_file_directory_handle(
         path,
         allow_rename=allow_rename,
         allow_child_creation=allow_child_creation,
+        allow_acl_repair=allow_acl_repair,
+        allow_owner_rebind=allow_owner_rebind,
+        allow_timestamp_restore=allow_timestamp_restore,
         share_delete=share_delete,
     )
     try:
+        if re.fullmatch(r"[A-Za-z]:[\\/]*", os.fspath(path)) is not None:
+            try:
+                _windows_native.require_source_ntfs_volume(handle)
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "Windows recovery paths must be on private local NTFS storage."
+                ) from exc
         return handle, _windows_directory_identity(handle)
     except BaseException:
         with suppress(Exception):
@@ -1294,24 +1880,34 @@ def _windows_open_locked_directory(
         raise
 
 
-def _windows_hold_bound_descendant_directory(path: Path) -> None:
+def _windows_hold_bound_descendant_directory(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
     """Retain a no-delete-sharing handle for every directory below a bound root."""
 
     state = _WINDOWS_BOUND_OUTPUT_STATE.get()
     if state is None:
         return
+    if expected_identity is not None:
+        expected_identity = _validated_directory_identity(expected_identity)
     candidate = no_link_absolute_path(path)
     if not _is_within_casefolded(candidate, state.visible_root):
         raise UnsafePathError("A Windows recovery directory escaped its held output root.")
     key = _casefolded_path(candidate)
     root_key = _casefolded_path(state.visible_root)
     if key == root_key:
+        if expected_identity is not None and state.identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
         _require_windows_visible_directory_identity(candidate, expected_identity=state.identity)
         return
     if key in state.descendant_handles:
         _visible, handle, identity = state.descendant_handles[key]
         if _windows_directory_identity(handle) != identity:
             raise UnsafePathError("A held Windows recovery directory identity changed.")
+        if expected_identity is not None and identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
         _require_windows_visible_directory_identity(candidate, expected_identity=identity)
         return
     parent_key = _casefolded_path(candidate.parent)
@@ -1325,6 +1921,9 @@ def _windows_hold_bound_descendant_directory(path: Path) -> None:
         allow_child_creation=True,
     )
     try:
+        if expected_identity is not None and identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
+        _windows_require_private_acl(handle)
         _require_windows_visible_directory_identity(candidate, expected_identity=identity)
         state.descendant_handles[key] = (candidate, handle, identity)
     except BaseException:
@@ -1395,17 +1994,17 @@ def _windows_close_bound_descendant_directories(state: _WindowsBoundOutputState)
         raise validation_error
 
 
-def _windows_release_bound_descendant_directory(path: Path) -> None:
-    """Release one empty ephemeral directory before its scoped cleanup."""
+def _windows_take_bound_descendant_directory(path: Path) -> tuple[int, tuple[int, int]] | None:
+    """Detach one validated ephemeral directory handle from bound state."""
 
     state = _WINDOWS_BOUND_OUTPUT_STATE.get()
     if state is None:
-        return
+        return None
     candidate = no_link_absolute_path(path)
     key = _casefolded_path(candidate)
     entry = state.descendant_handles.get(key)
     if entry is None:
-        return
+        return None
     for other_key, (
         other_visible,
         _other_handle,
@@ -1426,37 +2025,121 @@ def _windows_release_bound_descendant_directory(path: Path) -> None:
         validation_error = exc
     finally:
         state.descendant_handles.pop(key, None)
-        try:
-            _windows_close_handle(handle)
-        except BaseException as exc:
-            if validation_error is None:
-                validation_error = exc
     if validation_error is not None:
+        with suppress(Exception):
+            _windows_close_handle(handle)
         raise validation_error
+    return handle, identity
 
 
-def _windows_hold_existing_descendant_directories(root: Path) -> None:
+def _windows_release_bound_descendant_directory(path: Path) -> None:
+    """Release one empty ephemeral directory before its scoped cleanup."""
+
+    detached = _windows_take_bound_descendant_directory(path)
+    if detached is None:
+        return
+    handle, _identity = detached
+    _windows_close_handle(handle)
+
+
+def _windows_delete_private_tree_handle(
+    path: Path,
+    *,
+    handle: int,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Delete one exact private tree and its root through a held handle."""
+
+    try:
+        _windows_require_private_acl(handle)
+        if _windows_directory_identity(handle) != expected_identity:
+            raise UnsafePathError("A private Windows temporary directory identity changed.")
+        _require_windows_visible_directory_identity(
+            path,
+            expected_identity=expected_identity,
+        )
+        try:
+            _windows_native.delete_private_tree(handle)
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError(
+                "A private Windows temporary directory could not be removed safely."
+            ) from exc
+    finally:
+        _windows_close_handles((handle,))
+    if recovery_path_exists(path):
+        raise UnsafePathError("A private Windows temporary directory remained after cleanup.")
+
+
+def windows_delete_bound_private_tree(path: Path) -> None:
+    """Delete a retained Windows subtree without destructive path traversal."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        raise UnsafePathError("A trusted Windows output-root handle was not active.")
+    candidate = no_link_absolute_path(path)
+    root_key = _casefolded_path(candidate)
+    root_entry = state.descendant_handles.get(root_key)
+    if root_entry is None:
+        raise UnsafePathError("A private Windows temporary directory handle was unavailable.")
+    descendants = [
+        (key, entry)
+        for key, entry in state.descendant_handles.items()
+        if key != root_key and _is_within_casefolded(entry[0], candidate)
+    ]
+    for _key, (visible, handle, identity) in [*descendants, (root_key, root_entry)]:
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A held Windows recovery directory identity changed.")
+        _windows_require_private_acl(handle)
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+    ordered_descendants = sorted(
+        descendants,
+        key=lambda item: len(item[1][0].parts),
+        reverse=True,
+    )
+    handles_to_close: list[int] = []
+    for key, (_visible, handle, _identity) in ordered_descendants:
+        state.descendant_handles.pop(key, None)
+        handles_to_close.append(handle)
+    _windows_close_handles(handles_to_close)
+    visible, root_handle, root_identity = state.descendant_handles.pop(root_key)
+    _windows_delete_private_tree_handle(
+        visible,
+        handle=root_handle,
+        expected_identity=root_identity,
+    )
+
+
+MAXIMUM_WINDOWS_RETAINED_DESCENDANT_DIRECTORIES = 4_096
+
+
+def _windows_hold_existing_descendant_directories(
+    root: Path,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> None:
     """Pin every existing directory in a selected private tree before traversal."""
 
-    for current_name, directory_names, _file_names in os.walk(
-        root, topdown=True, followlinks=False
-    ):
-        current = Path(current_name)
-        _windows_hold_bound_descendant_directory(current)
-        safe_names: list[str] = []
-        for name in sorted(directory_names):
-            candidate = current / name
-            try:
-                metadata = candidate.lstat()
-            except OSError as exc:
+    pending = [root]
+    retained = 0
+    while pending:
+        if cancellation_check is not None:
+            cancellation_check()
+        current = pending.pop()
+        directories, _files = _safe_directory_entries(
+            current,
+            cancellation_check=cancellation_check,
+        )
+        for entry in directories:
+            retained += 1
+            if retained > MAXIMUM_WINDOWS_RETAINED_DESCENDANT_DIRECTORIES:
                 raise UnsafePathError(
-                    "A Windows recovery directory changed while it was retained."
-                ) from exc
-            if _is_link_or_reparse_metadata(metadata) or not stat.S_ISDIR(metadata.st_mode):
-                raise UnsafePathError("A Windows recovery tree contained a redirected directory.")
-            _windows_hold_bound_descendant_directory(candidate)
-            safe_names.append(name)
-        directory_names[:] = safe_names
+                    "The selected Windows recovery tree contained too many directories."
+                )
+            _windows_hold_bound_descendant_directory(
+                entry.path,
+                expected_identity=_identity(entry.metadata),
+            )
+        pending.extend(entry.path for entry in reversed(directories))
 
 
 def _require_windows_visible_directory_identity(
@@ -1477,8 +2160,7 @@ def _require_windows_visible_directory_identity(
         if visible_identity != expected_identity:
             raise UnsafePathError("The visible Windows directory identity changed during recovery.")
     finally:
-        if visible_handle > 0:
-            _windows_close_handle(visible_handle)
+        _windows_close_handles((visible_handle,))
 
 
 def _close_bound_directory_handle(handle: int) -> None:
@@ -1500,6 +2182,51 @@ def bound_directory_free_bytes(path: Path, *, handle: int) -> int:
     return int(filesystem.f_bavail) * int(filesystem.f_frsize)
 
 
+def windows_restore_bound_directory_times(
+    handle: int,
+    *,
+    access_time_filetime: int,
+    write_time_filetime: int,
+) -> None:
+    """Restore timestamps without reopening an identity-pinned Windows directory."""
+
+    identity = _windows_directory_identity(handle)
+    try:
+        _windows_native.restore_handle_times(
+            handle,
+            access_time_filetime=access_time_filetime,
+            write_time_filetime=write_time_filetime,
+        )
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("Windows directory timestamps could not be restored safely.") from exc
+    if _windows_directory_identity(handle) != identity:
+        raise UnsafePathError("A Windows directory identity changed during timestamp restoration.")
+
+
+@contextmanager
+def windows_timestamp_restore_directory(
+    path: Path,
+) -> Iterator[tuple[int, tuple[int, int]]]:
+    """Borrow an exact writable root binding, or open one timestamp capability."""
+
+    candidate = no_link_absolute_path(path)
+    binding = _windows_bound_directory_binding(candidate)
+    if binding is not None:
+        _visible, handle, identity = binding
+        yield handle, identity
+        return
+
+    handle = -1
+    try:
+        handle, identity = _windows_open_locked_directory(
+            candidate,
+            allow_timestamp_restore=True,
+        )
+        yield handle, identity
+    finally:
+        _windows_close_handles((handle,))
+
+
 def require_private_local_destination(path: Path) -> Path:
     """Validate the nearest existing parent and reject known sync/shared locations."""
 
@@ -1516,6 +2243,73 @@ def require_private_local_destination(path: Path) -> Path:
     if not _volume_is_local(existing):
         raise UnsafePathError("The destination volume could not be confirmed as local storage.")
     return existing
+
+
+def require_local_recovery_source(path: Path) -> Path:
+    """Reject remote, shared, linked, or cloud-hydrated recovery sources."""
+
+    candidate = no_link_absolute_path(path)
+    if is_known_synced_or_shared_path(candidate):
+        raise UnsafePathError(
+            "Refusing a cloud-synced or shared recovery source. Choose private local storage."
+        )
+    if not _volume_is_local(candidate):
+        raise UnsafePathError("The recovery source volume could not be confirmed as local storage.")
+    if _running_on_windows():
+        _windows_require_source_ntfs_volume(candidate)
+    try:
+        metadata = (
+            _windows_enumerated_path_metadata(candidate)
+            if _running_on_windows()
+            else candidate.lstat()
+        )
+    except FileNotFoundError as exc:
+        raise UserInputError("The selected recovery source was not found.") from exc
+    except OSError as exc:
+        raise UnsafePathError(
+            "The selected recovery source could not be inspected safely."
+        ) from exc
+    if _is_link_or_reparse_metadata(metadata):
+        raise UnsafePathError("Refusing a symbolic-link or reparse-point recovery source.")
+    require_non_hydrated_windows_metadata(metadata)
+    return candidate
+
+
+def optional_local_recovery_regular_file(
+    path: Path,
+    *,
+    volume_already_validated: bool = False,
+) -> Path | None:
+    """Return one protected local regular file, or ``None`` when it is absent."""
+
+    candidate = no_link_absolute_path(path)
+    if is_known_synced_or_shared_path(candidate):
+        raise UnsafePathError(
+            "Refusing a cloud-synced or shared recovery source. Choose private local storage."
+        )
+    if not volume_already_validated and not _volume_is_local(candidate):
+        raise UnsafePathError("The recovery source volume could not be confirmed as local storage.")
+    if _running_on_windows() and not volume_already_validated:
+        _windows_require_source_ntfs_volume(candidate)
+    try:
+        metadata = (
+            _windows_enumerated_path_metadata(candidate)
+            if _running_on_windows()
+            else candidate.lstat()
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise UnsafePathError(
+            "The selected recovery source could not be inspected safely."
+        ) from exc
+    if _is_link_or_reparse_metadata(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise UnsafePathError("A selected recovery source was not a regular file.")
+    require_non_hydrated_windows_metadata(metadata)
+    if _running_on_windows():
+        with _windows_locked_regular_file_descriptor(candidate):
+            pass
+    return candidate
 
 
 def _validated_directory_identity(identity: tuple[int, int]) -> tuple[int, int]:
@@ -1580,13 +2374,39 @@ def held_destination_parent(
 ) -> Iterator[tuple[int, tuple[int, int], Path]]:
     """Hold the exact immediate parent across preflight, password entry, and recovery.
 
-    POSIX uses a no-follow directory descriptor. Windows uses ``CreateFileW``
-    without ``FILE_SHARE_DELETE``, which denies rename/delete access for the held
-    directory until the handle is closed.
+    POSIX uses a no-follow directory descriptor. Windows holds every ancestor
+    and the exact parent without delete sharing until recovery finishes.
     """
 
     visible_output = no_link_absolute_path(output)
     parent = visible_output.parent
+    if _running_on_windows():
+        try:
+            with _windows_pinned_absolute_directory_handle(
+                parent,
+                writable=True,
+            ) as handle:
+                identity = _windows_directory_identity(handle)
+                try:
+                    _windows_native.require_recovery_capabilities(handle)
+                except _windows_native.WindowsNativeError as exc:
+                    raise UnsafePathError(
+                        "Windows recovery requires a local NTFS destination with persistent "
+                        "access controls."
+                    ) from exc
+                require_bound_destination_parent(
+                    visible_output,
+                    destination_parent_descriptor=handle,
+                    expected_identity=identity,
+                )
+                yield handle, identity, visible_output
+        except FileNotFoundError as exc:
+            raise UnsafePathError(
+                "The immediate destination parent must already exist. Create or select that "
+                "private encrypted parent folder, then choose a new child name."
+            ) from exc
+        return
+
     try:
         parent_metadata = parent.lstat()
     except FileNotFoundError as exc:
@@ -1603,38 +2423,23 @@ def held_destination_parent(
 
     handle = -1
     try:
-        if _running_on_windows():
-            handle, identity = _windows_open_locked_directory(
-                parent,
-                allow_child_creation=True,
+        try:
+            handle = os.open(parent, _descriptor_flags(stat.S_IFDIR))
+        except OSError as exc:
+            raise UnsafePathError(
+                "The immediate destination parent could not be opened safely."
+            ) from exc
+        opened = os.fstat(handle)
+        identity = (int(opened.st_dev), int(opened.st_ino))
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (
+                int(parent_metadata.st_dev),
+                int(parent_metadata.st_ino),
             )
-            try:
-                _windows_native.require_recovery_capabilities(handle)
-            except _windows_native.WindowsNativeError as exc:
-                raise UnsafePathError(
-                    "Windows recovery requires a local NTFS destination with persistent "
-                    "access controls."
-                ) from exc
-        else:
-            try:
-                handle = os.open(parent, _descriptor_flags(stat.S_IFDIR))
-            except OSError as exc:
-                raise UnsafePathError(
-                    "The immediate destination parent could not be opened safely."
-                ) from exc
-            opened = os.fstat(handle)
-            identity = (int(opened.st_dev), int(opened.st_ino))
-            if (
-                not stat.S_ISDIR(opened.st_mode)
-                or (
-                    int(parent_metadata.st_dev),
-                    int(parent_metadata.st_ino),
-                )
-                != identity
-            ):
-                raise UnsafePathError(
-                    "The immediate destination parent changed while it was opened."
-                )
+            != identity
+        ):
+            raise UnsafePathError("The immediate destination parent changed while it was opened.")
         require_bound_destination_parent(
             visible_output,
             destination_parent_descriptor=handle,
@@ -1942,37 +2747,43 @@ def _require_visible_existing_directory_identity(
 
 
 @contextmanager
-def anchored_existing_extraction_root(extraction_root: Path) -> Iterator[Path]:
+def anchored_existing_extraction_root(
+    extraction_root: Path,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+) -> Iterator[Path]:
     """Hold one existing extraction root for standalone analysis or reporting.
 
     On POSIX, all descendant operations run relative to the exact opened inode.
-    On Windows, the root remains path-addressed while a directory handle opened
-    without ``FILE_SHARE_DELETE`` prevents root rename, delete, or replacement.
+    On Windows, every ancestor and the root remain held without delete sharing.
     The visible path must still name the same root when the operation finishes.
     """
 
-    visible_root = no_link_absolute_path(extraction_root)
+    visible_root = require_local_recovery_source(extraction_root)
     if _running_on_windows():
-        root_handle = -1
         token = None
         root_identity = (0, 0)
         windows_state: _WindowsBoundOutputState | None = None
-        try:
-            root_handle, root_identity = _windows_open_locked_directory(
-                visible_root,
-                allow_child_creation=True,
-            )
-            windows_state = _WindowsBoundOutputState(
-                handle=root_handle,
-                identity=root_identity,
-                visible_root=visible_root,
-            )
-            token = _WINDOWS_BOUND_OUTPUT_STATE.set(windows_state)
-            _windows_hold_existing_descendant_directories(visible_root)
-            yield visible_root
-        finally:
-            validation_error: BaseException | None = None
-            if root_handle >= 0:
+        with _windows_pinned_absolute_directory_handle(
+            visible_root,
+            writable=True,
+        ) as root_handle:
+            _windows_require_private_acl(root_handle)
+            root_identity = _windows_directory_identity(root_handle)
+            try:
+                windows_state = _WindowsBoundOutputState(
+                    handle=root_handle,
+                    identity=root_identity,
+                    visible_root=visible_root,
+                )
+                token = _WINDOWS_BOUND_OUTPUT_STATE.set(windows_state)
+                _windows_hold_existing_descendant_directories(
+                    visible_root,
+                    cancellation_check=cancellation_check,
+                )
+                yield visible_root
+            finally:
+                validation_error: BaseException | None = None
                 try:
                     if _windows_directory_identity(root_handle) != root_identity:
                         raise UnsafePathError(
@@ -1984,22 +2795,16 @@ def anchored_existing_extraction_root(extraction_root: Path) -> Iterator[Path]:
                     )
                 except BaseException as exc:
                     validation_error = exc
-            if windows_state is not None:
-                try:
-                    _windows_close_bound_descendant_directories(windows_state)
-                except BaseException as exc:
-                    if validation_error is None:
-                        validation_error = exc
-            if token is not None:
-                _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
-            if root_handle >= 0:
-                try:
-                    _windows_close_handle(root_handle)
-                except BaseException as exc:
-                    if validation_error is None:
-                        validation_error = exc
-            if validation_error is not None:
-                raise validation_error
+                if windows_state is not None:
+                    try:
+                        _windows_close_bound_descendant_directories(windows_state)
+                    except BaseException as exc:
+                        if validation_error is None:
+                            validation_error = exc
+                if token is not None:
+                    _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+                if validation_error is not None:
+                    raise validation_error
         return
 
     saved_cwd_descriptor = -1
@@ -2091,7 +2896,7 @@ def _path_ancestry_tails(path: Path) -> tuple[tuple[tuple[int, int], tuple[str, 
     result: list[tuple[tuple[int, int], tuple[str, ...]]] = []
     while True:
         try:
-            metadata = current.lstat()
+            metadata = recovery_path_metadata(current)
         except FileNotFoundError:
             if current == current.parent:
                 break
@@ -2140,24 +2945,24 @@ def is_within(path: Path, parent: Path) -> bool:
 def nearest_git_root(path: Path) -> Path | None:
     if _ANCHORED_OUTPUT_STATE.get() is not None and not path.expanduser().is_absolute():
         candidate = no_link_absolute_path(path)
-        if not candidate.is_dir():
+        if not recovery_path_is_directory(candidate):
             candidate = candidate.parent
-        while not candidate.exists() and candidate != Path("."):
+        while not recovery_path_exists(candidate) and candidate != Path("."):
             candidate = candidate.parent
         current = candidate
         while True:
-            if (current / ".git").exists():
+            if recovery_path_exists(current / ".git"):
                 return current
             if current == Path("."):
                 return None
             current = current.parent
     candidate = canonical_path(path)
-    if not candidate.is_dir():
+    if not recovery_path_is_directory(candidate):
         candidate = candidate.parent
-    while not candidate.exists() and candidate != candidate.parent:
+    while not recovery_path_exists(candidate) and candidate != candidate.parent:
         candidate = candidate.parent
     for current in (candidate, *candidate.parents):
-        if (current / ".git").exists():
+        if recovery_path_exists(current / ".git"):
             return current
     return None
 
@@ -2290,7 +3095,16 @@ def require_private_descriptor(
     except OSError as exc:
         raise UnsafePathError("Private recovery permissions could not be verified.") from exc
     _require_expected_type(metadata, expected_type)
-    if os.name != "nt":
+    if os.name == "nt":
+        try:
+            import msvcrt
+
+            _windows_require_private_acl(int(msvcrt.get_osfhandle(descriptor)))
+        except (ImportError, OSError, TypeError, ValueError) as exc:
+            raise UnsafePathError(
+                "Private Windows recovery permissions could not be verified."
+            ) from exc
+    else:
         if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
             raise UnsafePathError("A private recovery artifact was not private to this user.")
         if expected_mode is not None and stat.S_IMODE(metadata.st_mode) != expected_mode:
@@ -2357,6 +3171,38 @@ def require_private_path(
     """Open a path without following links and validate its descriptor-bound privacy state."""
 
     path = no_link_absolute_path(path)
+    if _running_on_windows():
+        if expected_type == stat.S_IFDIR:
+            with _windows_borrow_or_pin_directory_handle(path) as handle:
+                _windows_require_private_acl(handle)
+                information = _windows_native.handle_information(handle)
+                if (
+                    not information.is_directory
+                    or information.is_reparse_point
+                    or information.is_cloud_hydrated
+                ):
+                    raise UnsafePathError(
+                        "A private Windows recovery artifact had an unsafe file type."
+                    )
+                return _WindowsEnumeratedMetadata(
+                    st_mode=stat.S_IFDIR,
+                    st_size=information.byte_size,
+                    st_file_attributes=information.attributes,
+                    st_dev=information.identity[0],
+                    st_ino=information.identity[1],
+                    st_mtime_ns=_windows_filetime_to_unix_ns(information.last_write_time),
+                    st_atime_ns=_windows_filetime_to_unix_ns(information.last_access_time),
+                    windows_last_write_time=information.last_write_time,
+                    windows_last_access_time=information.last_access_time,
+                )
+        if expected_type == stat.S_IFREG:
+            with _windows_locked_regular_file_descriptor(path) as (descriptor, _native):
+                return require_private_descriptor(
+                    descriptor,
+                    expected_type=expected_type,
+                    expected_mode=expected_mode,
+                )
+        raise UnsafePathError("A private recovery artifact had an unsafe file type.")
     try:
         before = path.lstat()
     except OSError as exc:
@@ -2364,9 +3210,6 @@ def require_private_path(
     if _is_link_or_reparse_point(path):
         raise UnsafePathError("A private recovery artifact redirected through a link.")
     _require_expected_type(before, expected_type)
-    if os.name == "nt":
-        return before
-
     descriptor = -1
     try:
         descriptor = os.open(path, _descriptor_flags(expected_type))
@@ -2455,6 +3298,7 @@ def secure_directory(path: Path) -> Path:
     if not missing:
         _harden_private_path(resolved, expected_type=stat.S_IFDIR, mode=0o700)
         if _running_on_windows():
+            _windows_apply_private_directory_acl(resolved)
             _windows_hold_bound_descendant_directory(resolved)
         return resolved
 
@@ -2468,8 +3312,47 @@ def secure_directory(path: Path) -> Path:
             directory.mkdir(mode=0o700)
         _harden_private_path(directory, expected_type=stat.S_IFDIR, mode=0o700)
         if _running_on_windows():
+            _windows_apply_private_directory_acl(directory)
             _windows_hold_bound_descendant_directory(directory)
     return resolved
+
+
+@contextmanager
+def _windows_scoped_private_temporary_root(
+    directory: Path,
+    *,
+    handle: int,
+    identity: tuple[int, int],
+) -> Iterator[None]:
+    """Bind an unanchored temporary root so child I/O stays handle-relative."""
+
+    state = _WindowsBoundOutputState(
+        handle=handle,
+        identity=identity,
+        visible_root=directory,
+    )
+    token = _WINDOWS_BOUND_OUTPUT_STATE.set(state)
+    try:
+        yield
+    finally:
+        cleanup_error: BaseException | None = None
+        try:
+            _windows_close_bound_descendant_directories(state)
+        except BaseException as exc:
+            cleanup_error = exc
+        finally:
+            _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+        try:
+            _windows_delete_private_tree_handle(
+                directory,
+                handle=handle,
+                expected_identity=identity,
+            )
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 @contextmanager
@@ -2482,6 +3365,64 @@ def private_temporary_directory(
 
     if not prefix or any(character in prefix for character in ("/", "\\", "\x00")):
         raise ValueError("A private temporary-directory prefix must be one safe path component.")
+    if _running_on_windows():
+        secure_parent = secure_directory(parent)
+        state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+        directory: Path | None = None
+        local_handle = -1
+        expected_identity: tuple[int, int] | None = None
+        for _attempt in range(128):
+            candidate = secure_parent / f"{prefix}{secrets.token_hex(16)}"
+            try:
+                if state is not None:
+                    _windows_create_and_hold_bound_descendant_directory(candidate)
+                    _visible, _handle, expected_identity = state.descendant_handles[
+                        _casefolded_path(candidate)
+                    ]
+                else:
+                    with _windows_pinned_absolute_directory_handle(
+                        secure_parent,
+                        writable=True,
+                    ) as parent_handle:
+                        _windows_native.require_private_ntfs_volume(parent_handle)
+                        local_handle = _windows_native.create_fresh_directory(
+                            parent_handle,
+                            candidate.name,
+                        )
+                    expected_identity = _windows_directory_identity(local_handle)
+                directory = candidate
+                break
+            except (OutputExistsError, _windows_native.WindowsObjectExistsError):
+                continue
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "A private Windows temporary directory could not be created safely."
+                ) from exc
+        if directory is None or expected_identity is None:
+            raise UnsafePathError("A private temporary directory could not be allocated safely.")
+        try:
+            if state is not None:
+                yield directory
+            else:
+                with _windows_scoped_private_temporary_root(
+                    directory,
+                    handle=local_handle,
+                    identity=expected_identity,
+                ):
+                    local_handle = -1
+                    yield directory
+        finally:
+            if state is not None:
+                windows_delete_bound_private_tree(directory)
+            elif local_handle >= 0:
+                cleanup_handle = local_handle
+                local_handle = -1
+                _windows_delete_private_tree_handle(
+                    directory,
+                    handle=cleanup_handle,
+                    expected_identity=expected_identity,
+                )
+        return
     with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
         directory = secure_directory(Path(temporary))
         try:
@@ -2494,7 +3435,7 @@ def _is_link_or_reparse_point(path: Path) -> bool:
     """Return whether an existing path redirects traversal to another location."""
 
     try:
-        metadata = path.lstat()
+        metadata = recovery_path_metadata(path) if _running_on_windows() else path.lstat()
     except FileNotFoundError:
         return False
     return _is_link_or_reparse_metadata(metadata)
@@ -2526,76 +3467,51 @@ def iter_regular_files(root: Path) -> Iterator[Path]:
     """Yield regular files without traversing symbolic links or reparse points."""
 
     expanded_root = no_link_absolute_path(root)
-    if not expanded_root.is_dir() or _is_link_or_reparse_point(expanded_root):
-        raise UnsafePathError(f"Expected a regular directory tree: {expanded_root}")
     trusted_root = expanded_root
     require_private_path(trusted_root, expected_type=stat.S_IFDIR)
 
-    def raise_walk_error(error: OSError) -> None:
-        raise UnsafePathError("Could not validate the complete extracted file tree.") from error
-
-    for current_name, directory_names, file_names in os.walk(
-        trusted_root,
-        topdown=True,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
-        current = Path(current_name)
+    pending = [trusted_root]
+    while pending:
+        current = pending.pop()
         require_private_path(current, expected_type=stat.S_IFDIR)
-        safe_directories: list[str] = []
-        for name in sorted(directory_names):
-            candidate = current / name
+        directories, files = _safe_directory_entries(current)
+        for entry in directories:
+            require_private_path(entry.path, expected_type=stat.S_IFDIR)
+        for entry in files:
             try:
-                metadata = candidate.lstat()
-            except FileNotFoundError as exc:
-                raise UnsafePathError("The extracted file tree changed during validation.") from exc
-            if _is_link_or_reparse_point(candidate):
-                raise UnsafePathError(
-                    "The extracted file tree contains a symbolic link or reparse point."
-                )
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise UnsafePathError(
-                    "The extracted file tree contains an unexpected non-directory entry."
-                )
-            require_private_path(candidate, expected_type=stat.S_IFDIR)
-            safe_directories.append(name)
-        directory_names[:] = safe_directories
-
-        for name in sorted(file_names):
-            candidate = current / name
-            try:
-                _reject_linked_components(trusted_root, candidate)
-                metadata = candidate.lstat()
-            except FileNotFoundError as exc:
-                raise UnsafePathError("The extracted file tree changed during validation.") from exc
+                _reject_linked_components(trusted_root, entry.path)
             except ValueError as exc:
                 raise UnsafePathError("The extracted file tree contained an unsafe path.") from exc
-            if _is_link_or_reparse_point(candidate):
-                raise UnsafePathError(
-                    "The extracted file tree contains a symbolic link or reparse point."
-                )
-            if not stat.S_ISREG(metadata.st_mode):
-                raise UnsafePathError(
-                    "The extracted file tree contains an unexpected non-regular file."
-                )
-            require_private_path(candidate, expected_type=stat.S_IFREG)
-            yield candidate
+            require_private_path(entry.path, expected_type=stat.S_IFREG)
+            yield entry.path
+        pending.extend(entry.path for entry in reversed(directories))
 
 
 def secure_file(path: Path) -> None:
     _harden_private_path(path, expected_type=stat.S_IFREG, mode=0o600)
+    if _running_on_windows():
+        _windows_apply_private_file_acl(no_link_absolute_path(path.expanduser()))
 
 
 def validate_backup_directory(path: Path) -> Path:
-    expanded = path.expanduser()
-    if expanded.is_symlink():
-        raise UnsafePathError(f"Refusing to use a symbolic-link backup directory: {expanded}")
-    backup = no_link_absolute_path(expanded)
-    if not backup.is_dir():
+    backup = require_local_recovery_source(path)
+    try:
+        backup_metadata = (
+            _windows_enumerated_path_metadata(backup) if _running_on_windows() else backup.lstat()
+        )
+    except OSError as exc:
+        raise UserInputError("The backup directory was not found.") from exc
+    if not stat.S_ISDIR(backup_metadata.st_mode):
         raise UserInputError(f"Backup directory was not found: {backup}")
     for required_name in ("Manifest.plist", "Manifest.db"):
         required = backup / required_name
-        if not required.is_file() or required.is_symlink():
+        if (
+            optional_local_recovery_regular_file(
+                required,
+                volume_already_validated=True,
+            )
+            is None
+        ):
             raise UserInputError(
                 f"{required_name} was not found as a regular backup file: {backup}"
             )
@@ -2704,11 +3620,8 @@ def prepare_anchored_extraction_layout(
 
 
 def validate_extraction_directory(path: Path) -> Path:
-    expanded = path.expanduser()
-    if expanded.is_symlink():
-        raise UnsafePathError(f"Refusing to use a symbolic-link extraction directory: {expanded}")
-    extraction = no_link_absolute_path(expanded)
-    if not extraction.is_dir():
+    extraction = require_local_recovery_source(path)
+    if not recovery_path_is_directory(extraction):
         raise UserInputError(f"Extraction directory was not found: {extraction}")
     require_private_path(extraction, expected_type=stat.S_IFDIR)
     try:
@@ -2716,12 +3629,12 @@ def validate_extraction_directory(path: Path) -> Path:
         metadata = safe_join(extraction, "metadata")
     except ValueError as exc:
         raise UnsafePathError("The extraction directory contained an unsafe path.") from exc
-    if raw.is_symlink() or not raw.is_dir():
+    if not recovery_path_is_directory(raw):
         raise UnsafePathError(f"Expected extracted raw data at: {raw}")
     require_private_path(raw, expected_type=stat.S_IFDIR)
     require_private_path(metadata, expected_type=stat.S_IFDIR)
     run_state = metadata / "run_state.json"
-    if not run_state.is_file() or run_state.is_symlink():
+    if not recovery_path_is_regular_file(run_state):
         raise PartialExtractionError(
             "The extraction has no trustworthy complete run marker. Preserve it for diagnosis and "
             "run a fresh recovery into a new output folder."
@@ -2780,17 +3693,6 @@ def validate_extraction_directory(path: Path) -> Path:
             f"({git_root}). Move it to private storage first."
         )
     return extraction
-
-
-def prepare_new_analysis_directory(extraction: Path) -> Path:
-    extraction = validate_extraction_directory(extraction)
-    analysis = extraction / "analysis"
-    if analysis.exists() or analysis.is_symlink():
-        raise OutputExistsError(
-            f"Analysis output already exists: {analysis}. "
-            "Use a fresh extraction or move the old analysis aside."
-        )
-    return secure_directory(analysis)
 
 
 def prepare_analysis_layout(extraction: Path) -> AnalysisLayout:
@@ -3097,27 +3999,15 @@ def read_json_regular(
 
     if maximum_bytes is not None and maximum_bytes <= 0:
         raise ValueError("maximum_bytes must be positive")
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise UnsafePathError("A required private JSON file was unavailable.") from exc
-    if not stat.S_ISREG(metadata.st_mode) or _is_link_or_reparse_point(path):
-        raise UnsafePathError("A required private JSON file was not a regular file.")
-    if maximum_bytes is not None and (metadata.st_size <= 0 or metadata.st_size > maximum_bytes):
-        raise UnsafePathError("A required private JSON file had an unsafe byte size.")
-    if (
-        require_private
-        and os.name != "nt"
-        and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077)
-    ):
-        raise UnsafePathError("A required private JSON file was not private.")
+    if maximum_bytes is not None:
+        payload = read_regular_bytes(
+            path,
+            maximum_bytes=maximum_bytes,
+            require_private=require_private,
+        )
+        return json.loads(payload.decode("utf-8"))
     with regular_text_reader(path, require_private=require_private) as handle:
-        if maximum_bytes is None:
-            return json.load(handle)
-        payload = handle.read(maximum_bytes + 1)
-    if not payload or len(payload.encode("utf-8")) > maximum_bytes:
-        raise UnsafePathError("A required private JSON file had an unsafe byte size.")
-    return json.loads(payload)
+        return json.load(handle)
 
 
 def _fsync_parent_directory(path: Path) -> None:
@@ -3501,7 +4391,11 @@ def private_text_writer(path: Path, *, newline: str | None = None) -> Iterator[T
     secure_directory(path.parent)
     descriptor = -1
     try:
-        descriptor = os.open(path, _open_flags(), 0o600)
+        descriptor = (
+            windows_open_private_output_descriptor(path, exclusive=False)
+            if _running_on_windows()
+            else os.open(path, _open_flags(), 0o600)
+        )
         harden_private_descriptor(
             descriptor,
             expected_type=stat.S_IFREG,
@@ -3545,7 +4439,11 @@ def write_json_private_atomic(
         flags |= os.O_NOFOLLOW
     descriptor = -1
     try:
-        descriptor = os.open(temporary, flags, 0o600)
+        descriptor = (
+            windows_create_private_staging_descriptor(temporary)
+            if _running_on_windows()
+            else os.open(temporary, flags, 0o600)
+        )
         harden_private_descriptor(
             descriptor,
             expected_type=stat.S_IFREG,
@@ -3577,7 +4475,11 @@ def write_bytes_private(path: Path, value: bytes, *, exclusive: bool = False) ->
         flags |= os.O_NOFOLLOW
     descriptor = -1
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = (
+            windows_open_private_output_descriptor(path, exclusive=exclusive)
+            if _running_on_windows()
+            else os.open(path, flags, 0o600)
+        )
         harden_private_descriptor(
             descriptor,
             expected_type=stat.S_IFREG,
@@ -3605,20 +4507,12 @@ def write_csv_private(
         writer.writeheader()
         for row_number, row in enumerate(rows, 1):
             protected = {
-                key: f"'{value}"
-                if spreadsheet_safe
-                and isinstance(value, str)
-                and value.startswith(("=", "+", "-", "@", "\t", "\r"))
-                else value
+                key: spreadsheet_safe_cell(value) if spreadsheet_safe else value
                 for key, value in row.items()
             }
             for field in fields:
                 value = row.get(field)
-                if (
-                    spreadsheet_safe
-                    and isinstance(value, str)
-                    and value.startswith(("=", "+", "-", "@", "\t", "\r"))
-                ):
+                if spreadsheet_safe and spreadsheet_cell_needs_escape(value):
                     escaped_cells.append({"row": row_number, "field": field})
             writer.writerow(protected)
     return escaped_cells
