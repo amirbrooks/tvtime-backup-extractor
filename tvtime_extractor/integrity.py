@@ -53,14 +53,18 @@ def inventory_relative_path_cell(value: str) -> str:
 
 
 def canonical_inventory_relative_path(value: str) -> str:
-    """Restore one inventory path while rejecting missing or forged escape provenance."""
+    """Restore one inventory path, accepting the sealed pre-escape representation."""
 
     if not isinstance(value, str):
         raise ValueError("The inventory path cell was invalid.")
     escaped = value.startswith(INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX)
     candidate = value[len(INVENTORY_RELATIVE_PATH_ESCAPE_PREFIX) :] if escaped else value
-    if escaped != spreadsheet_cell_needs_escape(candidate):
+    if escaped and not spreadsheet_cell_needs_escape(candidate):
         raise ValueError("The inventory path cell had invalid spreadsheet-escape provenance.")
+    # v0.2 inventories stored formula-leading paths verbatim. Their inventory
+    # bytes remain bound by the extraction completion marker, so accepting that
+    # legacy representation preserves report rebuilding without permitting an
+    # ambiguous new escaped representation.
     relative = safe_manifest_relative_path(candidate)
     if relative.as_posix() != candidate:
         raise ValueError("The inventory path was not canonical.")

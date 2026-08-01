@@ -19,7 +19,11 @@ from tvtime_extractor.integrity import (
     source_snapshot_from_mapping,
 )
 from tvtime_extractor.report import build_report
-from tvtime_extractor.safety import write_bytes_private
+from tvtime_extractor.safety import (
+    write_bytes_private,
+    write_json_private_atomic,
+    write_text_private,
+)
 from tvtime_extractor.visual_report import write_visual_reports as write_real_visual_reports
 
 
@@ -68,6 +72,34 @@ class RawChainIntegrityTests(unittest.TestCase):
             self.assertEqual(protected, {f"./{value}" for value in expected_paths})
 
             reconcile_raw_tree(extraction)
+            analyze_extraction(extraction_directory=extraction)
+            build_report(extraction_directory=extraction)
+
+    def test_sealed_v020_formula_leading_inventory_path_remains_reportable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            extraction = create_synthetic_extraction(Path(temporary))
+            raw_path = extraction / "raw" / PRIMARY_DOMAIN / "=legacy-private-name.bin"
+            write_bytes_private(raw_path, b"synthetic private payload")
+            refresh_synthetic_source_snapshot(extraction)
+
+            inventory_path = extraction / "metadata" / "inventory.csv"
+            inventory = inventory_path.read_text(encoding="utf-8")
+            self.assertIn("./=legacy-private-name.bin", inventory)
+            write_text_private(
+                inventory_path,
+                inventory.replace("./=legacy-private-name.bin", "=legacy-private-name.bin"),
+            )
+
+            legacy_snapshot = reconcile_raw_tree(extraction)
+            run_state_path = extraction / "metadata" / "run_state.json"
+            run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            run_state["source_snapshot"] = legacy_snapshot.as_dict()
+            write_json_private_atomic(run_state_path, run_state)
+
+            self.assertEqual(
+                canonical_inventory_relative_path("=legacy-private-name.bin"),
+                "=legacy-private-name.bin",
+            )
             analyze_extraction(extraction_directory=extraction)
             build_report(extraction_directory=extraction)
 
