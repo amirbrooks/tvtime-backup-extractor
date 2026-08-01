@@ -566,7 +566,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             capabilities,
         )
         self.assertIn(
-            "Marshal.SizeOf(typeof(FileRenameInformation)) + encoded.Length",
+            "Marshal.SizeOf(typeof(FileRenameInformation)) +",
+            capabilities,
+        )
+        self.assertIn(
+            "encoded.Length + sizeof(char));",
             capabilities,
         )
         self.assertIn("FileDispositionInfo", capabilities)
