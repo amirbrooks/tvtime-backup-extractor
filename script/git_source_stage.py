@@ -63,15 +63,12 @@ def _windows_user_sid() -> str:
     return rows[0][1]
 
 
-def _set_windows_tree_access(root: Path, rights: str) -> None:
-    principal = f"*{_windows_user_sid()}:(OI)(CI){rights}"
+def _run_windows_tree_acl(root: Path, *arguments: str) -> None:
     completed = subprocess.run(
         [
             str(_windows_system_tool("icacls.exe")),
             str(root),
-            "/inheritance:r",
-            "/grant:r",
-            principal,
+            *arguments,
             "/T",
             "/Q",
         ],
@@ -83,9 +80,28 @@ def _set_windows_tree_access(root: Path, rights: str) -> None:
         raise RuntimeError("Windows release source permissions could not be applied")
 
 
+def _set_windows_tree_access(root: Path, rights: str) -> None:
+    sid = _windows_user_sid()
+    _run_windows_tree_acl(root, "/inheritancelevel:r")
+    _run_windows_tree_acl(root, "/grant:r", f"*{sid}:(OI)(CI){rights}")
+
+
+def _deny_windows_tree_mutation(root: Path) -> None:
+    sid = _windows_user_sid()
+    denied_rights = "(OI)(CI)(WD,AD,WEA,WA,DE,DC)"
+    _run_windows_tree_acl(root, "/deny", f"*{sid}:{denied_rights}")
+
+
+def _remove_windows_tree_deny(root: Path) -> None:
+    _run_windows_tree_acl(root, "/remove:d", f"*{_windows_user_sid()}")
+
+
 def _lock_windows_source(source: Path) -> None:
     _set_windows_tree_access(source, "RX")
-    _set_windows_tree_access(source / GENERATED_DIRECTORY, "F")
+    _deny_windows_tree_mutation(source)
+    generated = source / GENERATED_DIRECTORY
+    _remove_windows_tree_deny(generated)
+    _set_windows_tree_access(generated, "F")
 
 
 def _assert_windows_source_locked(source: Path) -> None:
@@ -339,6 +355,7 @@ def make_source_removable(source: Path) -> None:
     if not source.exists() or source.is_symlink():
         return
     if WINDOWS_HOST:
+        _remove_windows_tree_deny(source)
         _set_windows_tree_access(source, "F")
     for current, directory_names, file_names in os.walk(source, topdown=False):
         if WINDOWS_HOST:
