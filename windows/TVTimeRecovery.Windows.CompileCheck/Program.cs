@@ -121,14 +121,14 @@ internal static class CompileCheckProgram
         Directory.CreateDirectory(Path.Combine(extraction, "analysis"));
         Directory.CreateDirectory(Path.Combine(extraction, "manifest"));
         var rawDomain = Path.Combine(extraction, "raw", "AppDomain-com.tozelabs.tvshowtime");
-        var rawDocuments = Path.Combine(rawDomain, "Documents");
+        var rawDocuments = Path.Combine(rawDomain, "=Synthetic");
         Directory.CreateDirectory(rawDocuments);
         var rawPayload = Encoding.UTF8.GetBytes("synthetic-private-database\n");
         var rawHash = Convert.ToHexString(SHA256.HashData(rawPayload)).ToLowerInvariant();
         File.WriteAllBytes(Path.Combine(rawDocuments, "DioCache.db"), rawPayload);
         var inventoryPayload = Encoding.UTF8.GetBytes(
             "file_id,domain,relative_path,declared_size,actual_size,size_match,mtime,sha256\r\n" +
-            $"{new string('0', 40)},AppDomain-com.tozelabs.tvshowtime,Documents/DioCache.db," +
+            $"{new string('0', 40)},AppDomain-com.tozelabs.tvshowtime,./=Synthetic/DioCache.db," +
             $"{rawPayload.Length},{rawPayload.Length},True,,{rawHash}\r\n");
 
         var bindings = new List<Dictionary<string, object>>();
@@ -222,7 +222,7 @@ internal static class CompileCheckProgram
         using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         digest.AppendData("tvtime-raw-tree-digest-v0.2\0"u8);
         var path = Encoding.UTF8.GetBytes(
-            "AppDomain-com.tozelabs.tvshowtime/Documents/DioCache.db");
+            "AppDomain-com.tozelabs.tvshowtime/=Synthetic/DioCache.db");
         Span<byte> size = stackalloc byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(size, (ulong)path.Length);
         digest.AppendData(size);

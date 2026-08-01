@@ -38,16 +38,20 @@ from .safety import (
     private_temporary_directory,
     promote_directory_no_replace_atomic,
     read_json_regular,
+    recovery_path_is_regular_file,
+    recovery_path_metadata,
     regular_binary_reader,
     require_private_descriptor,
     safe_join,
     secure_directory,
     secure_file,
     validate_extraction_directory,
+    windows_create_private_staging_descriptor,
     write_bytes_private,
     write_csv_private,
     write_json_private,
 )
+from .spreadsheet import spreadsheet_safe_cell
 
 # Production cache-analysis safety envelope. These limits are deliberately far
 # above ordinary TV Time recovery volumes while still bounding every allocation
@@ -337,11 +341,7 @@ def _spreadsheet_safe_row(
             subject="analysis CSV cell byte size",
             maximum_bytes=MAXIMUM_ANALYSIS_CSV_CELL_BYTES,
         )
-        protected[field] = (
-            "'" + value
-            if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r"))
-            else value
-        )
+        protected[field] = spreadsheet_safe_cell(value)
     return protected
 
 
@@ -487,13 +487,15 @@ def _sqlite_snapshot_sources(
     for suffix in ("", "-wal", "-shm", "-journal"):
         source = path.with_name(path.name + suffix)
         try:
-            source.lstat()
+            source_metadata = recovery_path_metadata(source)
         except FileNotFoundError:
             if not suffix:
                 raise TVTimeError("A required SQLite database was not found.") from None
             continue
         except OSError as exc:
             raise TVTimeError("A recovered SQLite database could not be inspected safely.") from exc
+        if not stat.S_ISREG(source_metadata.st_mode):
+            raise TVTimeError("A recovered SQLite database contained an unsafe file or sidecar.")
         try:
             with regular_binary_reader(
                 source,
@@ -549,7 +551,11 @@ def _copy_sqlite_snapshot_file(
         ) as (source_handle, opened_source):
             if not _same_sqlite_source(source_before, opened_source):
                 raise TVTimeError("A recovered SQLite database changed while it was opened.")
-            destination_descriptor = os.open(destination, destination_flags, 0o600)
+            destination_descriptor = (
+                windows_create_private_staging_descriptor(destination)
+                if os.name == "nt"
+                else os.open(destination, destination_flags, 0o600)
+            )
             if os.name != "nt":
                 os.fchmod(destination_descriptor, 0o600)
             require_private_descriptor(destination_descriptor, expected_type=stat.S_IFREG)
@@ -902,7 +908,7 @@ def _analyze_extraction(
         cancellation_check()
     app_root = safe_join(raw, PRIMARY_DOMAIN)
     cache_db = safe_join(app_root, "Documents", "DioCache.db")
-    if not cache_db.is_file():
+    if not recovery_path_is_regular_file(cache_db):
         raise AppDataMissingError(
             "The selected TV Time app data did not contain the required cache database."
         )
@@ -1563,7 +1569,10 @@ def analyze_extraction(
     """Analyze a complete extraction and classify destination exhaustion consistently."""
 
     try:
-        with anchored_existing_extraction_root(extraction_directory) as anchored_extraction:
+        with anchored_existing_extraction_root(
+            extraction_directory,
+            cancellation_check=cancellation_check,
+        ) as anchored_extraction:
             return _analyze_extraction(
                 extraction_directory=anchored_extraction,
                 include_raw_cache=include_raw_cache,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import sqlite3
+import stat
 import tempfile
 import unittest
 import zipfile
@@ -27,6 +28,7 @@ from tvtime_extractor.acquisition import (
     _official_export_members,
     _read_official_export_payloads,
     _require_source_identity,
+    _select_snapshot_database,
     _source_identity,
     _write_official_export_cache,
     inspect_android_backup,
@@ -38,6 +40,7 @@ from tvtime_extractor.acquisition import (
 from tvtime_extractor.errors import (
     BackupPasswordError,
     SourceChangedError,
+    TVTimeError,
     UnsafePathError,
     UnsupportedSchemaError,
     UserInputError,
@@ -67,6 +70,89 @@ class AndroidBackupHeaderTests(unittest.TestCase):
 
 
 class AndroidAcquisitionTests(unittest.TestCase):
+    def test_windows_snapshot_root_inspection_never_uses_an_ordinary_path_stat(self) -> None:
+        source = Path("/Synthetic/Snapshot")
+        source_files = (("DioCache.db", 9, "a" * 64, (7, 11, 13, 17)),)
+
+        with (
+            mock.patch(
+                "tvtime_extractor.acquisition.require_local_recovery_source",
+                return_value=source,
+            ),
+            mock.patch("tvtime_extractor.acquisition.os.name", "nt"),
+            mock.patch(
+                "tvtime_extractor.acquisition._windows_enumerated_path_metadata",
+                return_value=mock.Mock(st_mode=stat.S_IFDIR),
+            ) as metadata,
+            mock.patch.object(
+                Path,
+                "lstat",
+                side_effect=AssertionError("ordinary path stat is forbidden"),
+            ),
+            mock.patch(
+                "tvtime_extractor.acquisition._snapshot_android_databases",
+                return_value=source_files,
+            ),
+        ):
+            preflight = inspect_android_snapshot(source)
+
+        self.assertEqual(preflight.source_files, source_files)
+        metadata.assert_called_once_with(source)
+
+    def test_snapshot_selection_uses_protected_optional_file_opens(self) -> None:
+        root = Path("/synthetic-snapshot")
+        selected = root / "databases" / "DioCache.db"
+
+        def protect(candidate: Path, *, volume_already_validated: bool) -> Path | None:
+            self.assertTrue(volume_already_validated)
+            return candidate if candidate == selected else None
+
+        with (
+            mock.patch(
+                "tvtime_extractor.acquisition.no_link_absolute_path",
+                side_effect=lambda path: path,
+            ),
+            mock.patch(
+                "tvtime_extractor.acquisition.optional_local_recovery_regular_file",
+                side_effect=protect,
+            ) as protected,
+            mock.patch.object(
+                Path,
+                "exists",
+                side_effect=AssertionError("ordinary exists probe is forbidden"),
+            ),
+            mock.patch.object(
+                Path,
+                "is_file",
+                side_effect=AssertionError("ordinary is_file probe is forbidden"),
+            ),
+        ):
+            result = _select_snapshot_database(root, "DioCache.db")
+
+        self.assertEqual(result, selected)
+        self.assertEqual(protected.call_count, 3)
+
+    def test_recovery_rejects_an_untrusted_source_before_destination_or_inspection(self) -> None:
+        rejected = UnsafePathError("synthetic untrusted source")
+        with (
+            mock.patch(
+                "tvtime_extractor.acquisition.require_local_recovery_source",
+                side_effect=rejected,
+            ) as require_source,
+            mock.patch("tvtime_extractor.acquisition.held_destination_parent") as held_parent,
+            mock.patch("tvtime_extractor.acquisition.inspect_android_backup") as inspect_source,
+            self.assertRaisesRegex(UnsafePathError, "synthetic untrusted source"),
+        ):
+            recover_acquired_source(
+                source_kind=RecoverySourceKind.ANDROID_LEGACY_BACKUP,
+                source=Path("synthetic-source.ab"),
+                output_directory=Path("synthetic-output"),
+                acknowledge_sensitive_output=True,
+            )
+        require_source.assert_called_once_with(Path("synthetic-source.ab"))
+        held_parent.assert_not_called()
+        inspect_source.assert_not_called()
+
     def test_source_identity_includes_change_and_write_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "synthetic-source"
@@ -518,6 +604,51 @@ class AndroidAcquisitionTests(unittest.TestCase):
 
 
 class OfficialExportAcquisitionTests(unittest.TestCase):
+    def test_source_overlap_uses_source_neutral_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "private-overlap-result"
+            output.mkdir(mode=0o700)
+            source = output / "tracking-prod-records-v2.csv"
+            source.write_text(
+                "type,show_name\nwatch-episode,Synthetic Series\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                UnsafePathError,
+                r"^The selected source and recovery destination must not overlap\.$",
+            ):
+                recover_acquired_source(
+                    source_kind=RecoverySourceKind.TVTIME_OFFICIAL_EXPORT,
+                    source=source,
+                    output_directory=output,
+                    acknowledge_sensitive_output=True,
+                )
+
+    def test_operating_system_failure_uses_source_neutral_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tracking-prod-records-v2.csv"
+            source.write_text(
+                "type,show_name\nwatch-episode,Synthetic Series\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch(
+                    "tvtime_extractor.acquisition._acquire_official_export_into",
+                    side_effect=OSError("synthetic operating-system failure"),
+                ),
+                self.assertRaisesRegex(
+                    TVTimeError,
+                    r"^Local source acquisition failed safely\.$",
+                ),
+            ):
+                recover_acquired_source(
+                    source_kind=RecoverySourceKind.TVTIME_OFFICIAL_EXPORT,
+                    source=source,
+                    output_directory=root / "private-failed-export-result",
+                    acknowledge_sensitive_output=True,
+                )
+
     def test_rejected_export_password_uses_password_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "synthetic-export.zip"
@@ -544,6 +675,35 @@ class OfficialExportAcquisitionTests(unittest.TestCase):
                     members,
                     expected_identity=preflight.source_identity,
                     passphrase="synthetic wrong password",
+                    cancellation_check=None,
+                )
+
+    def test_unsupported_export_encryption_uses_schema_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "synthetic-export.zip"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(
+                    "tracking-prod-records-v2.csv",
+                    b"type,show_name\nwatch-episode,Synthetic Series\n",
+                )
+            preflight = inspect_official_export(source)
+            members = _official_export_members(
+                source,
+                expected_identity=preflight.source_identity,
+            )
+            with (
+                mock.patch.object(
+                    zipfile.ZipFile,
+                    "open",
+                    side_effect=NotImplementedError("synthetic unsupported encryption"),
+                ),
+                self.assertRaises(UnsupportedSchemaError),
+            ):
+                _read_official_export_payloads(
+                    source,
+                    members,
+                    expected_identity=preflight.source_identity,
+                    passphrase="synthetic password",
                     cancellation_check=None,
                 )
 

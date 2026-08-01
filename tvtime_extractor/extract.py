@@ -25,6 +25,7 @@ from .errors import (
     AppDataMissingError,
     BackupPasswordError,
     BackupUnfinishedError,
+    OutputExistsError,
     SourceChangedError,
     TVTimeError,
     UnsafePathError,
@@ -32,14 +33,18 @@ from .errors import (
     insufficient_space_error,
     is_insufficient_space_error,
 )
-from .integrity import SourceSnapshot, reconcile_raw_tree
+from .integrity import SourceSnapshot, reconcile_raw_tree, write_inventory_csv
 from .safety import (
     EXTRACTION_RUN_STATE_CONTRACT,
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
     ExtractionLayout,
+    _require_safe_local_directory_tree,
     _windows_close_handle,
+    _windows_create_and_hold_bound_descendant_directory,
     _windows_directory_identity,
+    _windows_locked_relative_regular_file_descriptor,
     _windows_open_locked_directory,
+    _windows_pinned_absolute_directory_handle,
     anchored_bound_output_root,
     harden_private_descriptor,
     held_destination_parent,
@@ -61,7 +66,7 @@ from .safety import (
     validate_file_id,
     windows_create_private_capture_descriptor,
     windows_create_private_staging_descriptor,
-    write_csv_private,
+    windows_delete_bound_private_tree,
     write_json_private_atomic,
     write_text_private,
 )
@@ -155,73 +160,54 @@ def _windows_source_payload(
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise UnsafePathError("A handle-rooted Windows source path was invalid.")
 
-    source_handle = -1
-    source_descriptor = -1
     destination_descriptor = -1
-    visible_handle = -1
     digest = hashlib.sha256()
     payload = bytearray() if retain_payload else None
     byte_count = 0
     try:
-        source_handle = _windows_native.open_relative_path(source_root_handle, path.parts)
-        before = _windows_native.handle_information(source_handle)
-        if before.is_directory or before.is_reparse_point:
-            raise UnsafePathError("A Windows source payload was not a regular file.")
-        if maximum_bytes is not None and (
-            before.byte_size <= 0 or before.byte_size > maximum_bytes
-        ):
-            raise UserInputError("Required backup metadata had an unsafe byte size.")
-        source_descriptor = _windows_native.handle_to_file_descriptor(
-            source_handle,
-            flags=os.O_RDONLY | getattr(os, "O_BINARY", 0),
-        )
-        source_handle = -1
-        if snapshot_destination is not None:
-            secure_directory(snapshot_destination.parent)
-            destination_descriptor = windows_create_private_capture_descriptor(snapshot_destination)
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            byte_count += len(chunk)
-            if maximum_bytes is not None and byte_count > maximum_bytes:
+        with _windows_locked_relative_regular_file_descriptor(
+            source_root_handle,
+            path.parts,
+        ) as (source_descriptor, before):
+            if maximum_bytes is not None and (
+                before.byte_size <= 0 or before.byte_size > maximum_bytes
+            ):
                 raise UserInputError("Required backup metadata had an unsafe byte size.")
-            digest.update(chunk)
-            if payload is not None:
-                payload.extend(chunk)
+            if snapshot_destination is not None:
+                secure_directory(snapshot_destination.parent)
+                destination_descriptor = windows_create_private_capture_descriptor(
+                    snapshot_destination
+                )
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                byte_count += len(chunk)
+                if maximum_bytes is not None and byte_count > maximum_bytes:
+                    raise UserInputError("Required backup metadata had an unsafe byte size.")
+                digest.update(chunk)
+                if payload is not None:
+                    payload.extend(chunk)
+                if destination_descriptor >= 0:
+                    _write_all_to_descriptor(destination_descriptor, chunk)
             if destination_descriptor >= 0:
-                _write_all_to_descriptor(destination_descriptor, chunk)
-        if destination_descriptor >= 0:
-            os.fsync(destination_descriptor)
-
-        import msvcrt
-
-        native_source = int(msvcrt.get_osfhandle(source_descriptor))
-        after = _windows_native.handle_information(native_source)
-        visible_handle = _windows_native.open_relative_path(source_root_handle, path.parts)
-        visible = _windows_native.handle_information(visible_handle)
-        if (
-            before != after
-            or after != visible
-            or byte_count != after.byte_size
-            or after.is_directory
-            or after.is_reparse_point
-        ):
+                os.fsync(destination_descriptor)
+        if byte_count != before.byte_size:
             raise SourceChangedError(
                 "A selected encrypted source payload changed during verification. Preserve the "
                 "incomplete output and retry from a completed, disconnected backup."
             )
         if snapshot_destination is not None:
             secure_file(snapshot_destination)
-        timestamp_ns = _windows_filetime_ns(after.last_write_time)
+        timestamp_ns = _windows_filetime_ns(before.last_write_time)
         return (
             BackupFileSnapshot(
                 mode=stat.S_IFREG,
-                size=after.byte_size,
+                size=before.byte_size,
                 modified_ns=timestamp_ns,
                 changed_ns=timestamp_ns,
-                device=after.identity[0],
-                inode=after.identity[1],
+                device=before.identity[0],
+                inode=before.identity[1],
                 sha256=digest.hexdigest(),
             ),
             bytes(payload) if payload is not None else None,
@@ -241,18 +227,9 @@ def _windows_source_payload(
             "incomplete output and retry from a completed, disconnected backup."
         ) from exc
     finally:
-        if visible_handle >= 0:
-            with suppress(Exception):
-                _windows_native.close_handle(visible_handle)
         if destination_descriptor >= 0:
             with suppress(OSError):
                 os.close(destination_descriptor)
-        if source_descriptor >= 0:
-            with suppress(OSError):
-                os.close(source_descriptor)
-        if source_handle >= 0:
-            with suppress(Exception):
-                _windows_native.close_handle(source_handle)
 
 
 def _source_payload_state(
@@ -348,7 +325,11 @@ def _source_payload_state(
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0)
             )
-            destination_descriptor = os.open(snapshot_destination, destination_flags, 0o600)
+            destination_descriptor = (
+                windows_create_private_staging_descriptor(snapshot_destination)
+                if os.name == "nt"
+                else os.open(snapshot_destination, destination_flags, 0o600)
+            )
             harden_private_descriptor(
                 destination_descriptor,
                 expected_type=stat.S_IFREG,
@@ -616,20 +597,14 @@ def _held_backup_root(
     backup_directory: Path,
     *,
     expected_identity: tuple[int, int] | None = None,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> Any:
     """Hold one no-follow source-root descriptor for the complete extraction operation."""
 
     backup = validate_backup_directory(backup_directory)
-    try:
-        before = backup.lstat()
-    except OSError as exc:
-        raise SourceChangedError("The selected backup root could not be opened safely.") from exc
-    if _is_link_or_reparse(before) or not stat.S_ISDIR(before.st_mode):
-        raise UnsafePathError("The selected backup root was not a regular directory.")
     if os.name == "nt":
-        handle = -1
-        try:
-            handle, identity = _windows_open_locked_directory(backup)
+        with _windows_pinned_absolute_directory_handle(backup) as handle:
+            identity = _windows_directory_identity(handle)
             if expected_identity is not None and identity != expected_identity:
                 raise SourceChangedError("The selected backup root changed while it was opened.")
             _require_bound_backup_root(
@@ -637,12 +612,18 @@ def _held_backup_root(
                 descriptor=handle,
                 expected_identity=identity,
             )
+            _require_safe_local_directory_tree(
+                backup,
+                cancellation_check=cancellation_check,
+            )
             yield handle, identity, backup
-        finally:
-            if handle >= 0:
-                with suppress(Exception):
-                    _windows_close_handle(handle)
         return
+    try:
+        before = backup.lstat()
+    except OSError as exc:
+        raise SourceChangedError("The selected backup root could not be opened safely.") from exc
+    if _is_link_or_reparse(before) or not stat.S_ISDIR(before.st_mode):
+        raise UnsafePathError("The selected backup root was not a regular directory.")
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
@@ -712,6 +693,9 @@ def _quiet_dependency_call(function: Callable[..., Any], *args: Any, **kwargs: A
 def _remove_private_temp_tree(root: Path) -> None:
     """Remove a private tree without traversing links or Windows reparse points."""
 
+    if os.name == "nt":
+        windows_delete_bound_private_tree(root)
+        return
     try:
         root_metadata = root.lstat()
     except FileNotFoundError:
@@ -808,10 +792,13 @@ def _anchored_dependency_temporary_directories(temp_root: Path):
             name = f"{prefix or 'tmp'}{secrets.token_hex(16)}{suffix or ''}"
             candidate = safe_join(parent, name)
             try:
-                candidate.mkdir(mode=0o700)
-            except FileExistsError:
+                if os.name == "nt":
+                    _windows_create_and_hold_bound_descendant_directory(candidate)
+                else:
+                    candidate.mkdir(mode=0o700)
+                    secure_directory(candidate)
+            except (FileExistsError, OutputExistsError):
                 continue
-            secure_directory(candidate)
             return str(candidate)
         raise UnsafePathError("A private dependency temporary directory could not be allocated.")
 
@@ -1744,21 +1731,7 @@ def _extract_backup(
             if progress_callback is not None:
                 progress_callback(index, len(rows))
 
-        write_csv_private(
-            layout.metadata_root / "inventory.csv",
-            inventory,
-            [
-                "file_id",
-                "domain",
-                "relative_path",
-                "declared_size",
-                "actual_size",
-                "size_match",
-                "mtime",
-                "sha256",
-            ],
-            spreadsheet_safe=False,
-        )
+        write_inventory_csv(layout.metadata_root / "inventory.csv", inventory)
         discrepancies = [
             {
                 "domain": row["domain"],
@@ -1934,6 +1907,7 @@ def extract_backup(
             with _held_backup_root(
                 backup_directory,
                 expected_identity=expected_identity,
+                cancellation_check=cancellation_check,
             ) as (root_descriptor, root_identity, visible_backup):
                 return extract_backup(
                     backup_directory=visible_backup,

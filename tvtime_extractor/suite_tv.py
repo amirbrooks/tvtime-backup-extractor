@@ -10,6 +10,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .safety import (
+    harden_private_descriptor,
+    secure_file,
+    windows_create_private_staging_descriptor,
+)
+from .spreadsheet import spreadsheet_safe_cell
+
 LIBERATOR_FILENAMES = (
     "shows.json",
     "movies.json",
@@ -256,12 +263,17 @@ def _activity_csv(
 ) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
-    writer.writerow(_ACTIVITY_HEADER)
+
+    def write_row(values: Iterable[object]) -> None:
+        writer.writerow(tuple(spreadsheet_safe_cell(value) for value in values))
+
+    write_row(_ACTIVITY_HEADER)
     for movie in movies:
         watched_at = str(movie.get("watched_at") or "")
-        writer.writerow(
+        imdb_id = movie["id"]["imdb"]
+        write_row(
             (
-                movie["id"]["imdb"],
+                -1 if imdb_id == "-1" else imdb_id,
                 movie["id"]["tvdb"],
                 "movie",
                 movie["title"],
@@ -281,9 +293,10 @@ def _activity_csv(
                 if not episode["is_watched"]:
                     continue
                 watched_at = str(episode.get("watched_at") or "")
-                writer.writerow(
+                imdb_id = episode["id"]["imdb"]
+                write_row(
                     (
-                        episode["id"]["imdb"],
+                        -1 if imdb_id == "-1" else imdb_id,
                         episode["id"]["tvdb"],
                         "episode",
                         show["title"],
@@ -303,9 +316,10 @@ def _activity_csv(
             for season in show["seasons"]
             for episode in season["episodes"]
         )
-        writer.writerow(
+        imdb_id = show["id"]["imdb"]
+        write_row(
             (
-                show["id"]["imdb"],
+                -1 if imdb_id == "-1" else imdb_id,
                 show["id"]["tvdb"],
                 "show",
                 show["title"],
@@ -556,16 +570,17 @@ def build_liberator_files(
 def write_suite_tv_zip(path: Path, files: Mapping[str, bytes]) -> None:
     validate_liberator_files(files)
 
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-        0o600,
+    descriptor = (
+        windows_create_private_staging_descriptor(path)
+        if os.name == "nt"
+        else os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
     )
     try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
-        else:
-            os.chmod(path, 0o600)
+        harden_private_descriptor(descriptor, expected_type=stat.S_IFREG, mode=0o600)
         with os.fdopen(descriptor, "wb") as output:
             descriptor = -1
             with zipfile.ZipFile(
@@ -582,3 +597,4 @@ def write_suite_tv_zip(path: Path, files: Mapping[str, bytes]) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    secure_file(path)

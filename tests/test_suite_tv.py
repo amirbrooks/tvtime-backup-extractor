@@ -216,6 +216,56 @@ class SuiteTVLiberatorTests(unittest.TestCase):
         self.assertEqual(episodes[1002]["watched_at"], "2020-03-02T01:02:03Z")
         self.assertFalse(episodes[1003]["is_watched"])
 
+    def test_activity_csv_neutralizes_every_spreadsheet_formula_prefix(self) -> None:
+        dangerous_titles = [
+            '=WEBSERVICE("https://example.invalid/synthetic")',
+            "+SYNTHETIC()",
+            "-SYNTHETIC()",
+            "@SYNTHETIC()",
+            "\tSYNTHETIC()",
+            "\rSYNTHETIC()",
+        ]
+        movies = [
+            {
+                **MOVIES[0],
+                "uuid": f"40000000-0000-4000-8000-{index:012d}",
+                "tvdb_id": str(600 + index),
+                "imdb_id": dangerous_titles[index] if index == 0 else "",
+                "name": title,
+                "watched_at": dangerous_titles[index] if index == 1 else "",
+            }
+            for index, title in enumerate(dangerous_titles)
+        ]
+
+        files = build_liberator_files(
+            series=[],
+            movies=movies,
+            favorites={"movies": [], "shows": []},
+            episodes=[],
+            estimate_progress=False,
+        )
+
+        rows = list(csv.DictReader(io.StringIO(files["activity_history.csv"].decode("utf-8"))))
+        self.assertEqual(
+            [row["title"] for row in rows],
+            [
+                *(f"'{title}" for title in dangerous_titles[:4]),
+                "SYNTHETIC()",
+                "SYNTHETIC()",
+            ],
+        )
+        for row in rows:
+            for field, value in row.items():
+                if field == "imdb_id" and value == "-1":
+                    continue
+                self.assertFalse(value.startswith(("=", "+", "-", "@", "\t", "\r")))
+        self.assertEqual(rows[0]["imdb_id"], f"'{dangerous_titles[0]}")
+        self.assertEqual(rows[1]["watched_at"], f"'{dangerous_titles[1]}")
+        self.assertEqual(
+            [movie["title"] for movie in json.loads(files["movies.json"])],
+            [*dangerous_titles[:4], "SYNTHETIC()", "SYNTHETIC()"],
+        )
+
     def test_invalid_series_identifier_is_omitted(self) -> None:
         files = build_liberator_files(
             series=[{**SERIES[0], "series_id": "0"}],

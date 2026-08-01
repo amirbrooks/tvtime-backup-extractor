@@ -1238,7 +1238,9 @@ enum RecoveryOutputValidator {
       }
       let fileID = record[0]
       let domain = record[1]
-      let relativePath = record[2]
+      guard let relativePath = canonicalInventoryRelativePath(record[2]) else {
+        throw RecoveryOutputValidationError.incompleteOutput
+      }
       guard
         fileID.count == 40,
         fileID.allSatisfy({ $0.isASCII && $0.isHexDigit && !$0.isUppercase }),
@@ -1434,6 +1436,16 @@ enum RecoveryOutputValidator {
     return !value.isEmpty && !value.hasPrefix("/") && !value.contains("\\")
       && components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
       && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+
+  private static func canonicalInventoryRelativePath(_ value: String) -> String? {
+    let escapePrefix = "./"
+    let escaped = value.hasPrefix(escapePrefix)
+    let candidate = escaped ? String(value.dropFirst(escapePrefix.count)) : value
+    let requiresEscape =
+      candidate.unicodeScalars.first.map { "=+-@\t\r\n".unicodeScalars.contains($0) } ?? false
+    guard escaped == requiresEscape, isSafeInventoryRelativePath(candidate) else { return nil }
+    return candidate
   }
 
   private static func isLowercaseSHA256(_ value: String) -> Bool {
@@ -2664,6 +2676,19 @@ enum RecoveryOutputValidator {
 
   private static func suiteTVActivityCSV(shows: [Any], movies: [Any]) throws -> Data {
     var rows: [[String]] = [suiteTVActivityHeader]
+
+    func appendRow(_ values: [String]) {
+      rows.append(
+        values.enumerated().map { index, value in
+          // Suite's missing-IMDb sentinel is a numeric CSV value, not recovered text.
+          if index == 0 && value == "-1" {
+            return value
+          }
+          return suiteTVSpreadsheetSafeCellValue(value)
+        }
+      )
+    }
+
     for value in movies {
       let movie = try suiteTVObject(
         value,
@@ -2675,7 +2700,7 @@ enum RecoveryOutputValidator {
         throw RecoveryOutputValidationError.artifactIntegrityFailure
       }
       let watchedAt = try movie["watched_at"].map(suiteTVString) ?? ""
-      rows.append([
+      appendRow([
         id.imdb,
         String(id.tvdb),
         "movie",
@@ -2723,7 +2748,7 @@ enum RecoveryOutputValidator {
           }
           let id = try suiteTVIdentifier(episode["id"])
           let watchedAt = try episode["watched_at"].map(suiteTVString) ?? ""
-          rows.append([
+          appendRow([
             id.imdb,
             String(id.tvdb),
             "episode",
@@ -2767,7 +2792,7 @@ enum RecoveryOutputValidator {
           hasUnwatched = hasUnwatched || !watched
         }
       }
-      rows.append([
+      appendRow([
         id.imdb,
         String(id.tvdb),
         "show",
@@ -2794,6 +2819,16 @@ enum RecoveryOutputValidator {
       return value
     }
     return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+  }
+
+  private static func suiteTVSpreadsheetSafeCellValue(_ value: String) -> String {
+    guard
+      let first = value.unicodeScalars.first,
+      "=+-@\t\r\n".unicodeScalars.contains(first)
+    else {
+      return value
+    }
+    return "'\(value)"
   }
 
   private static func suiteTVJSONArray(_ data: Data?) throws -> [Any] {

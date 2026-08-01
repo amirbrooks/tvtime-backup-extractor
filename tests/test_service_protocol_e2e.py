@@ -28,6 +28,7 @@ from tvtime_extractor.errors import (
     BackupUnencryptedError,
     BackupUnfinishedError,
     SourceChangedError,
+    UnsafePathError,
     UserInputError,
 )
 from tvtime_extractor.extract import PRIMARY_DOMAIN, ExtractionResult
@@ -38,6 +39,7 @@ from tvtime_extractor.helper_main import (
     _safe_error_payload,
 )
 from tvtime_extractor.models import (
+    CancellationToken,
     DestinationDirectoryIdentity,
     RecoveryEvent,
     RecoveryRequest,
@@ -51,11 +53,12 @@ from tvtime_extractor.protocol import (
     read_control_request,
 )
 from tvtime_extractor.safety import (
+    _safe_directory_entries,
     extended_acl_state,
     held_destination_parent,
     no_link_absolute_path,
 )
-from tvtime_extractor.service import RecoveryService
+from tvtime_extractor.service import RecoveryService, _backup_stats
 
 
 class _Cursor:
@@ -203,6 +206,48 @@ def _frame(value: object) -> bytes:
 
 
 class RecoveryServiceEndToEndTests(unittest.TestCase):
+    def test_backup_stats_rejects_nested_cloud_directory_and_file_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            backup = Path(temporary) / "synthetic-backup"
+            nested = backup / "nested"
+            nested.mkdir(parents=True)
+            payload = nested / "synthetic.bin"
+            payload.write_bytes(b"synthetic")
+
+            for blocked in (nested, payload):
+                blocked_inode = blocked.lstat().st_ino
+
+                def reject_blocked_entry(
+                    directory: Path,
+                    *,
+                    cancellation_check: object | None = None,
+                    expected_inode: int = blocked_inode,
+                ) -> object:
+                    self.assertIsNotNone(cancellation_check)
+                    directories, files = _safe_directory_entries(directory)
+                    if any(
+                        entry.metadata.st_ino == expected_inode for entry in (*directories, *files)
+                    ):
+                        raise UnsafePathError(
+                            "Refusing a cloud-backed file or directory that is not fully present "
+                            "on local storage."
+                        )
+                    return directories, files
+
+                with (
+                    self.subTest(blocked=blocked.name),
+                    mock.patch(
+                        "tvtime_extractor.service._safe_directory_entries",
+                        side_effect=reject_blocked_entry,
+                    ),
+                    self.assertRaisesRegex(UnsafePathError, "not fully present on local storage"),
+                ):
+                    _backup_stats(
+                        backup,
+                        cancellation=CancellationToken(),
+                        progress=None,
+                    )
+
     def test_full_synthetic_recovery_runs_extraction_analysis_report_and_atomic_markers(
         self,
     ) -> None:

@@ -116,22 +116,36 @@ internal static partial class RecoveryOutputValidator
         foreach (var row in rows.Skip(1))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = CanonicalInventoryRelativePath(row.Count == InventoryFields.Length
+                ? row[2]
+                : string.Empty);
             if (row.Count != InventoryFields.Length ||
                 !Regex.IsMatch(row[0], "^[0-9a-f]{40}$", RegexOptions.CultureInvariant) ||
-                !IsPortableComponent(row[1]) || string.IsNullOrEmpty(row[2]) ||
-                row[2].Contains('\\') || row[2].StartsWith('/') || row[2].EndsWith('/') ||
-                row[2].Split('/').Any(part => !IsPortableComponent(part)) ||
+                !IsPortableComponent(row[1]) || relativePath is null ||
                 !TryCanonicalNonnegativeInteger(row[3], out var declaredSize) ||
                 !TryCanonicalNonnegativeInteger(row[4], out var actualSize) ||
                 row[5] != (declaredSize == actualSize ? "True" : "False") ||
                 !Regex.IsMatch(row[7], "^[0-9a-f]{64}$", RegexOptions.CultureInvariant))
                 throw InvalidOutput();
-            var rawPath = $"{row[1]}/{row[2]}";
+            var rawPath = $"{row[1]}/{relativePath}";
             if (!paths.Add(rawPath)) throw InvalidOutput();
             entries.Add(new InventoryEntry(rawPath, actualSize, row[7]));
         }
         entries.Sort(static (left, right) => CompareUtf8(left.RelativeRawPath, right.RelativeRawPath));
         return entries;
+    }
+
+    private static string? CanonicalInventoryRelativePath(string value)
+    {
+        const string escapePrefix = "./";
+        var escaped = value.StartsWith(escapePrefix, StringComparison.Ordinal);
+        var candidate = escaped ? value[escapePrefix.Length..] : value;
+        var requiresEscape = candidate.Length > 0 && "=+-@\t\r\n".Contains(candidate[0]);
+        if (escaped != requiresEscape || string.IsNullOrEmpty(candidate) ||
+            candidate.Contains('\\') || candidate.StartsWith('/') || candidate.EndsWith('/') ||
+            candidate.Split('/').Any(part => !IsPortableComponent(part)))
+            return null;
+        return candidate;
     }
 
     private static List<List<string>> ParseCsv(

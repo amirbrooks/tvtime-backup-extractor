@@ -230,12 +230,17 @@ For the unpublished private Windows candidate, build and install the local MSIX 
 [Windows guide](docs/windows.md). Nothing in that workflow uploads or publishes the package.
 Its direct and transitive WinUI dependencies are committed in locked mode; a floating NuGet restore
 is rejected. Encrypted iOS recovery in that candidate requires Windows 11 x64 and remains blocked
-from merge until a synthetic Windows build, screenshot, and end-to-end smoke test confirm the native
-flow.
+from release-ready status until a synthetic Windows build, screenshot, and end-to-end smoke test
+confirm the native flow.
 
 Linux accepts only a conservative set of ordinary local filesystem types. FUSE, network, shared,
 virtual-machine shared-folder, temporary, overlay, and unknown filesystem types are refused with no
 override.
+
+All recovery sources must be owner-controlled and local. Known cloud-sync/shared paths, nonlocal
+volumes, symbolic links, Windows reparse points, and cloud-hydrated placeholders are rejected before
+source inspection. On Windows, the source must also be on private local NTFS storage so file
+identity checks remain trustworthy; copy an owner-controlled source there before recovery.
 
 The CLI commands are:
 

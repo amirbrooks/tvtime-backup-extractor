@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from script import convert_refract_series as refract_cli
-from tvtime_extractor.errors import OutputExistsError
+from tvtime_extractor.errors import OutputExistsError, UnsafePathError
 from tvtime_extractor.refract import (
     EPISODE_FIELDS,
     FAVORITE_FIELDS,
@@ -133,6 +133,17 @@ def _analysis_hashes(analysis: Path) -> dict[str, str]:
 
 
 class RefractPayloadTests(unittest.TestCase):
+    def test_line_feed_prefixed_title_round_trips_recorded_csv_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            analysis = _write_analysis(
+                Path(temporary),
+                series=[_series_row(name="\nSynthetic Line Feed Series")],
+            )
+
+            payload, _stats = build_refract_series_payload(analysis)
+
+            self.assertEqual(payload[0]["title"], "\nSynthetic Line Feed Series")
+
     def test_maps_series_episodes_specials_favorites_and_recorded_escapes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -304,6 +315,28 @@ class RefractPayloadTests(unittest.TestCase):
 
 
 class RefractOutputTests(unittest.TestCase):
+    def test_untrusted_analysis_source_is_rejected_before_output_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            analysis = root / "Synthetic-Untrusted-Analysis"
+            output = root / "Synthetic-No-Output"
+            with (
+                mock.patch(
+                    "tvtime_extractor.refract.require_local_recovery_source",
+                    side_effect=UnsafePathError("synthetic untrusted analysis source"),
+                ) as require_source,
+                mock.patch("tvtime_extractor.refract.held_destination_parent") as held_parent,
+                self.assertRaisesRegex(UnsafePathError, "synthetic untrusted analysis source"),
+            ):
+                convert_refract_series(
+                    analysis_directory=analysis,
+                    output_directory=output,
+                    export_date=date(2026, 7, 23),
+                )
+            require_source.assert_called_once_with(Path(analysis.name))
+            held_parent.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_conversion_creates_only_atomic_json_and_does_not_change_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

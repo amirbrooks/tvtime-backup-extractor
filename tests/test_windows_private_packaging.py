@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import re
 import unittest
@@ -100,7 +102,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertNotIn("internetClient", manifest)
         self.assertNotIn("broadFileSystemAccess", manifest)
 
-    def test_windows_sdk_dependencies_are_exactly_pinned(self) -> None:
+    def test_windows_app_sdk_nuget_dependencies_are_exactly_pinned(self) -> None:
         project = self.read("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj")
         references = re.findall(r'<PackageReference Include="([^"]+)" Version="([^"]+)"', project)
         self.assertEqual(
@@ -164,6 +166,19 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
 
     def test_helper_uses_explicit_handle_list_secret_pipe_and_job_object(self) -> None:
         source = self.read("windows/TVTimeRecovery.Windows/NativeHelperProcess.cs")
+        self.assertIn(
+            'new[] { "SystemRoot", "WINDIR", "TEMP", "TMP" }',
+            source,
+        )
+        for private_environment_name in (
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "OneDrive",
+            "DROPBOX",
+            "GOOGLE_DRIVE",
+        ):
+            self.assertNotIn(private_environment_name, source)
         for required in (
             "ProcThreadAttributeHandleList",
             "UpdateProcThreadAttribute",
@@ -210,10 +225,43 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             "def windows_create_private_capture_descriptor", 1
         )
         capture_call = capture_call.split("def _windows_rename_handle_no_replace", 1)[0]
-        self.assertIn("_WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE", private_file)
-        self.assertNotIn("_WINDOWS_FILE_SHARE_DELETE", private_file)
-        self.assertIn("_WINDOWS_DELETE", staging_call)
-        self.assertNotIn("_WINDOWS_DELETE", capture_call)
+        self.assertIn("create_relative_regular_file_path", private_file)
+        self.assertIn("_windows_pinned_absolute_directory_handle", private_file)
+        self.assertIn("exclusive=True", staging_call)
+        self.assertIn("temporary=True", staging_call)
+        self.assertIn("exclusive=True", capture_call)
+        self.assertIn("allow_path_reopen=True", capture_call)
+        windows_native = self.read("tvtime_extractor/windows_native.py")
+        output_creator = windows_native.split("def create_or_replace_regular_file", 1)[1]
+        output_creator = output_creator.split("def create_relative_regular_file_path", 1)[0]
+        self.assertIn("FILE_OPEN_IF", output_creator)
+        self.assertIn("validate_private_acl(handle)", output_creator)
+        self.assertLess(
+            output_creator.index("validate_private_acl(handle)"),
+            output_creator.index("_truncate_regular_file(handle)"),
+        )
+        self.assertIn("FILE_SHARE_READ | FILE_SHARE_WRITE", output_creator)
+        self.assertNotIn("FILE_SHARE_DELETE", output_creator)
+        extraction = self.read("tvtime_extractor/extract.py")
+        dependency_temp = extraction.split("def _anchored_dependency_temporary_directories", 1)[
+            1
+        ].split("def read_backup_password", 1)[0]
+        self.assertIn("_windows_create_and_hold_bound_descendant_directory", dependency_temp)
+        private_cleanup = extraction.split("def _remove_private_temp_tree", 1)[1].split(
+            "def _dispose_dependency", 1
+        )[0]
+        self.assertIn("windows_delete_bound_private_tree(root)", private_cleanup)
+        self.assertLess(
+            private_cleanup.index("windows_delete_bound_private_tree(root)"),
+            private_cleanup.index("root_metadata = root.lstat()"),
+        )
+        native_cleanup = windows_native.split("def delete_private_tree", 1)[1].split(
+            "def _truncate_regular_file", 1
+        )[0]
+        self.assertIn("_open_relative_for_delete", native_cleanup)
+        self.assertIn("_mark_handle_for_deletion", native_cleanup)
+        self.assertNotIn("unlink(", native_cleanup)
+        self.assertNotIn("rmdir(", native_cleanup)
 
     def test_native_ui_does_not_persist_source_access_or_swallow_fatal_errors(self) -> None:
         main_window = self.read("windows/TVTimeRecovery.Windows/MainWindow.xaml.cs")
@@ -243,6 +291,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("PinDirectoryChain(root, parent)", pinned_file)
         self.assertIn("FileIdentity.From(visibleInformation)", pinned_file)
         self.assertIn("file.EnsureIdentity()", validator)
+        self.assertIn("CanonicalInventoryRelativePath", validator)
+        self.assertIn('const string escapePrefix = "./"', validator)
         self.assertNotIn("FileShareDelete", pinned_file)
         self.assertIn(
             "internal sealed class ValidatedRecoveryOutput : IDisposable",
@@ -290,11 +340,24 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertNotIn("SHA256.HashData(stream)", validator)
 
-    def test_native_windows_app_has_no_network_client_or_elevation_request(self) -> None:
+    def test_native_windows_app_has_no_network_ai_or_elevation_request(self) -> None:
         source_root = ROOT / "windows/TVTimeRecovery.Windows"
-        production_source = "\n".join(
-            path.read_text(encoding="utf-8") for path in sorted(source_root.glob("*.cs"))
+        reviewed_suffixes = {".appxmanifest", ".cs", ".csproj", ".manifest", ".xaml", ".xml"}
+        native_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(source_root.rglob("*"))
+            if path.is_file()
+            and path.suffix.casefold() in reviewed_suffixes
+            and not {"bin", "obj"}.intersection(path.relative_to(source_root).parts)
         )
+        production_python_paths = [
+            ROOT / "scripts/windows_helper_entry.py",
+            *sorted((ROOT / "tvtime_extractor").glob("*.py")),
+        ]
+        helper_source = "\n".join(
+            path.read_text(encoding="utf-8") for path in production_python_paths
+        )
+        production_source = native_source + "\n" + helper_source
         for forbidden in (
             "HttpClient",
             "WebRequest",
@@ -303,19 +366,88 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             "UdpClient",
             "System.Net",
             "Sockets",
+            "Microsoft.Windows.AI",
+            "MachineLearning",
+            "WindowsAppSDK.AI",
+            "WindowsAppSDK.ML",
+            "VideoScaler",
+            "WebView2",
         ):
             self.assertNotIn(forbidden, production_source)
+
+        python_imports: set[str] = set()
+        for path in production_python_paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    python_imports.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    python_imports.add(node.module)
+                    python_imports.update(f"{node.module}.{alias.name}" for alias in node.names)
+        forbidden_python_imports = {
+            "aiohttp",
+            "anthropic",
+            "ftplib",
+            "google.genai",
+            "google.generativeai",
+            "grpc",
+            "http.client",
+            "http.server",
+            "httpx",
+            "imaplib",
+            "keras",
+            "langchain",
+            "llama_cpp",
+            "openai",
+            "poplib",
+            "requests",
+            "sklearn",
+            "smtplib",
+            "socket",
+            "telnetlib",
+            "tensorflow",
+            "torch",
+            "transformers",
+            "urllib.request",
+            "websockets",
+            "xmlrpc.client",
+            "xmlrpc.server",
+        }
+        forbidden_imports_found = {
+            imported
+            for imported in python_imports
+            for forbidden in forbidden_python_imports
+            if imported == forbidden or imported.startswith(f"{forbidden}.")
+        }
+        self.assertFalse(forbidden_imports_found)
+        self.assertNotIn("__import__", helper_source)
+        self.assertNotIn("import_module", helper_source)
+        for forbidden_ai_name in (
+            "anthropic",
+            "langchain",
+            "llama_cpp",
+            "openai",
+            "tensorflow",
+            "transformers",
+        ):
+            self.assertNotIn(forbidden_ai_name, helper_source.casefold())
 
         application_manifest = self.read("windows/TVTimeRecovery.Windows/app.manifest")
         self.assertNotIn("requireAdministrator", application_manifest)
         self.assertNotIn("highestAvailable", application_manifest)
 
     def test_build_and_install_scripts_remain_private_only(self) -> None:
+        workflow = self.read(".github/workflows/ci.yml")
         scripts = "\n".join(
             self.read(path)
             for path in (
                 "script/build_windows_helper.ps1",
                 "script/build_windows_app.ps1",
+                "script/windows_packaging_lib.ps1",
+                "script/windows_msix_integrity.ps1",
+                "script/test_windows_packaging_lib.ps1",
+                "script/test_windows_msix_integrity.ps1",
+                "script/windows_certificate_trust.ps1",
                 "script/install_windows_private.ps1",
             )
         )
@@ -324,11 +456,25 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("AppxPackageSigningEnabled=false", scripts)
         self.assertIn("New-SelfSignedCertificate", scripts)
         self.assertIn("TrustedPeople", scripts)
+        self.assertRegex(
+            scripts,
+            r'X509Store\(\s*"TrustedPeople",\s*"LocalMachine"\s*\)',
+        )
+        self.assertNotRegex(
+            scripts,
+            r'X509Store\(\s*"TrustedPeople",\s*"CurrentUser"\s*\)',
+        )
+        self.assertIn("WindowsBuiltInRole]::Administrator", scripts)
         self.assertIn("Get-AuthenticodeSignature", scripts)
+        self.assertIn("$candidate.Issuer -eq $subject", scripts)
+        self.assertIn("$candidate.FriendlyName -eq $friendlyName", scripts)
+        self.assertIn('"1.3.6.1.5.5.7.3.3"', scripts)
         self.assertIn("Add-AppxPackage", scripts)
         self.assertIn("Get-AppxPackage", scripts)
         self.assertIn("this installer never removes app data", scripts)
         self.assertIn("scan_macos_release.py", scripts)
+        self.assertIn("System.Management.Automation.Language.Parser", workflow)
+        self.assertIn("Windows PowerShell 5.1 packaging script failed to parse", workflow)
         self.assertNotRegex(
             scripts,
             r"(?i)\b(?:gh\s+release|git\s+push|Invoke-WebRequest|curl|upload)\b",
@@ -337,18 +483,161 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
     def test_powershell_packaging_is_fail_closed_and_returns_only_result_paths(self) -> None:
         helper = self.read("script/build_windows_helper.ps1")
         app = self.read("script/build_windows_app.ps1")
+        library = self.read("script/windows_packaging_lib.ps1")
+        native_capabilities = self.read("script/WindowsPackagingNative.cs")
+        file_capabilities = self.read("script/WindowsPackagingFile.cs")
+        capability_paths = sorted((ROOT / "script").glob("WindowsPackaging*.cs"))
+        self.assertEqual(
+            [path.name for path in capability_paths],
+            [
+                "WindowsPackagingCapabilities.cs",
+                "WindowsPackagingFile.cs",
+                "WindowsPackagingNative.cs",
+                "WindowsPackagingNativeOperations.cs",
+                "WindowsPackagingTree.cs",
+            ],
+        )
+        capabilities = "\n".join(path.read_text(encoding="utf-8") for path in capability_paths)
         installer = self.read("script/install_windows_private.ps1")
+        certificate_trust = self.read("script/windows_certificate_trust.ps1")
+        certificate_trust_hash = (
+            hashlib.sha256((ROOT / "script/windows_certificate_trust.ps1").read_bytes())
+            .hexdigest()
+            .upper()
+        )
+        msix_integrity = self.read("script/windows_msix_integrity.ps1")
+        collector = self.read("script/collect_windows_licenses.py")
 
         self.assertIn("function Assert-NativeSuccess", helper)
         for failure in (
             "hash-locked Windows helper dependencies",
             "local Windows helper source",
             "Windows helper dependency environment",
+            "Windows helper builds require reviewed x64 Python",
             "PyInstaller could not build",
             "helper failed its privacy scan",
         ):
             self.assertIn(failure, helper)
+        self.assertIn("struct.calcsize('P') == 8", helper)
+        self.assertIn("verify_windows_python_environment.py", helper)
+        self.assertGreaterEqual(helper.count("-B -I"), 8)
+        self.assertGreaterEqual(helper.count("--no-compile"), 2)
+        self.assertIn("build environment must be fresh", helper)
+        self.assertIn("private Windows build output must be fresh", helper)
+        self.assertIn(".build-tools-", app)
+        self.assertIn("/p:RestorePackagesPath=$nugetRoot", app)
+        self.assertIn("Remove-ContainedOrdinaryTree", app)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", library)
+        self.assertIn("WindowsPackagingCapabilities.cs", library)
+        self.assertIn("Get-Item -LiteralPath", library)
+        self.assertIn("DirectoryCapabilities]::CreateChild", library)
+        self.assertIn("DirectoryCapabilities]::Rename", library)
+        self.assertIn("DirectoryCapabilities]::DeleteTree", library)
+        self.assertIn("New-ContainedOrdinaryTreeSnapshot", library)
+        self.assertIn("Convert-ContainedOrdinaryDirectoryToTreeSnapshot", library)
+        self.assertIn("TrustedRootOwnership", library)
+        self.assertIn("DestinationRootOwnership", library)
+        self.assertIn("OwnershipToken.Identity", library)
+
+        self.assertIn("function Remove-ContainedOrdinaryTrees", library)
+        self.assertNotIn("New-Item -ItemType Directory", library)
+        self.assertNotIn("Remove-Item -LiteralPath $tombstone -Recurse", library)
+        self.assertIn("NtCreateFile", capabilities)
+        self.assertIn("private const uint Win32OpenExisting = 3;", native_capabilities)
+        self.assertIn("private const uint NtFileOpen = 1;", native_capabilities)
+        self.assertIn("NtFileOpen,", file_capabilities)
+        self.assertNotIn("OpenExisting,", file_capabilities)
+        self.assertIn(
+            "attributes.RootDirectory = trustedRoot.DangerousGetHandle()",
+            capabilities,
+        )
+        self.assertIn("DangerousAddRef", capabilities)
+        self.assertNotIn("GetFinalPathNameByHandle", capabilities)
+        self.assertNotIn("ReOpenFile", capabilities)
+        self.assertNotIn("SafeFileHandle bridge", capabilities)
+        self.assertIn("owned.DetachHandle()", capabilities)
+        self.assertIn("owned.RestoreHandle(root)", capabilities)
+        self.assertIn("FileCreate", capabilities)
+        self.assertIn("FileDirectoryFile", capabilities)
+        self.assertIn("SetFileInformationByHandle", capabilities)
+        self.assertIn("FileRenameInfo", capabilities)
+        self.assertIn("FileDispositionInfo", capabilities)
+        self.assertIn("FileBasicInfo", capabilities)
+        self.assertIn("LockTree", capabilities)
+        self.assertIn("ReadTreeManifest", capabilities)
+        self.assertIn("RevalidateTree", capabilities)
+        self.assertIn("RelockAfterMove", capabilities)
+        self.assertIn("SHA256.Create()", capabilities)
+        self.assertIn("FileAttributeReparsePoint", capabilities)
+        self.assertIn("FileCapabilities", capabilities)
+        self.assertIn("FileNonDirectoryFile", capabilities)
+        self.assertIn("expectedIdentity", capabilities)
+        self.assertIn("FileShareRead | FileShareWrite", capabilities)
+        move_section = library[library.index("function Move-ContainedOrdinaryDirectory") :]
+        owned_move = move_section.index(
+            "$movedDestination = [TVTimeWindowsPackaging.DirectoryCapabilities]::Rename"
+        )
+        moved_token_update = move_section.index(
+            "$OwnershipToken.Candidate = [IO.Path]::GetFullPath($movedDestination)",
+            owned_move,
+        )
+        moved_validation = move_section.index(
+            "Assert-ContainedOrdinaryDirectoryOwnership -OwnershipToken $OwnershipToken",
+            moved_token_update,
+        )
+        self.assertLess(owned_move, moved_token_update)
+        self.assertLess(moved_token_update, moved_validation)
+        self.assertIn("$OwnershipToken.Snapshot.Path", move_section)
+        self.assertIn("windows_packaging_lib.ps1", helper)
+        self.assertIn("windows_packaging_lib.ps1", app)
+        self.assertIn("windows_msix_integrity.ps1", app)
+        self.assertIn(".notices-stage-", app)
+        self.assertIn("Move-ContainedOrdinaryDirectory", app)
+        self.assertIn("-PrimaryError $buildError", app)
+        self.assertIn("-PrimaryError $bodyError", helper)
+        self.assertIn("-ReturnBuildState", app)
+        self.assertIn("HelperOwnership", helper)
+        self.assertIn("HelperManifest", helper)
+        self.assertIn("helperDestinationOwnership.Manifest -cne $helperManifest", app)
+        self.assertIn("packagedHelperManifest -cne $helperManifest", app)
+        self.assertIn("packagedAssetManifest -cne $assetDestinationOwnership.Manifest", app)
+        self.assertIn("packagedNoticeManifest -cne $noticeDestinationOwnership.Manifest", app)
+        for required in (
+            "PackageIdentityPin",
+            "PackageIdentity",
+            "UnsignedPackageSha256",
+            "UnsignedBlockMapDigest",
+            "OutputRootOwnership",
+            "Open-PrivateMsixIdentityPin",
+            "Open-PrivateMsixStrictReadPin",
+            "Get-PrivateMsixSha256",
+            "Get-PrivateMsixBlockMapDigest",
+        ):
+            self.assertIn(required, app)
+        self.assertLess(
+            app.index("$helperDestinationOwnership = New-ContainedOrdinaryDirectory"),
+            app.index("Copy-Item -LiteralPath $helperMember.FullName"),
+        )
+        self.assertIn(
+            "-OwnershipTokens @($buildEnvironmentOwnership, $outputRootOwnership)",
+            app,
+        )
+        self.assertIn("py -3.13 -B -I -m venv", helper)
+        self.assertIn("$cleanupTokens += $outputRootOwnership", helper)
+        self.assertIn("caller-owned empty directory", collector)
         self.assertGreaterEqual(helper.count("Assert-NativeSuccess"), 8)
+        restore_done = app.index("The locked Windows dependency restore failed.")
+        nuget_snapshot = app.index("$nugetRootOwnership = New-ContainedOrdinaryTreeSnapshot")
+        collector_run = app.index("script\\collect_windows_licenses.py")
+        nuget_revalidation = app.index(
+            "Assert-ContainedOrdinaryTreeSnapshot",
+            collector_run,
+        )
+        package_build = app.index("/p:GenerateAppxPackageOnBuild=true")
+        self.assertLess(restore_done, nuget_snapshot)
+        self.assertLess(nuget_snapshot, collector_run)
+        self.assertLess(collector_run, nuget_revalidation)
+        self.assertLess(nuget_revalidation, package_build)
 
         # Operational native output must go to the host. The final Write-Output in
         # each child script is then the only pipeline value captured by its caller.
@@ -360,14 +649,94 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn("$appxPackageDirectoryArgument | Out-Host", app)
         self.assertNotIn("/p:AppxPackageDir=($OutputRoot", app)
-        self.assertRegex(helper, r"Write-Output \$final\s*$")
-        self.assertRegex(app, r"Write-Output \$packages\[0\]\.FullName\s*$")
-        self.assertIn('$helperRoot = & (Join-Path $PSScriptRoot "build_windows_helper.ps1")', app)
-        self.assertIn('$Package = & (Join-Path $PSScriptRoot "build_windows_app.ps1")', installer)
-        self.assertLess(installer.index("$trustedStore.Add"), installer.index("verify /pa /v"))
+        self.assertIn("Write-Output $helperResult", helper)
+        self.assertIn("Write-Output $packageResult", app)
+        self.assertIn(
+            '$helperBuildState = & (Join-Path $PSScriptRoot "build_windows_helper.ps1")',
+            app,
+        )
+        self.assertIn(
+            '$buildState = & (Join-Path $PSScriptRoot "build_windows_app.ps1") -ReturnBuildState',
+            installer,
+        )
+        self.assertIn("windows_msix_integrity.ps1", installer)
+        self.assertIn("UnsignedPackageSha256", installer)
+        self.assertIn("UnsignedBlockMapDigest", installer)
+        self.assertIn("Signing changed the reviewed private MSIX payload", installer)
+        self.assertIn("-Verb RunAs", installer)
+        self.assertIn("-EncodedCommand", installer)
+        self.assertIn(
+            f'$expectedTrustHelperSha256 = "{certificate_trust_hash}"',
+            installer,
+        )
+        self.assertIn("[Environment+SpecialFolder]::Windows", installer)
+        self.assertIn("System32\\WindowsPowerShell\\v1.0\\powershell.exe", installer)
+        self.assertNotIn("(Get-Process -Id $PID", installer)
+        self.assertIn("WindowsBuiltInRole]::Administrator", certificate_trust)
+        self.assertIn('"TrustedPeople",', certificate_trust)
+        self.assertIn('"LocalMachine"', certificate_trust)
+        self.assertNotIn("build_windows_app.ps1", certificate_trust)
+        self.assertNotIn("build_windows_helper.ps1", certificate_trust)
+        self.assertNotIn("Start-Process", certificate_trust)
+        self.assertIn("$certificateAdded = $true", certificate_trust)
+        self.assertIn("$rollbackStore.Remove($rollbackMatch)", certificate_trust)
+        self.assertIn("return 21", certificate_trust)
+        self.assertIn("$installationError = $_", installer)
+        self.assertIn("$installationError.Exception", installer)
+        self.assertIn("Machine trust may remain", installer)
+        self.assertIn("$elevatedProcess.ExitCode -eq 20", installer)
+        self.assertIn("throw $unresolvedTrustMessage", installer)
+        first_strict = installer.index("$packageStrictPin = Open-PrivateMsixStrictReadPin")
+        sign = installer.index("& $signTool.FullName sign")
+        second_strict = installer.index(
+            "$packageStrictPin = Open-PrivateMsixStrictReadPin",
+            sign,
+        )
+        identity_release = installer.index("$packageIdentityPin.Dispose()", second_strict)
+        signature_verify = installer.index("verify /pa /v", identity_release)
+        install = installer.index("Add-AppxPackage", signature_verify)
+        self.assertLess(first_strict, sign)
+        self.assertLess(sign, second_strict)
+        self.assertLess(second_strict, identity_release)
+        self.assertLess(identity_release, signature_verify)
+        self.assertLess(signature_verify, install)
+        trust_add = installer.index(
+            "$trustedCertificateAdded = Invoke-LocalMachineCertificateTrust"
+        )
+        self.assertLess(
+            installer.index("build_windows_app.ps1"),
+            trust_add,
+        )
+        self.assertLess(trust_add, installer.index("verify /pa /v"))
         self.assertLess(installer.index("verify /pa /v"), installer.index("Add-AppxPackage"))
-        self.assertIn("$trustedStore.Remove($publicCertificate)", installer)
+        self.assertIn('-Operation "Remove" -Certificate $publicCertificate', installer)
+        self.assertIn("$store.Remove($matches[0])", certificate_trust)
         self.assertIn("SignerCertificate.Thumbprint -ne $certificate.Thumbprint", installer)
+        self.assertIn("function Resolve-PrivateMsixCapabilityPath", msix_integrity)
+        self.assertIn("FileCapabilities]::OpenIdentityPin", msix_integrity)
+        self.assertIn("FileCapabilities]::OpenStrictReadPin", msix_integrity)
+        self.assertIn("ExpectedIdentity", msix_integrity)
+        self.assertIn("AppxBlockMap.xml", msix_integrity)
+        self.assertIn("[Security.Cryptography.SHA256]::Create()", msix_integrity)
+        self.assertNotIn("[IO.File]::Open", msix_integrity)
+        msix_test = self.read("script/test_windows_msix_integrity.ps1")
+        self.assertIn("missing MSIX path was created", msix_test)
+        self.assertIn("missing MSIX ancestor was created", msix_test)
+
+    def test_private_windows_manifest_discloses_unbound_release_inputs(self) -> None:
+        collector = self.read("script/collect_windows_licenses.py")
+        guide = self.read("docs/windows.md")
+        notices = self.read("windows/THIRD_PARTY_NOTICES.md")
+        for marker in (
+            "self-contained-dotnet-runtime-pack",
+            "immutable-reviewed-source-staging",
+        ):
+            self.assertIn(marker, collector)
+        self.assertIn('"final_msix_inventory_complete": False', collector)
+        self.assertIn('"source_commit_bound": False', collector)
+        self.assertIn("SDK-resolved self-contained .NET runtime pack", guide)
+        self.assertIn("stage an immutable `git archive`", guide)
+        self.assertIn("manifest deliberately marks itself incomplete", notices)
 
     def test_generated_private_build_paths_are_ignored(self) -> None:
         ignore = self.read(".gitignore")
@@ -379,13 +748,21 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
 
     def test_source_manifest_includes_windows_build_and_package_inputs(self) -> None:
         manifest = self.read("MANIFEST.in")
-        self.assertIn("recursive-include script *.ps1", manifest)
+        self.assertIn("recursive-include script *.cs *.ps1 *.py *.sh *.swift", manifest)
         self.assertIn("recursive-include windows *.appxmanifest", manifest)
         self.assertIn("*.json", manifest)
         self.assertIn("prune windows/TVTimeRecovery.Windows/obj", manifest)
         self.assertIn("prune windows/TVTimeRecovery.Windows.CompileCheck/obj", manifest)
         for required in (
+            "script/WindowsPackagingCapabilities.cs",
+            "script/WindowsPackagingFile.cs",
+            "script/WindowsPackagingNative.cs",
+            "script/WindowsPackagingNativeOperations.cs",
+            "script/WindowsPackagingTree.cs",
             "script/collect_windows_licenses.py",
+            "script/windows_certificate_trust.ps1",
+            "script/windows_msix_integrity.ps1",
+            "script/test_windows_msix_integrity.ps1",
             "windows/THIRD_PARTY_NOTICES.md",
             "windows/TVTimeRecovery.Windows/packages.lock.json",
             "windows/TVTimeRecovery.Windows.CompileCheck/GeneratedXamlStubs.cs",

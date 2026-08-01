@@ -786,6 +786,27 @@ final class RecoveryOutputValidatorTests {
   }
 
   @Test
+  func testAcceptsSuiteTVArchiveWithSpreadsheetSafeRecoveredTitle() throws {
+    for title in ["=SYNTHETIC_FORMULA()", "=\u{0301}SYNTHETIC_FORMULA()"] {
+      let summary = TestFixtures.summary()
+      let root = try makeOutput(summary: summary)
+      let archive = root.appendingPathComponent(
+        "TVTime-Extraction/analysis/Suite-TV-Liberator-confirmed.zip"
+      )
+      try TestFixtures.writePrivate(
+        try TestFixtures.suiteTVArchive(showTitle: title),
+        at: archive
+      )
+      try TestFixtures.refreshArtifactBinding(
+        beneath: root,
+        id: "suite_tv_liberator_confirmed"
+      )
+
+      try RecoveryOutputValidator.validate(summary, beneath: root)
+    }
+  }
+
+  @Test
   func testRejectsMarkerHashSizeCountPDFAndArtifactSetMismatches() throws {
     let summary = TestFixtures.summary()
     let badHash = try makeOutput(summary: summary)
@@ -1015,6 +1036,20 @@ final class RecoveryOutputValidatorTests {
     try TestFixtures.refreshArtifactBinding(beneath: mismatched, id: "extraction_run_state")
     assertValidationError(.incompleteOutput) {
       try RecoveryOutputValidator.validate(summary, beneath: mismatched)
+    }
+  }
+
+  @Test
+  func testAcceptsReversiblyEscapedFormulaLeadingInventoryPath() throws {
+    let summary = TestFixtures.summary()
+    for prefix in ["=", "=\u{0301}"] {
+      let root = try trackedDirectory()
+      try TestFixtures.makePrivateOutput(
+        at: root,
+        summary: summary,
+        formulaLeadingInventoryPathPrefix: prefix
+      )
+      _ = try RecoveryOutputValidator.validate(summary, beneath: root)
     }
   }
 

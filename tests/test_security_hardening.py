@@ -9,7 +9,6 @@ import plistlib
 import shutil
 import sqlite3
 import struct
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +31,7 @@ from tvtime_extractor.extract import (
     _create_private_staging_descriptor,
     _decrypt_snapshot_to_descriptor,
     _finished_status_state,
+    _held_backup_root,
     _prepare_repository_owned_manifest,
     _source_payload_state,
     _windows_source_payload,
@@ -44,7 +44,6 @@ from tvtime_extractor.safety import (
     write_csv_private,
     write_json_private_atomic,
 )
-from tvtime_extractor.windows_native import WindowsHandleInformation
 
 
 class _Connection:
@@ -237,6 +236,48 @@ class ManifestBoundsTests(unittest.TestCase):
 
 
 class DependencyDescriptorBindingTests(unittest.TestCase):
+    def test_windows_backup_root_binding_never_uses_an_ordinary_path_stat(self) -> None:
+        backup = Path("/Synthetic/Backup")
+        pin_context = mock.MagicMock()
+        pin_context.__enter__.return_value = 91
+
+        with (
+            mock.patch("tvtime_extractor.extract.validate_backup_directory", return_value=backup),
+            mock.patch("tvtime_extractor.extract.os.name", "nt"),
+            mock.patch.object(
+                Path,
+                "lstat",
+                side_effect=AssertionError("ordinary path stat is forbidden"),
+            ),
+            mock.patch(
+                "tvtime_extractor.extract._windows_pinned_absolute_directory_handle",
+                return_value=pin_context,
+            ) as pin,
+            mock.patch(
+                "tvtime_extractor.extract._windows_directory_identity",
+                return_value=(7, 11),
+            ),
+            mock.patch("tvtime_extractor.extract._require_bound_backup_root") as require_bound,
+            mock.patch(
+                "tvtime_extractor.extract._require_safe_local_directory_tree"
+            ) as require_tree,
+            _held_backup_root(backup, cancellation_check=mock.sentinel.cancel) as held,
+        ):
+            self.assertEqual(held, (91, (7, 11), backup))
+            pin_context.__exit__.assert_not_called()
+
+        pin.assert_called_once_with(backup)
+        require_bound.assert_called_once_with(
+            backup,
+            descriptor=91,
+            expected_identity=(7, 11),
+        )
+        require_tree.assert_called_once_with(
+            backup,
+            cancellation_check=mock.sentinel.cancel,
+        )
+        pin_context.__exit__.assert_called_once()
+
     def test_manifest_lock_closes_when_sqlite_close_fails(self) -> None:
         class Lock:
             closed = False
@@ -257,39 +298,36 @@ class DependencyDescriptorBindingTests(unittest.TestCase):
         self.assertIsNone(backup._temp_manifest_db_conn)
         self.assertIsNone(backup._tvtime_manifest_lock)
 
-    def test_windows_source_payload_uses_one_relative_handle_chain(self) -> None:
+    def test_windows_source_payload_uses_identity_bound_relative_enumeration_chain(self) -> None:
         payload = b"synthetic encrypted source payload"
-        information = WindowsHandleInformation(
-            attributes=0,
+        information = mock.Mock(
             identity=(7, 11),
             byte_size=len(payload),
             last_write_time=116_444_736_000_000_000,
         )
 
-        class Msvcrt:
-            @staticmethod
-            def get_osfhandle(descriptor: int) -> int:
-                self.assertGreaterEqual(descriptor, 0)
-                return 303
-
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "synthetic.bin"
             source.write_bytes(payload)
+
+            @contextlib.contextmanager
+            def locked_source(
+                root_handle: int,
+                components: tuple[str, ...],
+            ) -> object:
+                self.assertEqual(root_handle, 91)
+                self.assertEqual(components, ("ab", "synthetic.bin"))
+                descriptor = os.open(source, os.O_RDONLY)
+                try:
+                    yield descriptor, information
+                finally:
+                    os.close(descriptor)
+
             with (
-                mock.patch.dict(sys.modules, {"msvcrt": Msvcrt}),
                 mock.patch(
-                    "tvtime_extractor.extract._windows_native.open_relative_path",
-                    side_effect=(101, 202),
-                ) as open_relative,
-                mock.patch(
-                    "tvtime_extractor.extract._windows_native.handle_information",
-                    return_value=information,
-                ) as inspect_handle,
-                mock.patch(
-                    "tvtime_extractor.extract._windows_native.handle_to_file_descriptor",
-                    side_effect=lambda _handle, flags: os.open(source, flags),
-                ),
-                mock.patch("tvtime_extractor.extract._windows_native.close_handle") as close_handle,
+                    "tvtime_extractor.extract._windows_locked_relative_regular_file_descriptor",
+                    side_effect=locked_source,
+                ) as locked,
             ):
                 snapshot, retained = _windows_source_payload(
                     Path("ab", "synthetic.bin"),
@@ -301,15 +339,33 @@ class DependencyDescriptorBindingTests(unittest.TestCase):
         self.assertEqual(snapshot.sha256, hashlib.sha256(payload).hexdigest())
         self.assertEqual(snapshot.device, 7)
         self.assertEqual(snapshot.inode, 11)
-        self.assertEqual(
-            open_relative.call_args_list,
-            [
-                mock.call(91, ("ab", "synthetic.bin")),
-                mock.call(91, ("ab", "synthetic.bin")),
-            ],
-        )
-        self.assertEqual(inspect_handle.call_count, 3)
-        close_handle.assert_called_once_with(202)
+        locked.assert_called_once_with(91, ("ab", "synthetic.bin"))
+
+    def test_windows_source_payload_rejects_recall_transition_before_read(self) -> None:
+        @contextlib.contextmanager
+        def reject_recalled_source(
+            _root_handle: int,
+            _components: tuple[str, ...],
+        ) -> object:
+            raise UnsafePathError(
+                "Refusing a cloud-backed file that is not fully present on local storage."
+            )
+            yield  # pragma: no cover - makes this a context manager
+
+        with (
+            mock.patch(
+                "tvtime_extractor.extract._windows_locked_relative_regular_file_descriptor",
+                side_effect=reject_recalled_source,
+            ),
+            mock.patch("tvtime_extractor.extract.os.read") as read,
+            self.assertRaisesRegex(UnsafePathError, "not fully present on local storage"),
+        ):
+            _windows_source_payload(
+                Path("ab", "synthetic.bin"),
+                source_root_handle=91,
+                retain_payload=True,
+            )
+        read.assert_not_called()
 
     def test_repository_manifest_accepts_relative_private_staging_root(self) -> None:
         key = b"M" * 32
@@ -545,6 +601,7 @@ class AtomicAndInputSafetyTests(unittest.TestCase):
             "@mention title",
             "\ttab title",
             "\rcarriage title",
+            "\nline-feed title",
             "'=genuine apostrophe title",
             "ordinary title",
             "ellipsis… title",
@@ -556,7 +613,7 @@ class AtomicAndInputSafetyTests(unittest.TestCase):
             raw = path.read_text(encoding="utf-8")
 
         self.assertEqual(restored, originals)
-        self.assertEqual(len(escaped), 6)
+        self.assertEqual(len(escaped), 7)
         self.assertIn("'=formula-like title", raw)
         self.assertIn("'=genuine apostrophe title", raw)
 

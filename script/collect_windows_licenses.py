@@ -8,6 +8,7 @@ import re
 import stat
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 
@@ -35,9 +36,17 @@ MAXIMUM_NUGET_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?$")
 
 
+def _is_link_or_reparse(path: Path, metadata_value: object) -> bool:
+    if path.is_symlink():
+        return True
+    attributes = int(getattr(metadata_value, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
 def _regular_bytes(path: Path) -> bytes:
     metadata_value = path.lstat()
-    if not stat.S_ISREG(metadata_value.st_mode) or path.is_symlink():
+    if not stat.S_ISREG(metadata_value.st_mode) or _is_link_or_reparse(path, metadata_value):
         raise RuntimeError("A required third-party notice was not a regular file.")
     if metadata_value.st_size <= 0 or metadata_value.st_size > MAXIMUM_NOTICE_BYTES:
         raise RuntimeError("A required third-party notice had an unsafe byte size.")
@@ -58,7 +67,7 @@ def _sha512_base64(path: Path) -> str:
     metadata_value = path.lstat()
     if (
         not stat.S_ISREG(metadata_value.st_mode)
-        or path.is_symlink()
+        or _is_link_or_reparse(path, metadata_value)
         or metadata_value.st_size <= 0
         or metadata_value.st_size > MAXIMUM_NUGET_PACKAGE_BYTES
     ):
@@ -107,7 +116,49 @@ def _python_license_files(distribution: metadata.Distribution) -> list[Path]:
     return sorted(set(selected), key=lambda path: path.name.casefold())
 
 
+def _validate_distribution_record(distribution: metadata.Distribution) -> None:
+    entries = tuple(distribution.files or ())
+    if not entries:
+        raise RuntimeError("A pinned Python component had no installed RECORD binding.")
+    for entry in entries:
+        expected_hash = entry.hash
+        if expected_hash is None:
+            if entry.name == "RECORD" and entry.parent.name.endswith(".dist-info"):
+                continue
+            raise RuntimeError("A pinned Python component contained an unbound installed file.")
+        if expected_hash.mode.casefold() != "sha256":
+            raise RuntimeError("A pinned Python component used an unsupported RECORD hash.")
+        source = Path(distribution.locate_file(entry))
+        source_metadata = source.lstat()
+        if not stat.S_ISREG(source_metadata.st_mode) or _is_link_or_reparse(
+            source, source_metadata
+        ):
+            raise RuntimeError("A pinned Python component contained an unsafe installed file.")
+        if entry.size is not None and source_metadata.st_size != entry.size:
+            raise RuntimeError("A pinned Python component changed after installation.")
+        digest = hashlib.sha256()
+        byte_count = 0
+        with source.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                byte_count += len(chunk)
+                digest.update(chunk)
+        if byte_count != source_metadata.st_size:
+            raise RuntimeError("A pinned Python component changed while it was inspected.")
+        observed = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=")
+        if observed.decode("ascii") != expected_hash.value:
+            raise RuntimeError("A pinned Python component changed after installation.")
+
+
+def verify_python_installation() -> None:
+    for name, expected_version in sorted(PYTHON_DISTRIBUTIONS.items()):
+        distribution = metadata.distribution(name)
+        if distribution.version != expected_version:
+            raise RuntimeError("A Python component did not match its reviewed version.")
+        _validate_distribution_record(distribution)
+
+
 def _collect_python(root: Path) -> list[dict[str, object]]:
+    verify_python_installation()
     components: list[dict[str, object]] = []
     for name, expected_version in sorted(PYTHON_DISTRIBUTIONS.items()):
         distribution = metadata.distribution(name)
@@ -177,6 +228,83 @@ def _nuspec_license(package_root: Path) -> tuple[str, str]:
     return licenses[0].attrib["type"], value
 
 
+def _is_nuget_packaging_member(relative: PurePosixPath) -> bool:
+    parts = tuple(part.casefold() for part in relative.parts)
+    return (
+        parts == ("[content_types].xml",)
+        or parts == ("_rels", ".rels")
+        or parts[:4] == ("package", "services", "metadata", "core-properties")
+    )
+
+
+def _validate_expanded_nuget_package(package_root: Path, package: Path) -> None:
+    try:
+        with zipfile.ZipFile(package) as archive:
+            archive_entries: dict[str, zipfile.ZipInfo] = {}
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                relative = PurePosixPath(info.filename.replace("\\", "/"))
+                if relative.is_absolute() or any(
+                    part in {"", ".", ".."} for part in relative.parts
+                ):
+                    raise RuntimeError("A restored NuGet archive contained an unsafe path.")
+                key = relative.as_posix().casefold()
+                if key in archive_entries:
+                    raise RuntimeError("A restored NuGet archive contained ambiguous paths.")
+                archive_entries[key] = info
+
+            required_archive_entries = {
+                key
+                for key, info in archive_entries.items()
+                if not _is_nuget_packaging_member(PurePosixPath(info.filename.replace("\\", "/")))
+            }
+            ignored = {
+                package.name.casefold(),
+                f"{package.name}.sha512".casefold(),
+                ".nupkg.metadata",
+            }
+            expanded_entries: set[str] = set()
+            for expanded in package_root.rglob("*"):
+                metadata_value = expanded.lstat()
+                if _is_link_or_reparse(expanded, metadata_value):
+                    raise RuntimeError("A restored NuGet package contained a linked asset.")
+                if stat.S_ISDIR(metadata_value.st_mode):
+                    continue
+                if not stat.S_ISREG(metadata_value.st_mode):
+                    raise RuntimeError("A restored NuGet package contained an unsafe asset.")
+                relative = expanded.relative_to(package_root).as_posix()
+                if relative.casefold() in ignored:
+                    continue
+                key = relative.casefold()
+                if key in expanded_entries:
+                    raise RuntimeError("A restored NuGet package contained ambiguous paths.")
+                expanded_entries.add(key)
+                info = archive_entries.get(key)
+                if info is None:
+                    raise RuntimeError(
+                        "An expanded NuGet asset was not bound to its package archive."
+                    )
+                if metadata_value.st_size != info.file_size:
+                    raise RuntimeError("An expanded NuGet asset changed after restore.")
+                expanded_hash = hashlib.sha256()
+                archive_hash = hashlib.sha256()
+                with expanded.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        expanded_hash.update(chunk)
+                with archive.open(info, "r") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        archive_hash.update(chunk)
+                if expanded_hash.digest() != archive_hash.digest():
+                    raise RuntimeError("An expanded NuGet asset changed after restore.")
+            if expanded_entries != required_archive_entries:
+                raise RuntimeError(
+                    "A restored NuGet package omitted a required package archive member."
+                )
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError("A restored NuGet package could not be validated safely.") from exc
+
+
 def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[str, object]]:
     lock = json.loads(_regular_bytes(lock_path).decode("utf-8"))
     components: list[dict[str, object]] = []
@@ -194,9 +322,12 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
             raise RuntimeError("A locked NuGet package hash was malformed.") from exc
         if _sha512_base64(packages[0]) != package_hash:
             raise RuntimeError("A restored NuGet package did not match its downloaded hash.")
+        if package_hash != expected_hash:
+            raise RuntimeError("A restored NuGet package did not match its committed lock hash.")
         package_metadata = json.loads(_regular_bytes(metadata_files[0]).decode("utf-8"))
         if package_metadata.get("contentHash") != expected_hash:
             raise RuntimeError("A restored NuGet package did not match the committed content hash.")
+        _validate_expanded_nuget_package(package_root, packages[0])
         if (name, version) in BUILD_ONLY_NUGET_PACKAGES:
             components.append(
                 {
@@ -260,10 +391,19 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
 
 
 def collect(args: argparse.Namespace) -> None:
-    output = args.output.resolve()
-    if output.exists() or output.is_symlink():
-        raise RuntimeError("The Windows license output must be fresh.")
-    output.mkdir(parents=True)
+    output = args.output.absolute()
+    try:
+        output_metadata = output.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            "The Windows license output must be a caller-owned empty directory."
+        ) from exc
+    if (
+        not stat.S_ISDIR(output_metadata.st_mode)
+        or _is_link_or_reparse(output, output_metadata)
+        or any(output.iterdir())
+    ):
+        raise RuntimeError("The Windows license output must be a caller-owned empty directory.")
     components = _collect_python(output)
 
     python_license_candidates = (
@@ -312,7 +452,19 @@ def collect(args: argparse.Namespace) -> None:
                 ],
             }
         )
-    manifest = {"schema_version": 1, "components": components}
+    manifest = {
+        "schema_version": 1,
+        "candidate_scope": {
+            "distribution_status": "private-unreleased",
+            "final_msix_inventory_complete": False,
+            "source_commit_bound": False,
+            "known_release_gaps": [
+                "self-contained-dotnet-runtime-pack",
+                "immutable-reviewed-source-staging",
+            ],
+        },
+        "components": components,
+    }
     encoded = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     _write_bound_file(output, PurePosixPath("MANIFEST.json"), encoded)
 

@@ -30,9 +30,13 @@ from .safety import (
     promote_file_no_replace_atomic,
     read_json_regular,
     read_regular_bytes,
+    recovery_path_exists,
+    recovery_path_metadata,
+    require_local_recovery_source,
     require_private_local_destination,
     windows_create_private_staging_descriptor,
 )
+from .spreadsheet import spreadsheet_cell_needs_escape
 
 MAXIMUM_ANALYSIS_CSV_BYTES = 64 * 1024 * 1024
 MAXIMUM_ANALYSIS_CSV_ROWS = 100_000
@@ -172,14 +176,11 @@ def _normalized_watch_date(value: object) -> str | None:
 
 def _file_exists(path: Path) -> bool:
     try:
-        path.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
+        return recovery_path_exists(path)
+    except (OSError, UserInputError) as exc:
         raise RefractConversionError(
             "A private Refract conversion input could not be inspected safely."
         ) from exc
-    return True
 
 
 def _validated_escape_metadata(value: object) -> dict[str, object]:
@@ -323,7 +324,7 @@ def _read_csv(
         if (
             not value.startswith("'")
             or len(value) < 2
-            or not value[1:].startswith(("=", "+", "-", "@", "\t", "\r"))
+            or not spreadsheet_cell_needs_escape(value[1:])
         ):
             raise RefractConversionError("The private CSV escape metadata did not match its table.")
         rows[row_number - 1][field] = value[1:]
@@ -600,12 +601,12 @@ def _build_payload_from_analysis(
 
 
 def _validated_analysis_path(path: Path) -> Path:
-    analysis = no_link_absolute_path(path)
+    analysis = require_local_recovery_source(path)
     try:
-        metadata = analysis.lstat()
+        metadata = recovery_path_metadata(analysis)
     except OSError as exc:
         raise RefractConversionError("The private analysis directory was unavailable.") from exc
-    if not stat.S_ISDIR(metadata.st_mode) or analysis.is_symlink():
+    if not stat.S_ISDIR(metadata.st_mode):
         raise RefractConversionError("The private analysis directory was unsafe.")
     if nearest_git_root(analysis) is not None:
         raise RefractConversionError(
@@ -619,17 +620,17 @@ def build_refract_series_payload(
 ) -> tuple[list[dict[str, Any]], RefractConversionStats]:
     """Read private analysis tables and build a validated TV-Time-Out series payload."""
 
-    analysis = _validated_analysis_path(analysis_directory)
-    extraction_root = analysis.parent
+    visible_analysis = no_link_absolute_path(analysis_directory)
+    extraction_root = visible_analysis.parent
     with anchored_existing_extraction_root(extraction_root) as anchored_extraction:
-        anchored_analysis = anchored_extraction / analysis.name
+        anchored_analysis = _validated_analysis_path(anchored_extraction / visible_analysis.name)
         return _build_payload_from_analysis(anchored_analysis)
 
 
 def _validated_output_path(analysis: Path, output_directory: Path) -> Path:
     output = no_link_absolute_path(output_directory)
     require_private_local_destination(output)
-    if output.exists() or output.is_symlink():
+    if recovery_path_exists(output):
         raise OutputExistsError(
             "The Refract output directory already exists. Choose a new private directory."
         )
@@ -694,9 +695,12 @@ def convert_refract_series(
 ) -> RefractConversionResult:
     """Convert recovered analysis tables into one fresh private Refract series artifact."""
 
-    analysis = _validated_analysis_path(analysis_directory)
+    analysis = no_link_absolute_path(analysis_directory)
+    extraction_root = analysis.parent
+    with anchored_existing_extraction_root(extraction_root) as anchored_extraction:
+        anchored_analysis = _validated_analysis_path(anchored_extraction / analysis.name)
+        payload, stats = _build_payload_from_analysis(anchored_analysis)
     output = _validated_output_path(analysis, output_directory)
-    payload, stats = build_refract_series_payload(analysis)
     filename = f"tvtime-series-{(export_date or date.today()).isoformat()}.json"
     with (
         held_destination_parent(output) as (parent_handle, parent_identity, visible_output),

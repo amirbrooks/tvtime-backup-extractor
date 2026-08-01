@@ -14,11 +14,10 @@ from tvtime_extractor.extract import (
     EXTRACTION_RUN_STATE_SCHEMA_VERSION,
     PRIMARY_DOMAIN,
 )
-from tvtime_extractor.integrity import reconcile_raw_tree
+from tvtime_extractor.integrity import reconcile_raw_tree, write_inventory_csv
 from tvtime_extractor.safety import (
     secure_directory,
     secure_file,
-    write_csv_private,
     write_json_private_atomic,
     write_text_private,
 )
@@ -291,21 +290,7 @@ def create_synthetic_extraction(base: Path) -> Path:
         secure_file(path)
 
     inventory_rows = _synthetic_inventory_rows(extraction)
-    write_csv_private(
-        metadata / "inventory.csv",
-        inventory_rows,
-        [
-            "file_id",
-            "domain",
-            "relative_path",
-            "declared_size",
-            "actual_size",
-            "size_match",
-            "mtime",
-            "sha256",
-        ],
-        spreadsheet_safe=False,
-    )
+    write_inventory_csv(metadata / "inventory.csv", inventory_rows)
     source_snapshot = reconcile_raw_tree(extraction)
     extracted_bytes = source_snapshot.raw_tree_bytes
     extracted_files = source_snapshot.raw_tree_files
@@ -375,21 +360,7 @@ def refresh_synthetic_source_snapshot(extraction: Path) -> None:
     """Reseal a fixture after an intentional semantic raw-data mutation."""
 
     inventory_path = extraction / "metadata" / "inventory.csv"
-    write_csv_private(
-        inventory_path,
-        _synthetic_inventory_rows(extraction),
-        [
-            "file_id",
-            "domain",
-            "relative_path",
-            "declared_size",
-            "actual_size",
-            "size_match",
-            "mtime",
-            "sha256",
-        ],
-        spreadsheet_safe=False,
-    )
+    write_inventory_csv(inventory_path, _synthetic_inventory_rows(extraction))
     source_snapshot = reconcile_raw_tree(extraction)
     summary_path = extraction / "metadata" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
