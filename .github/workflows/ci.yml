@@ -102,15 +102,17 @@ jobs:
         shell: powershell
         run: |
           Get-ChildItem .\script -Filter *.ps1 | ForEach-Object {
+            $scriptPath = $_.FullName
             $tokens = $null
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
-              $_.FullName,
+              $scriptPath,
               [ref]$tokens,
               [ref]$parseErrors
             ) | Out-Null
             if ($parseErrors.Count -ne 0) {
-              throw "A Windows PowerShell 5.1 packaging script failed to parse."
+              $messages = @($parseErrors | ForEach-Object { $_.Message }) -join " "
+              throw "Windows PowerShell 5.1 parser rejected $scriptPath: $messages"
             }
           }
           .\script\test_windows_packaging_lib.ps1

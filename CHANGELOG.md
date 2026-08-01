@@ -2,7 +2,7 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
-## Unreleased 0.3.0 alpha — private cross-platform candidate
+## Unreleased private cross-platform candidate — 0.3.0 alpha
 
 This is experimental Android/Windows capability work. It remains private and
 unreleased: successful synthetic checks do not replace the required Windows
