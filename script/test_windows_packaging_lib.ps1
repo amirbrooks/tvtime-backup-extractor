@@ -204,6 +204,12 @@ try {
         -OwnershipToken $relockMutable
     $relockSource = [string]$relockToken.Candidate
     $relockDestination = Join-Path $testRoot "relock-destination"
+    # PowerShell 5.1 wraps properties retrieved from a PSCustomObject in
+    # PSObject. Reflection does not unwrap those values for String parameters,
+    # so keep this test-only invocation type-exact with the native method.
+    $relockIdentity = [string]$relockToken.Identity
+    $relockRootPath = [string]$testRoot
+    $relockDestinationName = [string][IO.Path]::GetFileName($relockDestination)
     $unrelatedSibling = Join-Path $testRoot "relock-unrelated"
     [IO.Directory]::CreateDirectory($unrelatedSibling) | Out-Null
     Set-Content -LiteralPath (Join-Path $unrelatedSibling "keep.txt") `
@@ -241,10 +247,10 @@ try {
         $null,
         [object[]]@(
             $relockToken.Snapshot.Handle,
-            $relockToken.Identity,
+            $relockIdentity,
             $testRootNative.Handle,
-            $testRoot,
-            [IO.Path]::GetFileName($relockDestination)
+            $relockRootPath,
+            $relockDestinationName
         )
     )
     $moveToMethod.Invoke(
