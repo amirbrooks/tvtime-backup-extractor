@@ -817,6 +817,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn('$expectedSource = Join-Path $stageRoot "source"', builder)
         self.assertIn("TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE", builder)
         self.assertIn("git_source_stage.py", builder)
+        self.assertIn("Get-Command git -CommandType Application", builder)
+        self.assertIn("Select-Object -First 1", builder)
         self.assertIn("& $stagedBuilder", builder)
         self.assertIn("--remove --repository $checkoutRoot --source $source", builder)
         self.assertIn("The Windows release checkout changed during the build", builder)

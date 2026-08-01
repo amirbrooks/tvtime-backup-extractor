@@ -17,7 +17,10 @@ function Assert-NativeSuccess([string]$Message) {
 }
 
 $pythonExecutable = (Get-Command $Python -CommandType Application -ErrorAction Stop).Source
-$gitExecutable = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$gitExecutable = (
+    Get-Command git -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+).Source
 if ([Environment]::GetEnvironmentVariable(
     "TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE",
     "Process"
