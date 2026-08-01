@@ -88,6 +88,18 @@ namespace TVTimeWindowsPackaging
             internal uint FileAttributes;
         }
 
+        // This fixed part mirrors FILE_RENAME_INFO exactly. Its ABI-sized
+        // allocation includes the WCHAR FileName[1] member and trailing
+        // alignment, before the caller appends the variable name bytes.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct FileRenameInformation
+        {
+            internal int ReplaceIfExists;
+            internal IntPtr RootDirectory;
+            internal uint FileNameLength;
+            internal char FileName;
+        }
+
         [DllImport(
             "kernel32.dll",
             EntryPoint = "CreateFileW",

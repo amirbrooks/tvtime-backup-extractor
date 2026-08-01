@@ -562,11 +562,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("SetFileInformationByHandle", capabilities)
         self.assertIn("FileRenameInfo", capabilities)
         self.assertIn(
-            "int informationSize = checked(nameOffset + encoded.Length + sizeof(char));",
+            "private struct FileRenameInformation",
             capabilities,
         )
         self.assertIn(
-            "handle, FileRenameInfo, buffer, (uint)informationSize",
+            "Marshal.SizeOf(typeof(FileRenameInformation)) + encoded.Length",
             capabilities,
         )
         self.assertIn("FileDispositionInfo", capabilities)

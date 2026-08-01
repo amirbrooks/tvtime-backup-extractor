@@ -97,11 +97,11 @@ namespace TVTimeWindowsPackaging
             int rootOffset = IntPtr.Size == 8 ? 8 : 4;
             int lengthOffset = rootOffset + IntPtr.Size;
             int nameOffset = lengthOffset + 4;
-            // FILE_RENAME_INFO declares FileName as WCHAR[1]. Retain that
-            // trailing UTF-16 slot in the buffer size even though
-            // FileNameLength excludes a terminator; omitting it makes the
-            // structure too short on Windows and rejects the relative rename.
-            int informationSize = checked(nameOffset + encoded.Length + sizeof(char));
+            // FILE_RENAME_INFO carries an ABI-sized WCHAR[1] header, including
+            // its trailing alignment. Append the variable UTF-16 name after
+            // that full header; FileNameLength itself excludes the terminator.
+            int informationSize = checked(
+                Marshal.SizeOf(typeof(FileRenameInformation)) + encoded.Length);
             IntPtr buffer = Marshal.AllocHGlobal(informationSize);
             bool rootReference = false;
             try
