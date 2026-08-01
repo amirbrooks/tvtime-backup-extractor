@@ -85,7 +85,7 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
 
     def test_controlled_versions_match_private_windows_build_inputs(self) -> None:
         self.assertEqual(REVIEWED_CPYTHON_VERSION, "3.13.12")
-        self.assertEqual(PRIVATE_WINDOWS_VERSION, "0.3.0")
+        self.assertEqual(PRIVATE_WINDOWS_VERSION, "0.3.0-alpha.1")
         self.assertEqual(
             BUILD_ONLY_NUGET_PACKAGES,
             {("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948")},

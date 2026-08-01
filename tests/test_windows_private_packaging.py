@@ -785,9 +785,9 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / required).is_file())
 
-    def test_private_candidate_version_cannot_masquerade_as_published_v020(self) -> None:
-        self.assertIn('version = "0.3.0"', self.read("pyproject.toml"))
-        self.assertIn('__version__ = "0.3.0"', self.read("tvtime_extractor/__init__.py"))
+    def test_alpha_candidate_version_cannot_masquerade_as_published_v020(self) -> None:
+        self.assertIn('version = "0.3.0a1"', self.read("pyproject.toml"))
+        self.assertIn('__version__ = "0.3.0a1"', self.read("tvtime_extractor/__init__.py"))
         self.assertIn(
             "<string>0.3.0</string>",
             self.read("macos/Bundle/Info.plist"),
@@ -797,12 +797,35 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             self.read("macos/Bundle/TVTimeHelper-Info.plist"),
         )
         self.assertIn(
-            'Version="0.3.0.0"',
+            "<string>0.3.0-alpha.1</string>",
+            self.read("macos/Bundle/Info.plist"),
+        )
+        self.assertIn(
+            "<string>0.3.0-alpha.1</string>",
+            self.read("macos/Bundle/TVTimeHelper-Info.plist"),
+        )
+        self.assertIn(
+            'Version="0.3.0.1"',
             self.read("windows/TVTimeRecovery.Windows/Package.appxmanifest"),
         )
+        self.assertIn(
+            "TV Time Backup Extractor Alpha",
+            self.read("windows/TVTimeRecovery.Windows/Package.appxmanifest"),
+        )
+        self.assertIn(
+            'PRIVATE_WINDOWS_VERSION = "0.3.0-alpha.1"',
+            self.read("script/collect_windows_licenses.py"),
+        )
+        release_builder = self.read("script/build_release_app.sh")
+        self.assertIn("release-$RELEASE_VERSION-macos", release_builder)
+        self.assertIn("$RELEASE_VERSION-macOS-$package_label.dmg", release_builder)
         changelog = self.read("CHANGELOG.md")
-        self.assertIn("Unreleased private cross-platform candidate", changelog)
-        self.assertIn("not been tagged, uploaded, published", changelog)
+        self.assertIn("Unreleased prerelease candidate: v0.3.0-alpha.1", changelog)
+        self.assertIn("has not been tagged, uploaded, or published", changelog)
+        self.assertRegex(changelog, r"v0\.2\.0 remains the current\s+stable release")
+        release_record = self.read("docs/release-v0.3.0-alpha.1.md")
+        self.assertIn("This prerelease is not published", release_record)
+        self.assertIn("must be marked as a prerelease, not latest", release_record)
 
 
 if __name__ == "__main__":

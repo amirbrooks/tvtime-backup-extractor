@@ -215,6 +215,10 @@ VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$INFO_P
 HELPER_VERSION="$(
   /usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$HELPER_INFO_PLIST"
 )"
+RELEASE_VERSION="$(/usr/bin/plutil -extract TVTimeReleaseVersion raw -o - "$INFO_PLIST")"
+HELPER_RELEASE_VERSION="$(
+  /usr/bin/plutil -extract TVTimeReleaseVersion raw -o - "$HELPER_INFO_PLIST"
+)"
 PROJECT_VERSION="$(
   "$TVTIME_BUILD_PYTHON" -I -c \
     'import pathlib, re, sys; text = pathlib.Path(sys.argv[1]).read_text(); match = re.search(r"(?m)^version\s*=\s*\"([^\"]+)\"", text); print(match.group(1) if match else "")' \
@@ -225,20 +229,33 @@ PACKAGE_VERSION="$(
     'import pathlib, re, sys; text = pathlib.Path(sys.argv[1]).read_text(); match = re.search(r"(?m)^__version__\s*=\s*\"([^\"]+)\"", text); print(match.group(1) if match else "")' \
     "$ROOT_DIR/tvtime_extractor/__init__.py"
 )"
-if [[ -z "$VERSION" ]] \
+EXPECTED_MARKETING_VERSION="$(
+  "$TVTIME_BUILD_PYTHON" -I "$ROOT_DIR/script/release_version.py" \
+    --format marketing "$RELEASE_VERSION"
+)"
+EXPECTED_PROJECT_VERSION="$(
+  "$TVTIME_BUILD_PYTHON" -I "$ROOT_DIR/script/release_version.py" \
+    --format python "$RELEASE_VERSION"
+)"
+if [[ -z "$RELEASE_VERSION" ]] \
+  || [[ -z "$VERSION" ]] \
   || [[ "$VERSION" != "$HELPER_VERSION" ]] \
-  || [[ "$VERSION" != "$PROJECT_VERSION" ]] \
-  || [[ "$VERSION" != "$PACKAGE_VERSION" ]]
+  || [[ "$RELEASE_VERSION" != "$HELPER_RELEASE_VERSION" ]] \
+  || [[ "$VERSION" != "$EXPECTED_MARKETING_VERSION" ]] \
+  || [[ "$PROJECT_VERSION" != "$EXPECTED_PROJECT_VERSION" ]] \
+  || [[ "$PROJECT_VERSION" != "$PACKAGE_VERSION" ]]
 then
-  echo "error: release versions must match across both plists, pyproject.toml," >&2
+  echo "error: release versions must map exactly across both plists, pyproject.toml," >&2
   echo "and tvtime_extractor/__init__.py before packaging" >&2
   exit 2
 fi
-if [[ -n "${TVTIME_RELEASE_VERSION:-}" ]] && [[ "$TVTIME_RELEASE_VERSION" != "$VERSION" ]]; then
-  echo "error: TVTIME_RELEASE_VERSION does not match the application Info.plist" >&2
+if [[ -n "${TVTIME_RELEASE_VERSION:-}" ]] \
+  && [[ "$TVTIME_RELEASE_VERSION" != "$RELEASE_VERSION" ]]
+then
+  echo "error: TVTIME_RELEASE_VERSION does not match TVTimeReleaseVersion" >&2
   exit 2
 fi
-FINAL_DIR="$DIST_ROOT/release-$VERSION-macos"
+FINAL_DIR="$DIST_ROOT/release-$RELEASE_VERSION-macos"
 assert_generated_path "$FINAL_DIR"
 if [[ -e "$FINAL_DIR" ]] || [[ -L "$FINAL_DIR" ]]; then
   echo "error: release output already exists; existing artifacts were left unchanged" >&2
@@ -481,7 +498,7 @@ build_release_for_architecture() {
     "$ROOT_DIR/script/scan_macos_release.py" "${privacy_arguments[@]}"
 
   dmg_root="$architecture_work/dmg-root"
-  dmg_name="TV-Time-Backup-Extractor-$VERSION-macOS-$package_label.dmg"
+  dmg_name="TV-Time-Backup-Extractor-$RELEASE_VERSION-macOS-$package_label.dmg"
   dmg_path="$OUTPUT_STAGE/$dmg_name"
   /bin/mkdir -p "$dmg_root"
   /usr/bin/ditto "$app_bundle" "$dmg_root/$APP_NAME.app"

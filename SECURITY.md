@@ -2,9 +2,11 @@
 
 ## Supported source line
 
-The 0.2.x source line is the current development baseline. No downloadable v0.2.0 macOS artifact is
-currently represented as released, signed, or notarized. Locally built ad-hoc app bundles receive
-best-effort development support and must not be redistributed.
+The current supported release is
+[v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0). Its
+architecture-specific macOS DMGs are Developer ID signed, notarized, stapled, and published through
+the official GitHub release. The current 0.3.0-alpha.1 source is an unpublished alpha. Locally built
+ad-hoc app bundles receive best-effort development support and must not be redistributed.
 
 ## Report a vulnerability
 
