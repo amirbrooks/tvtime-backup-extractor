@@ -42,6 +42,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         attributes: int = windows_native.FILE_ATTRIBUTE_NORMAL,
         byte_size: int = 0,
         last_write_time: int = 19,
+        short_name: str | None = None,
         continued: bool = False,
     ) -> bytes:
         encoded_name = name.encode("utf-16-le")
@@ -51,6 +52,17 @@ class WindowsNativeUnitTests(unittest.TestCase):
         header.end_of_file = byte_size
         header.last_write_time = last_write_time
         header.file_id = file_id
+        if short_name is not None:
+            encoded_short_name = short_name.encode("utf-16-le")
+            if len(encoded_short_name) > ctypes.sizeof(header.short_name):
+                raise ValueError("synthetic short name exceeded FILE_ID_BOTH_DIR_INFO")
+            header.short_name_length = len(encoded_short_name)
+            ctypes.memmove(
+                ctypes.addressof(header)
+                + windows_native._FILE_ID_BOTH_DIR_INFO_HEADER.short_name.offset,
+                encoded_short_name,
+                len(encoded_short_name),
+            )
         record_size = ctypes.sizeof(header) + len(encoded_name)
         padded_size = (record_size + 7) & ~7
         header.next_entry_offset = padded_size if continued else 0
@@ -70,6 +82,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
             "Synthetic",
             file_id=11,
             attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
+            short_name="SYNTH~1",
             continued=True,
         )
         second = self._directory_record(
@@ -86,6 +99,8 @@ class WindowsNativeUnitTests(unittest.TestCase):
         )
 
         self.assertEqual([entry.name for entry in entries], ["Synthetic", "private.bin"])
+        self.assertEqual(entries[0].short_name, "SYNTH~1")
+        self.assertIsNone(entries[1].short_name)
         self.assertEqual(entries[0].identity, (7, 11))
         self.assertTrue(entries[0].is_directory)
         self.assertEqual(entries[1].identity, (7, (1 << 64) - 1))
@@ -99,6 +114,15 @@ class WindowsNativeUnitTests(unittest.TestCase):
         with self.assertRaises(windows_native.WindowsNativeError):
             windows_native._directory_entries_from_buffer(
                 bytes(odd_name) + b"x",
+                volume_serial_number=7,
+            )
+
+        unsafe_short_name = windows_native._FILE_ID_BOTH_DIR_INFO_HEADER()
+        unsafe_short_name.file_name_length = 2
+        unsafe_short_name.short_name_length = 1
+        with self.assertRaises(windows_native.WindowsNativeError):
+            windows_native._directory_entries_from_buffer(
+                bytes(unsafe_short_name) + b"x\x00",
                 volume_serial_number=7,
             )
 

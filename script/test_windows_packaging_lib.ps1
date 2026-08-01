@@ -202,7 +202,7 @@ try {
         -Value "synthetic-original" -Encoding Ascii -NoNewline
     $relockToken = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
         -OwnershipToken $relockMutable
-    $relockSource = $relockToken.Candidate
+    $relockSource = [string]$relockToken.Candidate
     $relockDestination = Join-Path $testRoot "relock-destination"
     $unrelatedSibling = Join-Path $testRoot "relock-unrelated"
     [IO.Directory]::CreateDirectory($unrelatedSibling) | Out-Null

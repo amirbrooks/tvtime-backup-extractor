@@ -75,6 +75,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         directory: bool = False,
         attributes: int = 0,
         byte_size: int = 0,
+        short_name: str | None = None,
     ) -> WindowsDirectoryEntryInformation:
         if directory:
             attributes |= _WINDOWS_FILE_ATTRIBUTE_DIRECTORY
@@ -84,6 +85,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             identity=identity,
             byte_size=byte_size,
             last_write_time=116_444_736_000_000_000,
+            short_name=short_name,
         )
 
     def test_windows_relative_parent_pins_and_identity_binds_every_component(self) -> None:
@@ -127,6 +129,23 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(closed, [102, 101])
+
+    def test_windows_short_alias_binds_the_enumerated_long_name(self) -> None:
+        entry = self._native_entry(
+            "runneradmin",
+            identity=(7, 11),
+            directory=True,
+            short_name="RUNNER~1",
+        )
+
+        with mock.patch(
+            "tvtime_extractor.safety._windows_native.directory_entries",
+            return_value=(entry,),
+        ):
+            found = _windows_enumerated_child(91, "RUNNER~1")
+
+        self.assertIs(found, entry)
+        self.assertEqual(found.name, "runneradmin")
 
     def test_windows_relative_parent_attempts_every_close_and_preserves_body_failure(self) -> None:
         first = self._native_entry("Synthetic", identity=(7, 11), directory=True)

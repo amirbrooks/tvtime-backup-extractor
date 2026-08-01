@@ -61,6 +61,7 @@ class WindowsDirectoryEntryInformation:
     identity: tuple[int, int]
     byte_size: int
     last_write_time: int
+    short_name: str | None = None
 
     @property
     def is_directory(self) -> bool:
@@ -386,6 +387,23 @@ def _directory_entries_from_buffer(
             raise WindowsNativeError("Windows directory metadata had an unsafe name.") from exc
         if "\x00" in name:
             raise WindowsNativeError("Windows directory metadata had an unsafe name.")
+        short_name_bytes = int(header.short_name_length)
+        short_name_size = ctypes.sizeof(header.short_name)
+        if short_name_bytes < 0 or short_name_bytes > short_name_size or short_name_bytes % 2:
+            raise WindowsNativeError("Windows directory metadata had an unsafe short name.")
+        short_name: str | None = None
+        if short_name_bytes:
+            short_name_start = offset + _FILE_ID_BOTH_DIR_INFO_HEADER.short_name.offset
+            try:
+                short_name = payload[short_name_start : short_name_start + short_name_bytes].decode(
+                    "utf-16-le", errors="strict"
+                )
+            except UnicodeDecodeError as exc:
+                raise WindowsNativeError(
+                    "Windows directory metadata had an unsafe short name."
+                ) from exc
+            if "\x00" in short_name:
+                raise WindowsNativeError("Windows directory metadata had an unsafe short name.")
         byte_size = int(header.end_of_file)
         last_write_time = int(header.last_write_time)
         if byte_size < 0 or last_write_time < 0:
@@ -400,6 +418,7 @@ def _directory_entries_from_buffer(
                 ),
                 byte_size=byte_size,
                 last_write_time=last_write_time,
+                short_name=short_name,
             )
         )
         next_offset = int(header.next_entry_offset)
@@ -453,6 +472,8 @@ def iter_directory_entries(handle: int) -> Iterator[WindowsDirectoryEntryInforma
             if entry.name in {".", ".."}:
                 continue
             validate_component(entry.name)
+            if entry.short_name is not None:
+                validate_component(entry.short_name)
             entry_count += 1
             if entry_count > MAXIMUM_DIRECTORY_ENTRIES:
                 raise WindowsNativeError("A Windows directory exceeded the safe entry limit.")

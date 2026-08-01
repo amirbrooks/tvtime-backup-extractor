@@ -718,6 +718,9 @@ def _windows_enumerated_child(
             entry
             for entry in _windows_native.directory_entries(parent_handle)
             if entry.name.casefold() == component.casefold()
+            or (
+                entry.short_name is not None and entry.short_name.casefold() == component.casefold()
+            )
         )
     except _windows_native.WindowsNativeError as exc:
         raise UnsafePathError("A Windows directory could not be enumerated safely.") from exc
