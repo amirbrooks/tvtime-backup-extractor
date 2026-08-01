@@ -39,5 +39,10 @@ private owner-controlled local storage. For encrypted-iOS recovery, use a comple
 backup and disconnect the phone after confirming that backup has finished. Opening a report can add
 its private filename to browser or viewer history and Recent Items.
 
+If recovery stops in the macOS app, use **Copy Safe Diagnostics** and share only that bounded text
+plus a manual description of the stage. Unknown failures are reported as `unrecognized_failure`.
+Do not send a screenshot, complete log archive, backup, database, export, report, or recovered
+output.
+
 This project is independent and is not affiliated with or endorsed by TV Time, Apple, Google, or
 Microsoft.

@@ -6,16 +6,36 @@ import Testing
 @Suite("Privacy-safe recovery diagnostics")
 struct RecoveryDiagnosticsTests {
   @Test
-  func testFailureCodesAreAnExactAllowList() {
-    expectEqual(
-      RecoveryDiagnosticFailure(recoveryFailureCode: "backup_unencrypted"),
-      .backupUnencrypted
-    )
-    expectEqual(
-      RecoveryDiagnosticFailure(recoveryFailureCode: "local_helper_error"),
-      .localHelperError
-    )
+  func testEveryRecoveryFailureCodeHasAnExplicitDiagnosticTag() {
+    let expected: [(String, RecoveryDiagnosticFailure)] = [
+      ("invalid_input", .invalidInput),
+      ("backup_unencrypted", .backupUnencrypted),
+      ("backup_unfinished", .backupUnfinished),
+      ("app_data_missing", .appDataMissing),
+      ("source_changed", .sourceChanged),
+      ("unsupported_schema", .unsupportedSchema),
+      ("insufficient_space", .insufficientSpace),
+      ("output_exists", .outputExists),
+      ("unsafe_path", .unsafePath),
+      ("destination_unencrypted", .destinationUnencrypted),
+      ("backup_password_rejected", .backupPasswordRejected),
+      ("preflight_cancelled", .preflightCancelled),
+      ("cancelled", .cancelled),
+      ("partial_extraction", .partialExtraction),
+      ("recovery_failed", .recoveryFailed),
+      ("local_helper_error", .localHelperError),
+      ("output_validation_failed", .outputValidationFailed),
+    ]
+
+    for (code, diagnostic) in expected {
+      expectEqual(RecoveryDiagnosticFailure(recoveryFailureCode: code), diagnostic, code)
+    }
+  }
+
+  @Test
+  func testUnknownFailureCodesFailClosed() {
     for unsafe in [
+      "future_failure_2",
       "/Users/example/Library/Application Support/MobileSync/Backup/private",
       "password=do-not-log",
       "A Show Title",

@@ -49,19 +49,7 @@ extension RecoveryFailure {
   }
 
   public var userVisibleReferenceCode: String {
-    guard
-      !code.isEmpty,
-      code.count <= 64,
-      code.unicodeScalars.allSatisfy({ scalar in
-        scalar.isASCII
-          && ((scalar.value >= 97 && scalar.value <= 122)
-            || (scalar.value >= 48 && scalar.value <= 57)
-            || scalar.value == 95)
-      })
-    else {
-      return "unrecognized_failure"
-    }
-    return code
+    RecoveryDiagnosticFailure(recoveryFailureCode: code).rawValue
   }
 
   public var recoveryPlan: RecoveryFailureRecoveryPlan {
