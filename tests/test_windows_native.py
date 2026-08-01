@@ -373,6 +373,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         share_access = create.call_args.kwargs["share_access"]
         self.assertTrue(desired_access & windows_native.WRITE_DAC)
         self.assertTrue(desired_access & windows_native.WRITE_OWNER)
+        self.assertFalse(desired_access & windows_native.FILE_READ_DATA)
         self.assertFalse(desired_access & windows_native.FILE_WRITE_DATA)
         self.assertFalse(desired_access & windows_native.FILE_APPEND_DATA)
         self.assertFalse(desired_access & windows_native.FILE_WRITE_ATTRIBUTES)
@@ -403,11 +404,9 @@ class WindowsNativeUnitTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(
-                windows_native.open_relative_retained_directory(
+                windows_native.open_relative_acl_repair_directory(
                     99,
                     "Synthetic",
-                    writable=False,
-                    acl_repair=True,
                 ),
                 101,
             )
@@ -415,6 +414,7 @@ class WindowsNativeUnitTests(unittest.TestCase):
         desired_access = create.call_args.kwargs["desired_access"]
         self.assertTrue(desired_access & windows_native.WRITE_DAC)
         self.assertFalse(desired_access & windows_native.WRITE_OWNER)
+        self.assertFalse(desired_access & windows_native.FILE_LIST_DIRECTORY)
         self.assertFalse(desired_access & windows_native.FILE_ADD_FILE)
         self.assertFalse(desired_access & windows_native.FILE_ADD_SUBDIRECTORY)
         self.assertFalse(desired_access & windows_native.FILE_WRITE_ATTRIBUTES)
@@ -439,11 +439,9 @@ class WindowsNativeUnitTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(
-                windows_native.open_relative_retained_directory(
+                windows_native.open_relative_acl_repair_directory(
                     99,
                     "Synthetic",
-                    writable=False,
-                    acl_repair=True,
                     owner_rebind=True,
                 ),
                 101,
@@ -452,9 +450,41 @@ class WindowsNativeUnitTests(unittest.TestCase):
         desired_access = create.call_args.kwargs["desired_access"]
         self.assertTrue(desired_access & windows_native.WRITE_DAC)
         self.assertTrue(desired_access & windows_native.WRITE_OWNER)
+        self.assertFalse(desired_access & windows_native.FILE_LIST_DIRECTORY)
         self.assertFalse(desired_access & windows_native.FILE_ADD_FILE)
         self.assertFalse(desired_access & windows_native.FILE_ADD_SUBDIRECTORY)
         self.assertFalse(desired_access & windows_native.FILE_WRITE_ATTRIBUTES)
+
+    def test_acl_repair_directory_can_share_delete_only_for_an_existing_pin(self) -> None:
+        directory_information = windows_native.WindowsHandleInformation(
+            attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
+            identity=(7, 11),
+            byte_size=0,
+            last_write_time=19,
+        )
+        with (
+            mock.patch.object(
+                windows_native,
+                "_nt_create_relative",
+                return_value=(101, windows_native.FILE_OPENED),
+            ) as create,
+            mock.patch.object(
+                windows_native,
+                "handle_information",
+                return_value=directory_information,
+            ),
+        ):
+            windows_native.open_relative_acl_repair_directory(
+                99,
+                "Synthetic",
+                coexist_with_retained_delete=True,
+            )
+
+        desired_access = create.call_args.kwargs["desired_access"]
+        share_access = create.call_args.kwargs["share_access"]
+        self.assertTrue(desired_access & windows_native.WRITE_DAC)
+        self.assertFalse(desired_access & windows_native.DELETE)
+        self.assertTrue(share_access & windows_native.FILE_SHARE_DELETE)
 
     def test_existing_output_is_validated_before_held_handle_truncation(self) -> None:
         information = windows_native.WindowsHandleInformation(
@@ -1100,6 +1130,11 @@ class WindowsNativeNtfsTests(unittest.TestCase):
                 child_handle = _windows_create_private_directory_relative(root_handle, child.name)
                 windows_native.validate_private_acl(child_handle)
 
+                windows_native.close_handle(child_handle)
+                child_handle = -1
+                windows_native.close_handle(root_handle)
+                root_handle = -1
+
                 descriptor = windows_create_private_staging_descriptor(private_file)
                 os.write(descriptor, b"synthetic private payload")
                 os.fsync(descriptor)
@@ -1107,11 +1142,6 @@ class WindowsNativeNtfsTests(unittest.TestCase):
 
                 os.close(descriptor)
                 descriptor = -1
-                windows_native.close_handle(child_handle)
-                child_handle = -1
-                windows_native.close_handle(root_handle)
-                root_handle = -1
-
                 require_private_path(child, expected_type=stat.S_IFDIR)
                 require_private_path(private_file, expected_type=stat.S_IFREG)
                 with anchored_existing_extraction_root(root):

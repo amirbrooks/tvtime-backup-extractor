@@ -12,6 +12,7 @@ from unittest import mock
 
 from tvtime_extractor.errors import UnsafePathError, UserInputError
 from tvtime_extractor.safety import (
+    _WINDOWS_BOUND_OUTPUT_STATE,
     _WINDOWS_DELETE,
     _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
     _WINDOWS_FILE_ATTRIBUTE_DIRECTORY,
@@ -44,6 +45,7 @@ from tvtime_extractor.safety import (
     _windows_directory_identity,
     _windows_enumerated_child,
     _windows_enumerated_path_metadata,
+    _windows_hold_bound_descendant_directory,
     _windows_hold_existing_descendant_directories,
     _windows_locked_relative_regular_file_descriptor,
     _windows_open_locked_directory,
@@ -62,6 +64,7 @@ from tvtime_extractor.safety import (
     read_regular_bytes,
     regular_binary_reader,
     require_encrypted_ios_source_platform_support,
+    secure_directory,
     secure_file,
 )
 from tvtime_extractor.windows_native import (
@@ -361,10 +364,70 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
 
         cancel.assert_called_once_with()
 
+    def test_safe_directory_classifier_borrows_a_retained_delete_capability(self) -> None:
+        root = Path("/Synthetic/LocalRoot")
+        directory = root / "Nested"
+        entry = self._native_entry("private.bin", identity=(7, 13), byte_size=9)
+        state = _WindowsBoundOutputState(
+            handle=91,
+            identity=(7, 11),
+            visible_root=root,
+            descendant_handles={
+                _casefolded_path(directory): (directory, 101, (7, 12)),
+            },
+        )
+        token = _WINDOWS_BOUND_OUTPUT_STATE.set(state)
+        try:
+            with (
+                mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+                mock.patch(
+                    "tvtime_extractor.safety._windows_directory_identity",
+                    return_value=(7, 12),
+                ) as identity,
+                mock.patch(
+                    "tvtime_extractor.safety._require_windows_visible_directory_identity"
+                ) as visible,
+                mock.patch(
+                    "tvtime_extractor.safety._windows_native.iter_directory_entries",
+                    return_value=(entry,),
+                ) as enumerate_entries,
+                mock.patch(
+                    "tvtime_extractor.safety._windows_pinned_absolute_directory_handle"
+                ) as pin,
+            ):
+                directories, files = _safe_directory_entries(directory)
+        finally:
+            _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+
+        self.assertEqual(directories, ())
+        self.assertEqual([item.path for item in files], [directory / "private.bin"])
+        identity.assert_called_once_with(101)
+        visible.assert_called_once_with(directory, expected_identity=(7, 12))
+        enumerate_entries.assert_called_once_with(101)
+        pin.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "real Win32 retained-enumeration regression")
+    def test_existing_tree_enumeration_reuses_retained_delete_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = secure_directory(Path(temporary))
+            child = secure_directory(root / "Synthetic")
+            private_file = child / "private.bin"
+            private_file.write_bytes(b"synthetic")
+            secure_file(private_file)
+
+            with anchored_existing_extraction_root(root):
+                directories, files = _safe_directory_entries(child)
+
+            self.assertEqual(directories, ())
+            self.assertEqual([item.path for item in files], [private_file])
+
     def test_windows_existing_tree_retention_has_a_global_handle_bound(self) -> None:
         root = Path("/Synthetic/LocalRoot")
         directories = tuple(
-            types.SimpleNamespace(path=root / f"Synthetic-{index:05d}")
+            types.SimpleNamespace(
+                path=root / f"Synthetic-{index:05d}",
+                metadata=types.SimpleNamespace(st_dev=7, st_ino=index + 12),
+            )
             for index in range(MAXIMUM_WINDOWS_RETAINED_DESCENDANT_DIRECTORIES + 1)
         )
         with (
@@ -381,7 +444,10 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
 
     def test_windows_existing_tree_retention_checks_cancellation_between_directories(self) -> None:
         root = Path("/Synthetic/LocalRoot")
-        child = types.SimpleNamespace(path=root / "Synthetic-Child")
+        child = types.SimpleNamespace(
+            path=root / "Synthetic-Child",
+            metadata=types.SimpleNamespace(st_dev=7, st_ino=12),
+        )
         cancel = mock.Mock(side_effect=(None, RuntimeError("synthetic cancellation")))
         with (
             mock.patch(
@@ -396,7 +462,40 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                 cancellation_check=cancel,
             )
 
-        hold.assert_called_once_with(child.path)
+        hold.assert_called_once_with(child.path, expected_identity=(7, 12))
+
+    def test_windows_descendant_retention_rejects_an_enumerated_substitution(self) -> None:
+        root = Path("/Synthetic/LocalRoot")
+        child = root / "Nested"
+        state = _WindowsBoundOutputState(
+            handle=91,
+            identity=(7, 11),
+            visible_root=root,
+        )
+        token = _WINDOWS_BOUND_OUTPUT_STATE.set(state)
+        try:
+            with (
+                mock.patch(
+                    "tvtime_extractor.safety._windows_open_locked_directory",
+                    return_value=(101, (7, 13)),
+                ),
+                mock.patch("tvtime_extractor.safety._windows_require_private_acl") as private_acl,
+                mock.patch(
+                    "tvtime_extractor.safety._require_windows_visible_directory_identity"
+                ) as visible,
+                mock.patch("tvtime_extractor.safety._windows_close_handle") as close,
+                self.assertRaisesRegex(UnsafePathError, "changed before retention"),
+            ):
+                _windows_hold_bound_descendant_directory(
+                    child,
+                    expected_identity=(7, 12),
+                )
+        finally:
+            _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
+
+        private_acl.assert_not_called()
+        visible.assert_not_called()
+        close.assert_called_once_with(101)
 
     def test_windows_volume_capabilities_are_checked_before_root_identity(self) -> None:
         events: list[str] = []
@@ -583,6 +682,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         desired_access = int(kernel32.create_calls[0][1])
         self.assertTrue(desired_access & _WINDOWS_WRITE_DAC)
         self.assertFalse(desired_access & _WINDOWS_WRITE_OWNER)
+        self.assertFalse(desired_access & _WINDOWS_FILE_LIST_DIRECTORY)
         self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertFalse(desired_access & _WINDOWS_DELETE)
 
@@ -602,6 +702,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         desired_access = int(kernel32.create_calls[0][1])
         self.assertTrue(desired_access & _WINDOWS_WRITE_DAC)
         self.assertTrue(desired_access & _WINDOWS_WRITE_OWNER)
+        self.assertFalse(desired_access & _WINDOWS_FILE_LIST_DIRECTORY)
         self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertFalse(desired_access & _WINDOWS_DELETE)
 
@@ -639,8 +740,18 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(
             pinned.call_args_list,
             [
-                mock.call(target, acl_repair=True, owner_rebind=False),
-                mock.call(target, acl_repair=True, owner_rebind=True),
+                mock.call(
+                    target,
+                    acl_repair=True,
+                    owner_rebind=False,
+                    coexist_with_retained_delete=False,
+                ),
+                mock.call(
+                    target,
+                    acl_repair=True,
+                    owner_rebind=True,
+                    coexist_with_retained_delete=False,
+                ),
             ],
         )
         self.assertEqual(
@@ -649,6 +760,31 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         )
         first.__exit__.assert_called_once()
         second.__exit__.assert_called_once()
+
+    def test_private_directory_acl_repair_coexists_with_a_bound_delete_capability(self) -> None:
+        target = Path("C:/Synthetic/Private")
+        binding = mock.MagicMock()
+        binding.__enter__.return_value = 101
+
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_bound_directory_binding",
+                return_value=(target, 91, (7, 10)),
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_directory_handle",
+                return_value=binding,
+            ) as pinned,
+            mock.patch("tvtime_extractor.safety._windows_native.apply_private_acl"),
+        ):
+            _windows_apply_private_directory_acl(target)
+
+        pinned.assert_called_once_with(
+            target,
+            acl_repair=True,
+            owner_rebind=False,
+            coexist_with_retained_delete=True,
+        )
 
     def test_private_acl_rejects_a_substituted_directory_before_owner_rebind(self) -> None:
         target = Path("C:/Synthetic/Private")
@@ -1201,7 +1337,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "synthetic body failure"),
             anchored_existing_extraction_root(extraction) as bound,
         ):
-            self.assertTrue(bound.is_absolute())
+            self.assertEqual(bound, extraction)
             pin_context.__exit__.assert_not_called()
             raise RuntimeError("synthetic body failure")
 

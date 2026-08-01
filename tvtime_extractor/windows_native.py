@@ -1060,16 +1060,18 @@ def _open_relative_directory(
         )
     if owner_rebind and not acl_repair:
         raise ValueError("A Windows owner rebind requires the ACL repair capability.")
-    desired = (
-        FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
-    )
-    if writable:
-        desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
-    elif acl_repair:
-        # Repair can change only security-descriptor metadata: no data or child writes.
-        desired |= WRITE_DAC
+    if acl_repair:
+        # Security metadata and stable handle information need no list or
+        # traversal access to the directory contents.
+        desired = FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE
         if owner_rebind:
             desired |= WRITE_OWNER
+    else:
+        desired = (
+            FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
+        )
+    if writable:
+        desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
     share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
     if share_delete:
         share_access |= FILE_SHARE_DELETE
@@ -1116,8 +1118,6 @@ def open_relative_retained_directory(
     name: str,
     *,
     writable: bool,
-    acl_repair: bool = False,
-    owner_rebind: bool = False,
 ) -> int:
     """Open and pin a final directory against rename or replacement."""
 
@@ -1125,9 +1125,32 @@ def open_relative_retained_directory(
         parent_handle,
         name,
         writable=writable,
-        acl_repair=acl_repair,
-        owner_rebind=owner_rebind,
+        acl_repair=False,
+        owner_rebind=False,
         share_delete=False,
+    )
+
+
+def open_relative_acl_repair_directory(
+    parent_handle: int,
+    name: str,
+    *,
+    owner_rebind: bool = False,
+    coexist_with_retained_delete: bool = False,
+) -> int:
+    """Open one directory for ACL repair without child or data-write access.
+
+    Delete sharing is safe only when another retained capability already pins
+    the exact directory against rename and replacement.
+    """
+
+    return _open_relative_directory(
+        parent_handle,
+        name,
+        writable=False,
+        acl_repair=True,
+        owner_rebind=owner_rebind,
+        share_delete=coexist_with_retained_delete,
     )
 
 
@@ -1140,16 +1163,16 @@ def _open_relative_regular_file(
 ) -> int:
     if owner_rebind and not acl_repair:
         raise ValueError("A Windows owner rebind requires the ACL repair capability.")
-    desired_access = GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE
-    share_access = FILE_SHARE_READ
     if acl_repair:
-        # Repair can change only security-descriptor metadata. The retained
-        # first handle permits a second owner-rebind handle, but neither can
-        # write data, attributes, or delete the file.
-        desired_access |= WRITE_DAC
-        share_access |= FILE_SHARE_WRITE
+        # Repair can change only security-descriptor metadata. No file-content
+        # read/write, attribute-write, or delete access is requested.
+        desired_access = FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE
+        share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
         if owner_rebind:
             desired_access |= WRITE_OWNER
+    else:
+        desired_access = GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+        share_access = FILE_SHARE_READ
     handle, _ = _nt_create_relative(
         parent_handle,
         name,

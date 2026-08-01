@@ -850,6 +850,7 @@ def _windows_pinned_absolute_directory_handle(
     writable: bool = False,
     acl_repair: bool = False,
     owner_rebind: bool = False,
+    coexist_with_retained_delete: bool = False,
 ) -> Iterator[int]:
     if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
         raise UnsafePathError("A Windows recovery source path was invalid.")
@@ -859,6 +860,8 @@ def _windows_pinned_absolute_directory_handle(
         )
     if owner_rebind and not acl_repair:
         raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+    if coexist_with_retained_delete and not acl_repair:
+        raise ValueError("Delete sharing requires the ACL repair capability.")
     root_handle = -1
     directory_handle = -1
     try:
@@ -867,6 +870,7 @@ def _windows_pinned_absolute_directory_handle(
             allow_child_creation=writable and len(path.parts) == 1,
             allow_acl_repair=acl_repair and len(path.parts) == 1,
             allow_owner_rebind=owner_rebind and len(path.parts) == 1,
+            share_delete=coexist_with_retained_delete and len(path.parts) == 1,
         )
         if len(path.parts) == 1:
             yield root_handle
@@ -879,12 +883,11 @@ def _windows_pinned_absolute_directory_handle(
                 raise UnsafePathError("A directory tree contained an unsafe directory.")
             try:
                 if acl_repair:
-                    directory_handle = _windows_native.open_relative_retained_directory(
+                    directory_handle = _windows_native.open_relative_acl_repair_directory(
                         parent_handle,
                         entry.name,
-                        writable=False,
-                        acl_repair=True,
                         owner_rebind=owner_rebind,
+                        coexist_with_retained_delete=coexist_with_retained_delete,
                     )
                 else:
                     directory_handle = _windows_native.open_relative_retained_directory(
@@ -956,6 +959,45 @@ def recovery_path_is_regular_file(path: Path) -> bool:
         return False
 
 
+def _windows_bound_directory_binding(
+    path: Path,
+) -> tuple[Path, int, tuple[int, int]] | None:
+    """Return one validated exact binding from the active output state."""
+
+    state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+    if state is None:
+        return None
+    key = _casefolded_path(path)
+    if key == _casefolded_path(state.visible_root):
+        binding = (state.visible_root, state.handle, state.identity)
+    else:
+        binding = state.descendant_handles.get(key)
+    if binding is None:
+        return None
+    visible, handle, identity = binding
+    if _windows_directory_identity(handle) != identity:
+        raise UnsafePathError("A held Windows recovery directory identity changed.")
+    _require_windows_visible_directory_identity(
+        visible,
+        expected_identity=identity,
+    )
+    return binding
+
+
+@contextmanager
+def _windows_borrow_or_pin_directory_handle(path: Path) -> Iterator[int]:
+    """Borrow an exact bound handle, or pin an otherwise unbound directory."""
+
+    binding = _windows_bound_directory_binding(path)
+    if binding is not None:
+        _visible, handle, _identity = binding
+        yield handle
+        return
+
+    with _windows_pinned_absolute_directory_handle(path) as handle:
+        yield handle
+
+
 def _safe_directory_entries(
     directory: Path,
     *,
@@ -965,7 +1007,7 @@ def _safe_directory_entries(
 
     if _running_on_windows():
         try:
-            with _windows_pinned_absolute_directory_handle(directory) as handle:
+            with _windows_borrow_or_pin_directory_handle(directory) as handle:
                 observed = []
                 for entry_number, entry in enumerate(
                     _windows_native.iter_directory_entries(handle),
@@ -1135,6 +1177,11 @@ def _windows_create_file_directory_handle(
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
 
+    if allow_acl_repair and (allow_rename or allow_child_creation):
+        raise ValueError("Windows ACL repair cannot include rename or child-creation access.")
+    if allow_owner_rebind and not allow_acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+
     kernel32 = _windows_kernel32()
     create_file = kernel32.CreateFileW
     with suppress(AttributeError):
@@ -1152,20 +1199,17 @@ def _windows_create_file_directory_handle(
         share_mode = _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE
         if share_delete:
             share_mode |= _WINDOWS_FILE_SHARE_DELETE
-        # GetFileInformationByHandleEx directory enumeration requires list
-        # access on the held capability.  Keep that capability read-only and
-        # continue denying delete sharing so the visible directory cannot be
-        # exchanged while descendants are validated.
-        desired_access = (
-            _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_FILE_LIST_DIRECTORY | _WINDOWS_READ_CONTROL
-        )
+        desired_access = _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_READ_CONTROL
+        if not allow_acl_repair:
+            # Directory enumeration requires list access. ACL repair uses a
+            # separate metadata-only capability below.
+            desired_access |= _WINDOWS_FILE_LIST_DIRECTORY
         if allow_rename:
             desired_access |= _WINDOWS_DELETE
         if allow_child_creation:
             desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
         if allow_acl_repair:
-            # ACL repair is metadata only, never data or child creation. Owner
-            # rebinding is deliberately a separate retry after owner inspection.
+            # Owner rebinding is a separate retry after owner inspection.
             desired_access |= _WINDOWS_WRITE_DAC
             if allow_owner_rebind:
                 desired_access |= _WINDOWS_WRITE_OWNER
@@ -1756,11 +1800,14 @@ def _windows_apply_private_acl_with_owner_rebind(
 def _windows_apply_private_directory_acl(path: Path) -> None:
     """Apply the private owner/DACL contract through pinned directory handles."""
 
+    retained_pin = _windows_bound_directory_binding(path) is not None
+
     _windows_apply_private_acl_with_owner_rebind(
         open_handle=lambda owner_rebind: _windows_pinned_absolute_directory_handle(
             path,
             acl_repair=True,
             owner_rebind=owner_rebind,
+            coexist_with_retained_delete=retained_pin,
         ),
         identity=_windows_directory_identity,
         changed_message="A private Windows recovery directory changed.",
@@ -1814,24 +1861,34 @@ def _windows_open_locked_directory(
         raise
 
 
-def _windows_hold_bound_descendant_directory(path: Path) -> None:
+def _windows_hold_bound_descendant_directory(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
     """Retain a no-delete-sharing handle for every directory below a bound root."""
 
     state = _WINDOWS_BOUND_OUTPUT_STATE.get()
     if state is None:
         return
+    if expected_identity is not None:
+        expected_identity = _validated_directory_identity(expected_identity)
     candidate = no_link_absolute_path(path)
     if not _is_within_casefolded(candidate, state.visible_root):
         raise UnsafePathError("A Windows recovery directory escaped its held output root.")
     key = _casefolded_path(candidate)
     root_key = _casefolded_path(state.visible_root)
     if key == root_key:
+        if expected_identity is not None and state.identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
         _require_windows_visible_directory_identity(candidate, expected_identity=state.identity)
         return
     if key in state.descendant_handles:
         _visible, handle, identity = state.descendant_handles[key]
         if _windows_directory_identity(handle) != identity:
             raise UnsafePathError("A held Windows recovery directory identity changed.")
+        if expected_identity is not None and identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
         _require_windows_visible_directory_identity(candidate, expected_identity=identity)
         return
     parent_key = _casefolded_path(candidate.parent)
@@ -1845,6 +1902,8 @@ def _windows_hold_bound_descendant_directory(path: Path) -> None:
         allow_child_creation=True,
     )
     try:
+        if expected_identity is not None and identity != expected_identity:
+            raise UnsafePathError("A Windows recovery directory changed before retention.")
         _windows_require_private_acl(handle)
         _require_windows_visible_directory_identity(candidate, expected_identity=identity)
         state.descendant_handles[key] = (candidate, handle, identity)
@@ -2057,7 +2116,10 @@ def _windows_hold_existing_descendant_directories(
                 raise UnsafePathError(
                     "The selected Windows recovery tree contained too many directories."
                 )
-            _windows_hold_bound_descendant_directory(entry.path)
+            _windows_hold_bound_descendant_directory(
+                entry.path,
+                expected_identity=_identity(entry.metadata),
+            )
         pending.extend(entry.path for entry in reversed(directories))
 
 
@@ -3047,9 +3109,28 @@ def require_private_path(
     path = no_link_absolute_path(path)
     if _running_on_windows():
         if expected_type == stat.S_IFDIR:
-            with _windows_pinned_absolute_directory_handle(path) as handle:
+            with _windows_borrow_or_pin_directory_handle(path) as handle:
                 _windows_require_private_acl(handle)
-                return _windows_enumerated_path_metadata(path)
+                information = _windows_native.handle_information(handle)
+                if (
+                    not information.is_directory
+                    or information.is_reparse_point
+                    or information.is_cloud_hydrated
+                ):
+                    raise UnsafePathError(
+                        "A private Windows recovery artifact had an unsafe file type."
+                    )
+                return _WindowsEnumeratedMetadata(
+                    st_mode=stat.S_IFDIR,
+                    st_size=information.byte_size,
+                    st_file_attributes=information.attributes,
+                    st_dev=information.identity[0],
+                    st_ino=information.identity[1],
+                    st_mtime_ns=max(
+                        0,
+                        (information.last_write_time - 116_444_736_000_000_000) * 100,
+                    ),
+                )
         if expected_type == stat.S_IFREG:
             with _windows_locked_regular_file_descriptor(path) as (descriptor, _native):
                 return require_private_descriptor(
