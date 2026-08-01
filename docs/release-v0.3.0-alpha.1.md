@@ -71,24 +71,25 @@ all release changes are merged.
 
 ## Pre-tag alpha release gates
 
-The prerelease must not be tagged or uploaded until all of these are complete:
+The prerelease must not be tagged or uploaded until all of these public alpha gates are complete:
 
-1. Build the private MSIX from a source-bound immutable stage on supported native Windows 11 x64.
-2. Pass the real NTFS capability suite, install/package smoke, synthetic UI journey, and synthetic
-   end-to-end recovery journey on that Windows build.
-3. Verify final MSIX membership, runtime-pack pins, binary-to-component notices, and the package
-   no-network/no-AI contract. The verified MSIX remains private and is not a public alpha asset.
-4. Validate a supported legacy Android capture where available and confirm documented fail-closed
-   behavior on a modern device that does not expose compatible app data.
-5. Freeze one clean release commit and rerun the complete Python, Swift, formatting, privacy,
+1. Freeze one clean release commit and rerun the complete Python, Swift, formatting, privacy,
    source-package, and hosted CI gates on that exact commit.
-6. Build fresh arm64 and x86_64 macOS DMGs from that commit with the official universal2 Python,
+2. Build fresh arm64 and x86_64 macOS DMGs from that commit with the official universal2 Python,
    Developer ID signing, hardened runtime, production entitlements, notarization, stapling,
    Gatekeeper assessment, native-license verification, manifests, and checksums.
-7. Exercise both architecture-specific packaged helpers and inspect the final DMGs. Confirm the
+3. Exercise both architecture-specific packaged helpers and inspect the final DMGs. Confirm the
    existing encrypted-iOS journey remains operational and the new export route completes with only
    synthetic data. Keep any unavailable physical Intel-system validation explicit in the release
    notes rather than treating Rosetta execution as identical hardware proof.
+
+## Deferred device validation
+
+This alpha includes no Windows binary, so private MSIX packaging, native Windows installation, UI,
+NTFS, and packaged recovery proof are not publication gates for this release. Android acquisition
+also remains experimental and device-dependent. Native Windows and physical Android validation
+continue in [issue #13](https://github.com/amirbrooks/tvtime-backup-extractor/issues/13) before either
+capability is described as generally available.
 
 ## Draft verification gate
 
@@ -96,9 +97,6 @@ After the tag is pushed and the complete asset set is uploaded to a draft prerel
 every draft asset into a fresh directory and repeat checksum, signature, notarization, stapling,
 Gatekeeper, architecture, version, provenance, and privacy verification. The prerelease must remain
 draft until this passes.
-
-Native Windows and Android proof is tracked in
-[issue #13](https://github.com/amirbrooks/tvtime-backup-extractor/issues/13).
 
 ## Privacy evidence rules
 
