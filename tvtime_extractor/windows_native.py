@@ -28,6 +28,10 @@ class WindowsUnsupportedError(WindowsNativeError):
     pass
 
 
+class WindowsPrivateOwnerRebindRequired(WindowsNativeError):
+    """The held directory needs the distinct owner-rebinding capability."""
+
+
 @dataclass(frozen=True)
 class WindowsVolumeCapabilities:
     filesystem_name: str
@@ -223,6 +227,7 @@ FILE_WRITE_ATTRIBUTES = 0x00000100
 DELETE = 0x00010000
 READ_CONTROL = 0x00020000
 WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
 SYNCHRONIZE = 0x00100000
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
@@ -658,11 +663,69 @@ def private_security_descriptor() -> Iterator[wintypes.LPVOID]:
             local_free(descriptor)
 
 
-def apply_private_acl(handle: int) -> None:
-    """Replace a pinned directory's DACL with the private descriptor's DACL."""
+def _handle_has_owner(handle: int, expected_owner: wintypes.LPVOID) -> bool:
+    """Compare a pinned object's owner without resolving its visible path again."""
+
+    advapi32 = _dll("advapi32")
+    kernel32 = _dll("kernel32")
+    owner = wintypes.LPVOID()
+    descriptor = wintypes.LPVOID()
+    get_security = advapi32.GetSecurityInfo
+    get_security.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    get_security.restype = wintypes.DWORD
+    result = int(
+        get_security(
+            wintypes.HANDLE(handle),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            None,
+            None,
+            None,
+            ctypes.byref(descriptor),
+        )
+    )
+    if result:
+        raise WindowsNativeError(
+            "Private Windows access controls could not be inspected.",
+            winerror=result,
+        )
+    try:
+        if not descriptor or not owner:
+            raise WindowsNativeError("A private Windows access-control owner was missing.")
+        equal_sid = advapi32.EqualSid
+        equal_sid.argtypes = [wintypes.LPVOID, wintypes.LPVOID]
+        equal_sid.restype = wintypes.BOOL
+        return bool(equal_sid(owner, expected_owner))
+    finally:
+        if descriptor:
+            local_free = kernel32.LocalFree
+            local_free.argtypes = [wintypes.HLOCAL]
+            local_free.restype = wintypes.HLOCAL
+            local_free(descriptor)
+
+
+def apply_private_acl(handle: int, *, owner_rebind: bool = False) -> None:
+    """Bind a pinned directory to the private descriptor's owner and protected DACL.
+
+    DACL-only repair preserves an already-correct owner. The caller must reopen
+    with the separate owner-write capability only after this handle proves it is
+    needed, so owner-controlled directories remain repairable.
+    """
 
     if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
         raise WindowsNativeError("A Windows capability handle was invalid.")
+    if not isinstance(owner_rebind, bool):
+        raise TypeError("owner_rebind must be a boolean.")
     advapi32 = _dll("advapi32")
     get_dacl = advapi32.GetSecurityDescriptorDacl
     get_dacl.argtypes = [
@@ -672,6 +735,13 @@ def apply_private_acl(handle: int) -> None:
         ctypes.POINTER(wintypes.BOOL),
     ]
     get_dacl.restype = wintypes.BOOL
+    get_owner = advapi32.GetSecurityDescriptorOwner
+    get_owner.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_owner.restype = wintypes.BOOL
     set_security = advapi32.SetSecurityInfo
     set_security.argtypes = [
         wintypes.HANDLE,
@@ -684,6 +754,16 @@ def apply_private_acl(handle: int) -> None:
     ]
     set_security.restype = wintypes.DWORD
     with private_security_descriptor() as descriptor:
+        owner = wintypes.LPVOID()
+        owner_defaulted = wintypes.BOOL()
+        if not get_owner(descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)):
+            raise _last_error("Private Windows access controls could not be prepared.")
+        if not owner:
+            raise WindowsNativeError("A private Windows access-control owner was missing.")
+        if not owner_rebind and not _handle_has_owner(handle, owner):
+            raise WindowsPrivateOwnerRebindRequired(
+                "Private Windows access controls needed owner rebinding."
+            )
         dacl_present = wintypes.BOOL()
         dacl = wintypes.LPVOID()
         dacl_defaulted = wintypes.BOOL()
@@ -696,12 +776,15 @@ def apply_private_acl(handle: int) -> None:
             raise _last_error("Private Windows access controls could not be prepared.")
         if not dacl_present.value or not dacl:
             raise WindowsNativeError("A private Windows access-control list was missing.")
+        security_information = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        if owner_rebind:
+            security_information |= OWNER_SECURITY_INFORMATION
         result = int(
             set_security(
                 wintypes.HANDLE(handle),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                None,
+                security_information,
+                owner if owner_rebind else None,
                 None,
                 dacl,
                 None,
@@ -968,19 +1051,25 @@ def _open_relative_directory(
     *,
     writable: bool,
     acl_repair: bool,
+    owner_rebind: bool,
     share_delete: bool,
 ) -> int:
     if writable and acl_repair:
         raise ValueError(
             "A Windows directory capability cannot combine data writes with ACL repair."
         )
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
     desired = (
         FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
     )
     if writable:
         desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
     elif acl_repair:
+        # Repair can change only security-descriptor metadata: no data or child writes.
         desired |= WRITE_DAC
+        if owner_rebind:
+            desired |= WRITE_OWNER
     share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
     if share_delete:
         share_access |= FILE_SHARE_DELETE
@@ -1017,6 +1106,7 @@ def open_relative_directory(parent_handle: int, name: str, *, writable: bool) ->
         name,
         writable=writable,
         acl_repair=False,
+        owner_rebind=False,
         share_delete=True,
     )
 
@@ -1027,6 +1117,7 @@ def open_relative_retained_directory(
     *,
     writable: bool,
     acl_repair: bool = False,
+    owner_rebind: bool = False,
 ) -> int:
     """Open and pin a final directory against rename or replacement."""
 
@@ -1035,6 +1126,7 @@ def open_relative_retained_directory(
         name,
         writable=writable,
         acl_repair=acl_repair,
+        owner_rebind=owner_rebind,
         share_delete=False,
     )
 

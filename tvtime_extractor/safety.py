@@ -68,6 +68,7 @@ _WINDOWS_GENERIC_WRITE = 0x40000000
 _WINDOWS_DELETE = 0x00010000
 _WINDOWS_READ_CONTROL = 0x00020000
 _WINDOWS_WRITE_DAC = 0x00040000
+_WINDOWS_WRITE_OWNER = 0x00080000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -848,6 +849,7 @@ def _windows_pinned_absolute_directory_handle(
     *,
     writable: bool = False,
     acl_repair: bool = False,
+    owner_rebind: bool = False,
 ) -> Iterator[int]:
     if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
         raise UnsafePathError("A Windows recovery source path was invalid.")
@@ -855,6 +857,8 @@ def _windows_pinned_absolute_directory_handle(
         raise ValueError(
             "A Windows directory capability cannot combine data writes with ACL repair."
         )
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
     root_handle = -1
     directory_handle = -1
     try:
@@ -862,6 +866,7 @@ def _windows_pinned_absolute_directory_handle(
             Path(path.anchor),
             allow_child_creation=writable and len(path.parts) == 1,
             allow_acl_repair=acl_repair and len(path.parts) == 1,
+            allow_owner_rebind=owner_rebind and len(path.parts) == 1,
         )
         if len(path.parts) == 1:
             yield root_handle
@@ -879,6 +884,7 @@ def _windows_pinned_absolute_directory_handle(
                         entry.name,
                         writable=False,
                         acl_repair=True,
+                        owner_rebind=owner_rebind,
                     )
                 else:
                     directory_handle = _windows_native.open_relative_retained_directory(
@@ -1124,6 +1130,7 @@ def _windows_create_file_directory_handle(
     allow_rename: bool = False,
     allow_child_creation: bool = False,
     allow_acl_repair: bool = False,
+    allow_owner_rebind: bool = False,
     share_delete: bool = False,
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
@@ -1157,7 +1164,11 @@ def _windows_create_file_directory_handle(
         if allow_child_creation:
             desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
         if allow_acl_repair:
+            # ACL repair is metadata only, never data or child creation. Owner
+            # rebinding is deliberately a separate retry after owner inspection.
             desired_access |= _WINDOWS_WRITE_DAC
+            if allow_owner_rebind:
+                desired_access |= _WINDOWS_WRITE_OWNER
         opened = create_file(
             os.fspath(path),
             desired_access,
@@ -1672,11 +1683,24 @@ def _windows_require_private_acl(handle: int) -> None:
 
 
 def _windows_apply_private_directory_acl(path: Path) -> None:
-    """Apply and verify the private DACL through the directory's pinned handle."""
+    """Apply the private owner/DACL contract through pinned directory handles."""
 
     try:
         with _windows_pinned_absolute_directory_handle(path, acl_repair=True) as handle:
-            _windows_native.apply_private_acl(handle)
+            try:
+                _windows_native.apply_private_acl(handle)
+            except _windows_native.WindowsPrivateOwnerRebindRequired:
+                expected_identity = _windows_directory_identity(handle)
+                with _windows_pinned_absolute_directory_handle(
+                    path,
+                    acl_repair=True,
+                    owner_rebind=True,
+                ) as owner_handle:
+                    if _windows_directory_identity(owner_handle) != expected_identity:
+                        raise UnsafePathError(
+                            "A private Windows recovery directory changed."
+                        ) from None
+                    _windows_native.apply_private_acl(owner_handle, owner_rebind=True)
     except _windows_native.WindowsNativeError as exc:
         raise UnsafePathError("A private Windows recovery directory could not be secured.") from exc
 
@@ -1687,6 +1711,7 @@ def _windows_open_locked_directory(
     allow_rename: bool = False,
     allow_child_creation: bool = False,
     allow_acl_repair: bool = False,
+    allow_owner_rebind: bool = False,
     share_delete: bool = False,
 ) -> tuple[int, tuple[int, int]]:
     handle = _windows_create_file_directory_handle(
@@ -1694,6 +1719,7 @@ def _windows_open_locked_directory(
         allow_rename=allow_rename,
         allow_child_creation=allow_child_creation,
         allow_acl_repair=allow_acl_repair,
+        allow_owner_rebind=allow_owner_rebind,
         share_delete=share_delete,
     )
     try:

@@ -28,11 +28,13 @@ from tvtime_extractor.safety import (
     _WINDOWS_GENERIC_READ,
     _WINDOWS_READ_CONTROL,
     _WINDOWS_WRITE_DAC,
+    _WINDOWS_WRITE_OWNER,
     MAXIMUM_WINDOWS_RETAINED_DESCENDANT_DIRECTORIES,
     _casefolded_path,
     _open_bound_fresh_output_root,
     _require_windows_visible_directory_identity,
     _safe_directory_entries,
+    _windows_apply_private_directory_acl,
     _windows_close_handle,
     _windows_create_file_directory_handle,
     _windows_create_file_regular_handle,
@@ -63,6 +65,7 @@ from tvtime_extractor.windows_native import (
     WindowsDirectoryEntryInformation,
     WindowsNativeError,
     WindowsObjectExistsError,
+    WindowsPrivateOwnerRebindRequired,
     WindowsUnsupportedError,
 )
 
@@ -562,7 +565,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         )
         self.assertFalse(int(kernel32.create_calls[0][2]) & _WINDOWS_FILE_SHARE_DELETE)
 
-    def test_acl_repair_directory_handle_requests_only_acl_write_access(self) -> None:
+    def test_acl_repair_directory_handle_requests_only_dacl_write_access(self) -> None:
         kernel32 = self._Kernel32()
         with (
             mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
@@ -576,8 +579,100 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
 
         desired_access = int(kernel32.create_calls[0][1])
         self.assertTrue(desired_access & _WINDOWS_WRITE_DAC)
+        self.assertFalse(desired_access & _WINDOWS_WRITE_OWNER)
         self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
         self.assertFalse(desired_access & _WINDOWS_DELETE)
+
+    def test_owner_rebind_handle_adds_only_owner_write_access(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_acl_repair=True,
+                allow_owner_rebind=True,
+            )
+            _windows_close_handle(handle)
+
+        desired_access = int(kernel32.create_calls[0][1])
+        self.assertTrue(desired_access & _WINDOWS_WRITE_DAC)
+        self.assertTrue(desired_access & _WINDOWS_WRITE_OWNER)
+        self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
+        self.assertFalse(desired_access & _WINDOWS_DELETE)
+
+    def test_private_acl_retries_with_owner_write_only_after_a_mismatch(self) -> None:
+        target = Path("C:/Synthetic/Private")
+        first = mock.MagicMock()
+        first.__enter__.return_value = 101
+        second = mock.MagicMock()
+        second.__enter__.return_value = 102
+
+        def apply_acl(handle: int, *, owner_rebind: bool = False) -> None:
+            if handle == 101:
+                self.assertFalse(owner_rebind)
+                raise WindowsPrivateOwnerRebindRequired("synthetic")
+            self.assertEqual(handle, 102)
+            self.assertTrue(owner_rebind)
+            first.__exit__.assert_not_called()
+
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_directory_handle",
+                side_effect=(first, second),
+            ) as pinned,
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.apply_private_acl",
+                side_effect=apply_acl,
+            ) as apply_acl,
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                side_effect=((7, 11), (7, 11)),
+            ),
+        ):
+            _windows_apply_private_directory_acl(target)
+
+        self.assertEqual(
+            pinned.call_args_list,
+            [
+                mock.call(target, acl_repair=True),
+                mock.call(target, acl_repair=True, owner_rebind=True),
+            ],
+        )
+        self.assertEqual(
+            apply_acl.call_args_list,
+            [mock.call(101), mock.call(102, owner_rebind=True)],
+        )
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
+
+    def test_private_acl_rejects_a_substituted_directory_before_owner_rebind(self) -> None:
+        target = Path("C:/Synthetic/Private")
+        first = mock.MagicMock()
+        first.__enter__.return_value = 101
+        second = mock.MagicMock()
+        second.__enter__.return_value = 102
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_directory_handle",
+                side_effect=(first, second),
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.apply_private_acl",
+                side_effect=WindowsPrivateOwnerRebindRequired("synthetic"),
+            ) as apply_acl,
+            mock.patch(
+                "tvtime_extractor.safety._windows_directory_identity",
+                side_effect=((7, 11), (7, 12)),
+            ),
+            self.assertRaisesRegex(UnsafePathError, "directory changed"),
+        ):
+            _windows_apply_private_directory_acl(target)
+
+        self.assertEqual(apply_acl.call_args_list, [mock.call(101)])
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
 
     def test_promotion_capable_directory_handle_requests_delete_access_once(self) -> None:
         kernel32 = self._Kernel32()
