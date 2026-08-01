@@ -112,7 +112,7 @@ jobs:
             ) | Out-Null
             if ($parseErrors.Count -ne 0) {
               $messages = @($parseErrors | ForEach-Object { $_.Message }) -join " "
-              throw "Windows PowerShell 5.1 parser rejected $scriptPath: $messages"
+              throw "Windows PowerShell 5.1 packaging script failed to parse ${scriptPath}: $messages"
             }
           }
           .\script\test_windows_packaging_lib.ps1
