@@ -341,6 +341,48 @@ class WindowsNativeUnitTests(unittest.TestCase):
         )
         self.assertFalse(share_access & windows_native.FILE_SHARE_DELETE)
 
+    def test_acl_repair_regular_file_open_requests_metadata_writes_only(self) -> None:
+        file_information = windows_native.WindowsHandleInformation(
+            attributes=windows_native.FILE_ATTRIBUTE_NORMAL,
+            identity=(7, 12),
+            byte_size=17,
+            last_write_time=23,
+        )
+        with (
+            mock.patch.object(
+                windows_native,
+                "_nt_create_relative",
+                return_value=(101, windows_native.FILE_OPENED),
+            ) as create,
+            mock.patch.object(
+                windows_native,
+                "handle_information",
+                return_value=file_information,
+            ),
+        ):
+            self.assertEqual(
+                windows_native.open_relative_retained_regular_file(
+                    99,
+                    "private.bin",
+                    owner_rebind=True,
+                ),
+                101,
+            )
+
+        desired_access = create.call_args.kwargs["desired_access"]
+        share_access = create.call_args.kwargs["share_access"]
+        self.assertTrue(desired_access & windows_native.WRITE_DAC)
+        self.assertTrue(desired_access & windows_native.WRITE_OWNER)
+        self.assertFalse(desired_access & windows_native.FILE_WRITE_DATA)
+        self.assertFalse(desired_access & windows_native.FILE_APPEND_DATA)
+        self.assertFalse(desired_access & windows_native.FILE_WRITE_ATTRIBUTES)
+        self.assertFalse(desired_access & windows_native.DELETE)
+        self.assertEqual(
+            share_access,
+            windows_native.FILE_SHARE_READ | windows_native.FILE_SHARE_WRITE,
+        )
+        self.assertFalse(share_access & windows_native.FILE_SHARE_DELETE)
+
     def test_acl_repair_directory_open_requests_only_dacl_write_access(self) -> None:
         directory_information = windows_native.WindowsHandleInformation(
             attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,

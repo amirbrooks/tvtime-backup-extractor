@@ -1608,6 +1608,54 @@ def _windows_locked_regular_file_descriptor(
         _windows_close_handles((root_handle,))
 
 
+@contextmanager
+def _windows_pinned_absolute_regular_file_acl_handle(
+    path: Path,
+    *,
+    owner_rebind: bool = False,
+) -> Iterator[int]:
+    """Pin one regular file for private ACL repair without data-write access."""
+
+    if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
+        raise UnsafePathError("A private Windows recovery file path was invalid.")
+    root_handle = -1
+    file_handle = -1
+    try:
+        root_handle, _identity = _windows_open_locked_directory(Path(path.anchor))
+        with _windows_pinned_relative_parent(root_handle, path.parts[1:]) as (
+            parent_handle,
+            entry,
+        ):
+            if entry.is_directory:
+                raise UnsafePathError("A private Windows recovery file was not a regular file.")
+            try:
+                file_handle = _windows_native.open_relative_retained_regular_file(
+                    parent_handle,
+                    entry.name,
+                    owner_rebind=owner_rebind,
+                )
+            except _windows_native.WindowsNativeError as exc:
+                raise UnsafePathError(
+                    "A private Windows recovery file could not be opened safely."
+                ) from exc
+            information = _windows_regular_file_information(file_handle)
+            visible = _windows_enumerated_child(parent_handle, entry.name)
+            if (
+                information.identity != entry.identity
+                or information.identity != visible.identity
+                or information.byte_size != entry.byte_size
+                or information.byte_size != visible.byte_size
+                or information.last_write_time != entry.last_write_time
+                or information.last_write_time != visible.last_write_time
+            ):
+                raise UnsafePathError(
+                    "A private Windows recovery file changed while it was opened."
+                )
+            yield file_handle
+    finally:
+        _windows_close_handles((file_handle, root_handle))
+
+
 def _windows_directory_identity(handle: int) -> tuple[int, int]:
     """Return a stable volume/file identity and reject reparse or non-directory handles."""
 
@@ -1682,27 +1730,56 @@ def _windows_require_private_acl(handle: int) -> None:
         raise UnsafePathError("A private Windows recovery artifact was not owner-only.") from exc
 
 
-def _windows_apply_private_directory_acl(path: Path) -> None:
-    """Apply the private owner/DACL contract through pinned directory handles."""
+def _windows_apply_private_acl_with_owner_rebind(
+    *,
+    open_handle: Callable[[bool], Any],
+    identity: Callable[[int], tuple[int, int]],
+    changed_message: str,
+    securing_message: str,
+) -> None:
+    """Apply the private ACL without reopening a mismatched owner unpinned."""
 
     try:
-        with _windows_pinned_absolute_directory_handle(path, acl_repair=True) as handle:
+        with open_handle(False) as handle:
             try:
                 _windows_native.apply_private_acl(handle)
             except _windows_native.WindowsPrivateOwnerRebindRequired:
-                expected_identity = _windows_directory_identity(handle)
-                with _windows_pinned_absolute_directory_handle(
-                    path,
-                    acl_repair=True,
-                    owner_rebind=True,
-                ) as owner_handle:
-                    if _windows_directory_identity(owner_handle) != expected_identity:
-                        raise UnsafePathError(
-                            "A private Windows recovery directory changed."
-                        ) from None
+                expected_identity = identity(handle)
+                with open_handle(True) as owner_handle:
+                    if identity(owner_handle) != expected_identity:
+                        raise UnsafePathError(changed_message) from None
                     _windows_native.apply_private_acl(owner_handle, owner_rebind=True)
     except _windows_native.WindowsNativeError as exc:
-        raise UnsafePathError("A private Windows recovery directory could not be secured.") from exc
+        raise UnsafePathError(securing_message) from exc
+
+
+def _windows_apply_private_directory_acl(path: Path) -> None:
+    """Apply the private owner/DACL contract through pinned directory handles."""
+
+    _windows_apply_private_acl_with_owner_rebind(
+        open_handle=lambda owner_rebind: _windows_pinned_absolute_directory_handle(
+            path,
+            acl_repair=True,
+            owner_rebind=owner_rebind,
+        ),
+        identity=_windows_directory_identity,
+        changed_message="A private Windows recovery directory changed.",
+        securing_message="A private Windows recovery directory could not be secured.",
+    )
+
+
+def _windows_apply_private_file_acl(path: Path) -> None:
+    """Apply the private owner/DACL contract through pinned regular-file handles."""
+
+    _windows_apply_private_acl_with_owner_rebind(
+        open_handle=lambda owner_rebind: _windows_pinned_absolute_regular_file_acl_handle(
+            path,
+            owner_rebind=owner_rebind,
+        ),
+        identity=lambda handle: _windows_regular_file_information(handle).identity,
+        changed_message="A private Windows recovery file changed.",
+        securing_message="A private Windows recovery file could not be secured.",
+    )
 
 
 def _windows_open_locked_directory(
@@ -3220,6 +3297,8 @@ def iter_regular_files(root: Path) -> Iterator[Path]:
 
 def secure_file(path: Path) -> None:
     _harden_private_path(path, expected_type=stat.S_IFREG, mode=0o600)
+    if _running_on_windows():
+        _windows_apply_private_file_acl(no_link_absolute_path(path.expanduser()))
 
 
 def validate_backup_directory(path: Path) -> Path:

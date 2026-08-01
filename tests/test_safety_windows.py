@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import stat
 import tempfile
 import types
 import unittest
@@ -35,6 +36,7 @@ from tvtime_extractor.safety import (
     _require_windows_visible_directory_identity,
     _safe_directory_entries,
     _windows_apply_private_directory_acl,
+    _windows_apply_private_file_acl,
     _windows_close_handle,
     _windows_create_file_directory_handle,
     _windows_create_file_regular_handle,
@@ -60,6 +62,7 @@ from tvtime_extractor.safety import (
     read_regular_bytes,
     regular_binary_reader,
     require_encrypted_ios_source_platform_support,
+    secure_file,
 )
 from tvtime_extractor.windows_native import (
     WindowsDirectoryEntryInformation,
@@ -636,7 +639,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(
             pinned.call_args_list,
             [
-                mock.call(target, acl_repair=True),
+                mock.call(target, acl_repair=True, owner_rebind=False),
                 mock.call(target, acl_repair=True, owner_rebind=True),
             ],
         )
@@ -673,6 +676,101 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
         self.assertEqual(apply_acl.call_args_list, [mock.call(101)])
         first.__exit__.assert_called_once()
         second.__exit__.assert_called_once()
+
+    def test_private_file_acl_retries_with_owner_write_while_first_file_is_pinned(self) -> None:
+        target = Path("C:/Synthetic/private.bin")
+        first = mock.MagicMock()
+        first.__enter__.return_value = 101
+        second = mock.MagicMock()
+        second.__enter__.return_value = 102
+
+        def apply_acl(handle: int, *, owner_rebind: bool = False) -> None:
+            if handle == 101:
+                self.assertFalse(owner_rebind)
+                raise WindowsPrivateOwnerRebindRequired("synthetic")
+            self.assertEqual(handle, 102)
+            self.assertTrue(owner_rebind)
+            first.__exit__.assert_not_called()
+
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_regular_file_acl_handle",
+                side_effect=(first, second),
+            ) as pinned,
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.apply_private_acl",
+                side_effect=apply_acl,
+            ) as apply_acl,
+            mock.patch(
+                "tvtime_extractor.safety._windows_regular_file_information",
+                side_effect=(
+                    _WindowsRegularFileInformation((7, 11), 9, 19),
+                    _WindowsRegularFileInformation((7, 11), 9, 19),
+                ),
+            ),
+        ):
+            _windows_apply_private_file_acl(target)
+
+        self.assertEqual(
+            pinned.call_args_list,
+            [
+                mock.call(target, owner_rebind=False),
+                mock.call(target, owner_rebind=True),
+            ],
+        )
+        self.assertEqual(
+            apply_acl.call_args_list,
+            [mock.call(101), mock.call(102, owner_rebind=True)],
+        )
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
+
+    def test_private_file_acl_rejects_a_substitution_before_owner_rebind(self) -> None:
+        target = Path("C:/Synthetic/private.bin")
+        first = mock.MagicMock()
+        first.__enter__.return_value = 101
+        second = mock.MagicMock()
+        second.__enter__.return_value = 102
+        with (
+            mock.patch(
+                "tvtime_extractor.safety._windows_pinned_absolute_regular_file_acl_handle",
+                side_effect=(first, second),
+            ),
+            mock.patch(
+                "tvtime_extractor.safety._windows_native.apply_private_acl",
+                side_effect=WindowsPrivateOwnerRebindRequired("synthetic"),
+            ) as apply_acl,
+            mock.patch(
+                "tvtime_extractor.safety._windows_regular_file_information",
+                side_effect=(
+                    _WindowsRegularFileInformation((7, 11), 9, 19),
+                    _WindowsRegularFileInformation((7, 12), 9, 19),
+                ),
+            ),
+            self.assertRaisesRegex(UnsafePathError, "file changed"),
+        ):
+            _windows_apply_private_file_acl(target)
+
+        self.assertEqual(apply_acl.call_args_list, [mock.call(101)])
+        first.__exit__.assert_called_once()
+        second.__exit__.assert_called_once()
+
+    def test_secure_file_applies_the_private_windows_acl_after_posix_hardening(self) -> None:
+        target = Path("C:/Synthetic/private.bin")
+        with (
+            mock.patch("tvtime_extractor.safety._harden_private_path") as harden,
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch(
+                "tvtime_extractor.safety.no_link_absolute_path",
+                return_value=target,
+            ) as absolute,
+            mock.patch("tvtime_extractor.safety._windows_apply_private_file_acl") as apply_acl,
+        ):
+            secure_file(target)
+
+        harden.assert_called_once_with(target, expected_type=stat.S_IFREG, mode=0o600)
+        absolute.assert_called_once_with(target)
+        apply_acl.assert_called_once_with(target)
 
     def test_promotion_capable_directory_handle_requests_delete_access_once(self) -> None:
         kernel32 = self._Kernel32()

@@ -1131,12 +1131,30 @@ def open_relative_retained_directory(
     )
 
 
-def open_relative_regular_file(parent_handle: int, name: str) -> int:
+def _open_relative_regular_file(
+    parent_handle: int,
+    name: str,
+    *,
+    acl_repair: bool,
+    owner_rebind: bool,
+) -> int:
+    if owner_rebind and not acl_repair:
+        raise ValueError("A Windows owner rebind requires the ACL repair capability.")
+    desired_access = GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+    share_access = FILE_SHARE_READ
+    if acl_repair:
+        # Repair can change only security-descriptor metadata. The retained
+        # first handle permits a second owner-rebind handle, but neither can
+        # write data, attributes, or delete the file.
+        desired_access |= WRITE_DAC
+        share_access |= FILE_SHARE_WRITE
+        if owner_rebind:
+            desired_access |= WRITE_OWNER
     handle, _ = _nt_create_relative(
         parent_handle,
         name,
-        desired_access=GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        share_access=FILE_SHARE_READ,
+        desired_access=desired_access,
+        share_access=share_access,
         disposition=FILE_OPEN,
         options=(
             FILE_NON_DIRECTORY_FILE
@@ -1160,6 +1178,33 @@ def open_relative_regular_file(parent_handle: int, name: str) -> int:
             close_handle(handle)
         raise
     return handle
+
+
+def open_relative_regular_file(parent_handle: int, name: str) -> int:
+    """Open one private regular file for read-only, no-recall access."""
+
+    return _open_relative_regular_file(
+        parent_handle,
+        name,
+        acl_repair=False,
+        owner_rebind=False,
+    )
+
+
+def open_relative_retained_regular_file(
+    parent_handle: int,
+    name: str,
+    *,
+    owner_rebind: bool = False,
+) -> int:
+    """Pin one regular file while granting only ACL-repair metadata writes."""
+
+    return _open_relative_regular_file(
+        parent_handle,
+        name,
+        acl_repair=True,
+        owner_rebind=owner_rebind,
+    )
 
 
 def _open_relative_for_delete(
