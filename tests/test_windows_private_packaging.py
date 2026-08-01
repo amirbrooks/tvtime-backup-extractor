@@ -785,7 +785,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / required).is_file())
 
-    def test_alpha_candidate_version_cannot_masquerade_as_published_v020(self) -> None:
+    def test_published_alpha_cannot_masquerade_as_stable_or_public_windows(self) -> None:
         self.assertIn('version = "0.3.0a1"', self.read("pyproject.toml"))
         self.assertIn('__version__ = "0.3.0a1"', self.read("tvtime_extractor/__init__.py"))
         self.assertIn(
@@ -820,12 +820,19 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("release-$RELEASE_VERSION-macos", release_builder)
         self.assertIn("$RELEASE_VERSION-macOS-$package_label.dmg", release_builder)
         changelog = self.read("CHANGELOG.md")
-        self.assertIn("Unreleased prerelease candidate: v0.3.0-alpha.1", changelog)
-        self.assertIn("has not been tagged, uploaded, or published", changelog)
-        self.assertRegex(changelog, r"v0\.2\.0 remains the current\s+stable release")
+        self.assertIn("## 0.3.0-alpha.1 - 2026-08-01", changelog)
+        self.assertIn("No MSIX is included", changelog)
+        self.assertRegex(changelog, r"v0\.2\.0 remains the latest stable\s+release")
         release_record = self.read("docs/release-v0.3.0-alpha.1.md")
-        self.assertIn("This prerelease is not published", release_record)
-        self.assertIn("must be marked as a prerelease, not latest", release_record)
+        self.assertIn("This prerelease was published on 2026-08-01", release_record)
+        self.assertRegex(
+            release_record,
+            r"It does not include an MSIX or another\s+public Windows binary",
+        )
+        self.assertRegex(
+            release_record,
+            r"marks `v0\.3\.0-alpha\.1` as a prerelease, not\s+latest",
+        )
 
 
 if __name__ == "__main__":

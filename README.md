@@ -8,16 +8,16 @@ human-readable reports plus detailed CSV tables.
 The project is free and open source. iMazing is not required. It does not modify the phone or source
 backup, contact TV Time, restore data to the app, or provide an official cloud-account export.
 
-> **Release status:** [v0.2.0 is published](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
-> with separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and Intel, plus
-> verified Python wheel and source packages. Download only from the official release and verify the
-> DMG against `SHA256SUMS`. Version 0.2.0 includes the complete Markdown catalogue, shared offline
-> HTML/PDF views, and native macOS recovery experience. This checkout also contains the unpublished
-> v0.3.0-alpha.1 prerelease candidate. Its Windows and Android changes are not part of public
-> v0.2.0.
+> **Release status:** [v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
+> remains the latest stable release. Technical testers can also try the
+> [v0.3.0-alpha.1 prerelease](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.3.0-alpha.1),
+> which provides separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and
+> Intel, plus verified Python wheel and source packages. The alpha adds experimental Android and
+> official-export recovery. It includes no Windows binary. Download only from the official release
+> and verify the selected DMG against `SHA256SUMS`.
 
-The [v0.3.0-alpha.1 release preparation record](docs/release-v0.3.0-alpha.1.md) tracks completed
-evidence, the intentionally limited public artifact set, and the remaining alpha release gates.
+The [v0.3.0-alpha.1 release record](docs/release-v0.3.0-alpha.1.md) documents its evidence,
+intentionally limited public artifact set, and deferred device validation.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
