@@ -50,7 +50,12 @@ from tvtime_extractor.analyze import analyze_extraction
 from tvtime_extractor.errors import UnsafePathError
 from tvtime_extractor.extract import PRIMARY_DOMAIN
 from tvtime_extractor.report import build_report
-from tvtime_extractor.safety import secure_directory, secure_file, write_json_private_atomic
+from tvtime_extractor.safety import (
+    secure_directory,
+    secure_file,
+    windows_create_private_staging_descriptor,
+    write_json_private_atomic,
+)
 from tvtime_extractor.suite_tv import LIBERATOR_FILENAMES
 from tvtime_extractor.visual_report import HTML_REPORT_FILENAME, PDF_REPORT_FILENAME
 
@@ -189,6 +194,8 @@ class RecoveryOutputValidatorTests(unittest.TestCase):
 
             def create_private_file(path: Path) -> int:
                 self.assertEqual(path, destination)
+                if os.name == "nt":
+                    return windows_create_private_staging_descriptor(path)
                 return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
             with (

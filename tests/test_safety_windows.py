@@ -820,6 +820,10 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
                     "tvtime_extractor.safety._require_windows_visible_directory_identity",
                 ) as visible,
                 mock.patch(
+                    "tvtime_extractor.safety.no_link_absolute_path",
+                    return_value=root,
+                ) as absolute,
+                mock.patch(
                     "tvtime_extractor.safety._windows_open_locked_directory",
                 ) as opened,
                 windows_timestamp_restore_directory(root) as binding,
@@ -829,6 +833,7 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             _WINDOWS_BOUND_OUTPUT_STATE.reset(token)
 
         opened.assert_not_called()
+        absolute.assert_called_once_with(root)
         visible.assert_called_once_with(root, expected_identity=(7, 11))
 
     def test_owner_rebind_handle_adds_only_owner_write_access(self) -> None:
