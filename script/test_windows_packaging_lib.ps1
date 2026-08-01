@@ -209,6 +209,7 @@ try {
     # so keep this test-only invocation type-exact with the native method.
     $relockIdentity = [string]$relockToken.Identity
     $relockRootPath = [string]$testRoot
+    $relockDestinationPath = [string]$relockDestination
     $relockDestinationName = [string][IO.Path]::GetFileName($relockDestination)
     $unrelatedSibling = Join-Path $testRoot "relock-unrelated"
     [IO.Directory]::CreateDirectory($unrelatedSibling) | Out-Null
@@ -264,7 +265,7 @@ try {
     try {
         $relockMethod.Invoke(
             $null,
-            [object[]]@($relockToken.Snapshot, $relockDestination)
+            [object[]]@($relockToken.Snapshot, $relockDestinationPath)
         ) | Out-Null
     } catch {
         $postRenameRelockRejected = `
