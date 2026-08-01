@@ -2,11 +2,11 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
-## Unreleased prerelease candidate: v0.3.0-alpha.1
+## 0.3.0-alpha.1 - 2026-08-01
 
-This is the planned first alpha for the 0.3.0 cross-platform work. It remains unpublished.
-Successful synthetic checks do not make every device route verified, and the public alpha artifact
-set deliberately excludes a Windows binary.
+This experimental GitHub prerelease is the first alpha for the 0.3.0 cross-platform work.
+Successful synthetic checks do not make every device route verified. Its public artifact set
+deliberately excludes a Windows binary.
 
 See the [v0.3.0-alpha.1 release preparation record](docs/release-v0.3.0-alpha.1.md) for completed
 evidence, release gates, and remaining native proof.
@@ -57,9 +57,9 @@ evidence, release gates, and remaining native proof.
   still requires a synthetic Windows UI smoke test before it is considered release-ready.
 - Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
   in normalized tables.
-- This prerelease candidate has not been tagged, uploaded, or published. Its intended public assets
-  are signed/notarized Apple silicon and Intel DMGs plus verified Python wheel/source packages; no
-  MSIX is included. v0.2.0 remains the current stable release.
+- Published signed, notarized, stapled, and Gatekeeper-accepted Apple silicon and Intel DMGs plus
+  verified Python wheel and source packages. No MSIX is included. v0.2.0 remains the latest stable
+  release.
 
 ## 0.2.0 - 2026-07-20
 

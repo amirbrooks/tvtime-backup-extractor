@@ -2,19 +2,21 @@
 
 ## Current status
 
-This prerelease is not published. No `v0.3.0-alpha.1` tag, GitHub release, or public alpha artifact
-exists yet.
+This prerelease was published on 2026-08-01 from tagged commit
+`9b61b27e670b12bd16a072e0e8c61121dc89c13f`:
 
-- `v0.2.0` remains the current stable release.
-- The intended GitHub tag is `v0.3.0-alpha.1` and must be marked as a prerelease, not latest.
+- [GitHub release](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.3.0-alpha.1)
+- eight public assets: two architecture-specific Mac DMGs, two Mac manifests, Mac checksums, a
+  Python wheel, a Python source archive, and a Python release manifest
+
+- `v0.2.0` remains the latest stable release. GitHub marks `v0.3.0-alpha.1` as a prerelease, not
+  latest.
 - Release metadata identifies the same alpha without violating platform version formats:
   `0.3.0a1` for Python, `0.3.0` plus bundle build `1` and the explicit
   `TVTimeReleaseVersion=0.3.0-alpha.1` for macOS, and private MSIX identity `0.3.0.1` with an Alpha
   display name for Windows. Artifact filenames use `0.3.0-alpha.1`. A later stable build must use
   new filenames and increment the native build and package version numbers without changing stable
   application identifiers.
-- Tagging and uploading remain blocked until every pre-tag gate in this record passes on one frozen
-  source commit. Publication remains blocked until the uploaded draft assets pass revalidation.
 
 ## Alpha scope
 
@@ -37,27 +39,22 @@ snapshots, or official exports. Device backup policy and recovered schemas vary;
 commonly fail closed. A successful synthetic fixture does not claim that a particular physical
 device or current TV Time app build is recoverable.
 
-## Preparation evidence from 2026-08-01
+## Final release evidence from 2026-08-01
 
-Merged commit `42f9aa5bdefe79c94e7e0913bf6ee9d96d103b5a` produced this exact-source
-preparation evidence:
+Tagged commit `9b61b27e670b12bd16a072e0e8c61121dc89c13f` produced the published assets:
 
 - 15 hosted CI jobs passed on macOS, Linux, and Windows for Python 3.10 through 3.13, including the
   native Windows compile and synthetic validator smoke;
 - source-bound Python wheel and source distributions passed exact membership, content, metadata,
   clean-install, dependency, command-help, and privacy checks;
-- the local arm64 app passed exact architecture, sandbox entitlement, deep signature, native
-  license, packaged-helper synthetic preflight, privacy, launch, and clean-quit checks; and
-- all eight public v0.2.0 assets were downloaded again and passed checksums, Developer ID signature,
-  notarization ticket, Gatekeeper, architecture, version, and privacy checks.
-
-The diagnostics and release-documentation change set then passed 465 local Python tests
-with 13 expected platform-specific skips, 122 debug Swift tests, Ruff, formatting, shell syntax,
-Python helper compilation, and Git diff checks. These local results do not extend the earlier
-hosted or source-package evidence to the changed bytes.
-
-This is preparation evidence only. The final tagged commit must rerun every applicable gate after
-all release changes are merged.
+- the arm64 and x86_64 apps and packaged helpers passed exact architecture, sandbox entitlement,
+  deep signature, native-license, synthetic protocol, privacy, notarization, stapling, and
+  Gatekeeper checks;
+- both DMGs passed their own Developer ID signing, notarization, stapling, Gatekeeper, mounted-image,
+  link-containment, manifest, and checksum checks; and
+- all eight draft assets were downloaded into a fresh directory and matched the verified originals
+  byte for byte before publication. The downloaded Mac and Python artifacts then repeated their
+  source, privacy, checksum, signature, ticket, Gatekeeper, manifest, and link-containment checks.
 
 ## Alpha confidence by route
 
