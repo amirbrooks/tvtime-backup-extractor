@@ -11,6 +11,7 @@ import tempfile
 import threading
 import types
 import unittest
+from ctypes import wintypes
 from pathlib import Path
 from unittest import mock
 
@@ -340,6 +341,41 @@ class WindowsNativeUnitTests(unittest.TestCase):
         )
         self.assertFalse(share_access & windows_native.FILE_SHARE_DELETE)
 
+    def test_acl_repair_directory_open_requests_only_acl_write_access(self) -> None:
+        directory_information = windows_native.WindowsHandleInformation(
+            attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
+            identity=(7, 11),
+            byte_size=0,
+            last_write_time=19,
+        )
+        with (
+            mock.patch.object(
+                windows_native,
+                "_nt_create_relative",
+                return_value=(101, windows_native.FILE_OPENED),
+            ) as create,
+            mock.patch.object(
+                windows_native,
+                "handle_information",
+                return_value=directory_information,
+            ),
+        ):
+            self.assertEqual(
+                windows_native.open_relative_retained_directory(
+                    99,
+                    "Synthetic",
+                    writable=False,
+                    acl_repair=True,
+                ),
+                101,
+            )
+
+        desired_access = create.call_args.kwargs["desired_access"]
+        self.assertTrue(desired_access & windows_native.WRITE_DAC)
+        self.assertFalse(desired_access & windows_native.FILE_ADD_FILE)
+        self.assertFalse(desired_access & windows_native.FILE_ADD_SUBDIRECTORY)
+        self.assertFalse(desired_access & windows_native.FILE_WRITE_ATTRIBUTES)
+
     def test_existing_output_is_validated_before_held_handle_truncation(self) -> None:
         information = windows_native.WindowsHandleInformation(
             attributes=windows_native.FILE_ATTRIBUTE_NORMAL,
@@ -665,6 +701,43 @@ class WindowsNativeUnitTests(unittest.TestCase):
             create.call_args.kwargs["share_access"],
             windows_native.FILE_SHARE_READ | windows_native.FILE_SHARE_WRITE,
         )
+
+    def test_private_acl_replaces_acl_through_the_pinned_handle(self) -> None:
+        advapi32 = mock.Mock()
+
+        def provide_dacl(
+            _descriptor: object,
+            present: object,
+            dacl: object,
+            _defaulted: object,
+        ) -> bool:
+            ctypes.cast(present, ctypes.POINTER(wintypes.BOOL))[0] = wintypes.BOOL(True)
+            ctypes.cast(dacl, ctypes.POINTER(wintypes.LPVOID))[0] = wintypes.LPVOID(302)
+            return True
+
+        advapi32.GetSecurityDescriptorDacl.side_effect = provide_dacl
+        advapi32.SetSecurityInfo.return_value = 0
+        with (
+            mock.patch.object(windows_native, "_dll", return_value=advapi32),
+            mock.patch.object(
+                windows_native,
+                "private_security_descriptor",
+                return_value=contextlib.nullcontext(wintypes.LPVOID(301)),
+            ),
+            mock.patch.object(windows_native, "validate_private_acl") as validate_acl,
+        ):
+            windows_native.apply_private_acl(101)
+
+        arguments = advapi32.SetSecurityInfo.call_args.args
+        self.assertEqual(arguments[0].value, 101)
+        self.assertEqual(arguments[1], windows_native.SE_FILE_OBJECT)
+        self.assertEqual(
+            arguments[2],
+            windows_native.DACL_SECURITY_INFORMATION
+            | windows_native.PROTECTED_DACL_SECURITY_INFORMATION,
+        )
+        self.assertEqual(arguments[5].value, 302)
+        validate_acl.assert_called_once_with(101)
 
     def test_every_relative_open_closes_when_immediate_handle_inspection_fails(self) -> None:
         cases = (

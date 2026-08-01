@@ -27,6 +27,7 @@ from tvtime_extractor.safety import (
     _WINDOWS_FILE_SHARE_WRITE,
     _WINDOWS_GENERIC_READ,
     _WINDOWS_READ_CONTROL,
+    _WINDOWS_WRITE_DAC,
     MAXIMUM_WINDOWS_RETAINED_DESCENDANT_DIRECTORIES,
     _casefolded_path,
     _open_bound_fresh_output_root,
@@ -560,6 +561,23 @@ class WindowsDirectoryHandleContractTests(unittest.TestCase):
             _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS,
         )
         self.assertFalse(int(kernel32.create_calls[0][2]) & _WINDOWS_FILE_SHARE_DELETE)
+
+    def test_acl_repair_directory_handle_requests_only_acl_write_access(self) -> None:
+        kernel32 = self._Kernel32()
+        with (
+            mock.patch("tvtime_extractor.safety._running_on_windows", return_value=True),
+            mock.patch("tvtime_extractor.safety._windows_kernel32", return_value=kernel32),
+        ):
+            handle, _identity = _windows_open_locked_directory(
+                Path("C:/Synthetic/Private"),
+                allow_acl_repair=True,
+            )
+            _windows_close_handle(handle)
+
+        desired_access = int(kernel32.create_calls[0][1])
+        self.assertTrue(desired_access & _WINDOWS_WRITE_DAC)
+        self.assertFalse(desired_access & _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS)
+        self.assertFalse(desired_access & _WINDOWS_DELETE)
 
     def test_promotion_capable_directory_handle_requests_delete_access_once(self) -> None:
         kernel32 = self._Kernel32()

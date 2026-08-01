@@ -67,6 +67,7 @@ _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_GENERIC_WRITE = 0x40000000
 _WINDOWS_DELETE = 0x00010000
 _WINDOWS_READ_CONTROL = 0x00020000
+_WINDOWS_WRITE_DAC = 0x00040000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -846,15 +847,21 @@ def _windows_pinned_absolute_directory_handle(
     path: Path,
     *,
     writable: bool = False,
+    acl_repair: bool = False,
 ) -> Iterator[int]:
     if not path.is_absolute() or not path.anchor or path.anchor.startswith(("\\\\", "//")):
         raise UnsafePathError("A Windows recovery source path was invalid.")
+    if writable and acl_repair:
+        raise ValueError(
+            "A Windows directory capability cannot combine data writes with ACL repair."
+        )
     root_handle = -1
     directory_handle = -1
     try:
         root_handle, _identity = _windows_open_locked_directory(
             Path(path.anchor),
             allow_child_creation=writable and len(path.parts) == 1,
+            allow_acl_repair=acl_repair and len(path.parts) == 1,
         )
         if len(path.parts) == 1:
             yield root_handle
@@ -866,11 +873,19 @@ def _windows_pinned_absolute_directory_handle(
             if not entry.is_directory:
                 raise UnsafePathError("A directory tree contained an unsafe directory.")
             try:
-                directory_handle = _windows_native.open_relative_retained_directory(
-                    parent_handle,
-                    entry.name,
-                    writable=writable,
-                )
+                if acl_repair:
+                    directory_handle = _windows_native.open_relative_retained_directory(
+                        parent_handle,
+                        entry.name,
+                        writable=False,
+                        acl_repair=True,
+                    )
+                else:
+                    directory_handle = _windows_native.open_relative_retained_directory(
+                        parent_handle,
+                        entry.name,
+                        writable=writable,
+                    )
             except _windows_native.WindowsNativeError as exc:
                 raise UnsafePathError("A directory tree could not be opened safely.") from exc
             identity = _windows_directory_identity(directory_handle)
@@ -1108,6 +1123,7 @@ def _windows_create_file_directory_handle(
     *,
     allow_rename: bool = False,
     allow_child_creation: bool = False,
+    allow_acl_repair: bool = False,
     share_delete: bool = False,
 ) -> int:
     """Open one directory while deliberately denying delete/rename sharing."""
@@ -1140,6 +1156,8 @@ def _windows_create_file_directory_handle(
             desired_access |= _WINDOWS_DELETE
         if allow_child_creation:
             desired_access |= _WINDOWS_DIRECTORY_CHILD_CREATION_ACCESS
+        if allow_acl_repair:
+            desired_access |= _WINDOWS_WRITE_DAC
         opened = create_file(
             os.fspath(path),
             desired_access,
@@ -1653,17 +1671,29 @@ def _windows_require_private_acl(handle: int) -> None:
         raise UnsafePathError("A private Windows recovery artifact was not owner-only.") from exc
 
 
+def _windows_apply_private_directory_acl(path: Path) -> None:
+    """Apply and verify the private DACL through the directory's pinned handle."""
+
+    try:
+        with _windows_pinned_absolute_directory_handle(path, acl_repair=True) as handle:
+            _windows_native.apply_private_acl(handle)
+    except _windows_native.WindowsNativeError as exc:
+        raise UnsafePathError("A private Windows recovery directory could not be secured.") from exc
+
+
 def _windows_open_locked_directory(
     path: Path,
     *,
     allow_rename: bool = False,
     allow_child_creation: bool = False,
+    allow_acl_repair: bool = False,
     share_delete: bool = False,
 ) -> tuple[int, tuple[int, int]]:
     handle = _windows_create_file_directory_handle(
         path,
         allow_rename=allow_rename,
         allow_child_creation=allow_child_creation,
+        allow_acl_repair=allow_acl_repair,
         share_delete=share_delete,
     )
     try:
@@ -3020,6 +3050,7 @@ def secure_directory(path: Path) -> Path:
     if not missing:
         _harden_private_path(resolved, expected_type=stat.S_IFDIR, mode=0o700)
         if _running_on_windows():
+            _windows_apply_private_directory_acl(resolved)
             _windows_hold_bound_descendant_directory(resolved)
         return resolved
 
@@ -3033,6 +3064,7 @@ def secure_directory(path: Path) -> Path:
             directory.mkdir(mode=0o700)
         _harden_private_path(directory, expected_type=stat.S_IFDIR, mode=0o700)
         if _running_on_windows():
+            _windows_apply_private_directory_acl(directory)
             _windows_hold_bound_descendant_directory(directory)
     return resolved
 

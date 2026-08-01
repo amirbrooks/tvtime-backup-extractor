@@ -261,6 +261,7 @@ FILE_RENAME_INFO_CLASS = 3
 SE_FILE_OBJECT = 1
 DACL_SECURITY_INFORMATION = 0x00000004
 OWNER_SECURITY_INFORMATION = 0x00000001
+PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 ACL_SIZE_INFORMATION_CLASS = 2
 SE_DACL_PROTECTED = 0x1000
 ACCESS_ALLOWED_ACE_TYPE = 0x00
@@ -657,6 +658,63 @@ def private_security_descriptor() -> Iterator[wintypes.LPVOID]:
             local_free(descriptor)
 
 
+def apply_private_acl(handle: int) -> None:
+    """Replace a pinned directory's DACL with the private descriptor's DACL."""
+
+    if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
+        raise WindowsNativeError("A Windows capability handle was invalid.")
+    advapi32 = _dll("advapi32")
+    get_dacl = advapi32.GetSecurityDescriptorDacl
+    get_dacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_dacl.restype = wintypes.BOOL
+    set_security = advapi32.SetSecurityInfo
+    set_security.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    set_security.restype = wintypes.DWORD
+    with private_security_descriptor() as descriptor:
+        dacl_present = wintypes.BOOL()
+        dacl = wintypes.LPVOID()
+        dacl_defaulted = wintypes.BOOL()
+        if not get_dacl(
+            descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise _last_error("Private Windows access controls could not be prepared.")
+        if not dacl_present.value or not dacl:
+            raise WindowsNativeError("A private Windows access-control list was missing.")
+        result = int(
+            set_security(
+                wintypes.HANDLE(handle),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                dacl,
+                None,
+            )
+        )
+        if result:
+            raise WindowsNativeError(
+                "Private Windows access controls could not be applied.",
+                winerror=result,
+            )
+    validate_private_acl(handle)
+
+
 def _sid_string(sid: wintypes.LPVOID) -> str:
     if not sid:
         raise WindowsNativeError("A private Windows access-control identity was missing.")
@@ -909,13 +967,20 @@ def _open_relative_directory(
     name: str,
     *,
     writable: bool,
+    acl_repair: bool,
     share_delete: bool,
 ) -> int:
+    if writable and acl_repair:
+        raise ValueError(
+            "A Windows directory capability cannot combine data writes with ACL repair."
+        )
     desired = (
         FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
     )
     if writable:
         desired |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_ATTRIBUTES | WRITE_DAC
+    elif acl_repair:
+        desired |= WRITE_DAC
     share_access = FILE_SHARE_READ | FILE_SHARE_WRITE
     if share_delete:
         share_access |= FILE_SHARE_DELETE
@@ -951,17 +1016,25 @@ def open_relative_directory(parent_handle: int, name: str, *, writable: bool) ->
         parent_handle,
         name,
         writable=writable,
+        acl_repair=False,
         share_delete=True,
     )
 
 
-def open_relative_retained_directory(parent_handle: int, name: str, *, writable: bool) -> int:
+def open_relative_retained_directory(
+    parent_handle: int,
+    name: str,
+    *,
+    writable: bool,
+    acl_repair: bool = False,
+) -> int:
     """Open and pin a final directory against rename or replacement."""
 
     return _open_relative_directory(
         parent_handle,
         name,
         writable=writable,
+        acl_repair=acl_repair,
         share_delete=False,
     )
 
