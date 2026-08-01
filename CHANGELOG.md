@@ -2,11 +2,14 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
-## Unreleased private cross-platform candidate — 0.3.0 alpha
+## Unreleased prerelease candidate: v0.3.0-alpha.1
 
-This is experimental Android/Windows capability work. It remains private and
-unreleased: successful synthetic checks do not replace the required Windows
-device, UI, packaging, and source-bound release validation.
+This is the planned first alpha for the 0.3.0 cross-platform work. It remains unpublished:
+successful synthetic checks do not replace the required Windows device, UI, packaging, and
+source-bound release validation.
+
+See the [v0.3.0-alpha.1 release preparation record](docs/release-v0.3.0-alpha.1.md) for completed
+evidence and remaining native gates.
 
 - Added native source-neutral recovery for legacy Android backup containers, preserved Android
   database snapshots, and official TV Time export ZIP/CSV files. These lanes reuse the normalized
@@ -50,8 +53,8 @@ device, UI, packaging, and source-bound release validation.
   still requires a synthetic Windows UI smoke test before it is considered release-ready.
 - Preserved recovered TVDB IDs, rewatch counts, aggregate series progress, and episode-special flags
   in normalized tables.
-- This candidate is local and private. It has not been tagged, uploaded, published, or represented
-  as a successor release to v0.2.0.
+- This prerelease candidate has not been tagged, uploaded, or published. v0.2.0 remains the current
+  stable release.
 
 ## 0.2.0 - 2026-07-20
 

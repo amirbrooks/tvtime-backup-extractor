@@ -152,6 +152,7 @@ def main() -> int:
         },
         "application": {
             "bundle_identifier": info["CFBundleIdentifier"],
+            "release_version": info["TVTimeReleaseVersion"],
             "short_version": info["CFBundleShortVersionString"],
             "bundle_version": info["CFBundleVersion"],
             "architecture": arguments.architecture,

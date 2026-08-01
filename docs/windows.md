@@ -1,10 +1,10 @@
 # Windows guide
 
-Public v0.2.0 contains no Windows app. This checkout contains an unpublished private x64 WinUI 3
-candidate for Windows 10 version 1809 or later. It can recover a supported Android source or an
-official TV Time export without uploading anything. On Windows 11 x64, it also contains a candidate
-encrypted iOS recovery route. The route is merged as private candidate code, but it remains
-unverified until a real Windows build and synthetic end-to-end smoke test confirm it.
+Public v0.2.0 contains no Windows app. This checkout contains the unpublished v0.3.0-alpha.1 x64
+WinUI 3 candidate for Windows 10 version 1809 or later. It can recover a supported Android source or
+an official TV Time export without uploading anything. On Windows 11 x64, it also contains a
+candidate encrypted iOS recovery route. The route remains unverified until a real Windows build and
+synthetic end-to-end smoke test confirm it.
 
 ## Security model
 

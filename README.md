@@ -12,8 +12,12 @@ backup, contact TV Time, restore data to the app, or provide an official cloud-a
 > with separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and Intel, plus
 > verified Python wheel and source packages. Download only from the official release and verify the
 > DMG against `SHA256SUMS`. Version 0.2.0 includes the complete Markdown catalogue, shared offline
-> HTML/PDF views, and native macOS recovery experience. This checkout also contains an unpublished
-> private cross-platform candidate. Its Windows and Android changes are not part of public v0.2.0.
+> HTML/PDF views, and native macOS recovery experience. This checkout also contains the unpublished
+> v0.3.0-alpha.1 prerelease candidate. Its Windows and Android changes are not part of public
+> v0.2.0.
+
+The [v0.3.0-alpha.1 release preparation record](docs/release-v0.3.0-alpha.1.md) tracks completed
+evidence and the native checks still required before publication.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
