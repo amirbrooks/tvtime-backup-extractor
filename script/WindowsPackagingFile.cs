@@ -112,15 +112,26 @@ namespace TVTimeWindowsPackaging
                 SafeFileHandle parent = trustedRoot;
                 for (int index = 0; index < parts.Length - 1; index++)
                 {
-                    SafeFileHandle directory = OpenRelativePinned(
-                        parent,
-                        parts[index],
-                        FileListDirectory | FileTraverse | FileReadAttributes | Synchronize,
-                        FileShareRead | FileShareWrite,
-                        FileDirectoryFile | FileSynchronousIoNonAlert | FileOpenReparsePoint);
-                    RequireOrdinaryDirectory(directory);
-                    ancestors.Add(directory);
-                    parent = directory;
+                    SafeFileHandle directory = null;
+                    try
+                    {
+                        directory = OpenRelativePinned(
+                            parent,
+                            parts[index],
+                            FileListDirectory | FileTraverse | FileReadAttributes | Synchronize,
+                            FileShareRead | FileShareWrite,
+                            FileDirectoryFile | FileSynchronousIoNonAlert | FileOpenReparsePoint);
+                        RequireOrdinaryDirectory(directory);
+                        ancestors.Add(directory);
+                        parent = directory;
+                        directory = null;
+                    }
+                    finally
+                    {
+                        // Rejecting a junction before it becomes an owned ancestor
+                        // must not retain its handle and block later cleanup.
+                        if (directory != null) directory.Dispose();
+                    }
                 }
 
                 file = OpenRelativePinned(
