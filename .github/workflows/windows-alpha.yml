@@ -1,0 +1,137 @@
+name: Windows alpha package
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-alpha.yml"
+      - "global.json"
+      - "LICENSE"
+      - "MANIFEST.in"
+      - "pyproject.toml"
+      - "README.md"
+      - "requirements*.lock"
+      - "macos/Bundle/AppIcon-1024.png"
+      - "script/**"
+      - "scripts/**"
+      - "tests/**"
+      - "tvtime_extractor/**"
+      - "windows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  RELEASE_VERSION: "0.3.1-alpha.1"
+
+jobs:
+  package:
+    name: Build, install, and launch Windows x64 alpha
+    runs-on: windows-latest
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Set up pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13.12"
+      - name: Set up pinned .NET SDK
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: "8.0.423"
+      - name: Parse-check Windows packaging scripts
+        shell: powershell
+        run: |
+          Get-ChildItem .\script -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -ne 0) {
+              throw "A Windows packaging script failed to parse."
+            }
+          }
+      - name: Build the source-bound Windows alpha
+        shell: powershell
+        run: |
+          .\script\build_windows_release.ps1 `
+            -SourceCommit $env:SOURCE_COMMIT `
+            -ReleaseVersion $env:RELEASE_VERSION `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP "windows-alpha-release") `
+            -Python (Get-Command python).Source
+      - name: Install and launch-smoke the packaged app
+        shell: powershell
+        run: |
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "windows-alpha-release"
+          $bundleRoot = Get-ChildItem -LiteralPath $releaseRoot -Directory
+          if (@($bundleRoot).Count -ne 1) {
+            throw "The Windows alpha build did not produce one expanded bundle."
+          }
+          & (Join-Path $bundleRoot.FullName "Install-Windows-Alpha.ps1") `
+            -AcceptCertificateTrust -NonInteractive
+          $package = @(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha")
+          if ($package.Count -ne 1) {
+            throw "The Windows alpha package was not installed exactly once."
+          }
+          Start-Process explorer.exe `
+            "shell:AppsFolder\$($package[0].PackageFamilyName)!App"
+          $process = $null
+          for ($attempt = 0; $attempt -lt 30 -and $null -eq $process; $attempt++) {
+            Start-Sleep -Milliseconds 500
+            $process = Get-Process -Name "TVTimeRecovery.Windows" -ErrorAction SilentlyContinue
+          }
+          if ($null -eq $process) {
+            throw "The installed Windows alpha did not remain running for launch smoke."
+          }
+          $process | Stop-Process -Force
+      - name: Remove the Windows alpha and certificate
+        if: always()
+        shell: powershell
+        run: |
+          Get-Process -Name "TVTimeRecovery.Windows" -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "windows-alpha-release"
+          if (-not (Test-Path -LiteralPath $releaseRoot -PathType Container)) { return }
+          $bundleRoot = @(Get-ChildItem -LiteralPath $releaseRoot -Directory)
+          if ($bundleRoot.Count -eq 0) { return }
+          if ($bundleRoot.Count -ne 1) {
+            throw "Windows alpha cleanup found ambiguous release state."
+          }
+          & (Join-Path $bundleRoot[0].FullName "Uninstall-Windows-Alpha.ps1") `
+            -ConfirmRemoval -NonInteractive
+          if (@(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha").Count -ne 0) {
+            throw "The Windows alpha package remained installed after cleanup."
+          }
+      - name: Reverify the downloadable ZIP
+        shell: powershell
+        run: |
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "windows-alpha-release"
+          $bundle = Get-ChildItem -LiteralPath $releaseRoot -File -Filter *.zip
+          if (@($bundle).Count -ne 1) {
+            throw "The Windows alpha build did not produce one ZIP."
+          }
+          $tree = (git rev-parse "$env:SOURCE_COMMIT^{tree}").Trim()
+          python -I .\script\verify_windows_release.py `
+            --bundle $bundle.FullName `
+            --release-version $env:RELEASE_VERSION `
+            --source-commit $env:SOURCE_COMMIT `
+            --source-tree $tree
+      - name: Upload the exact Windows tester artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-alpha-${{ env.SOURCE_COMMIT }}
+          path: |
+            ${{ runner.temp }}/windows-alpha-release/*.zip
+            ${{ runner.temp }}/windows-alpha-release/windows-release-manifest.json
+            ${{ runner.temp }}/windows-alpha-release/SHA256SUMS-Windows
+          if-no-files-found: error
+          retention-days: 14

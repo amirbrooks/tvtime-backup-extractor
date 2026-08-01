@@ -30,7 +30,13 @@ BUILD_ONLY_NUGET_PACKAGES = {
     ("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948"),
 }
 REVIEWED_CPYTHON_VERSION = "3.13.12"
-PRIVATE_WINDOWS_VERSION = "0.3.0-alpha.1"
+PRIVATE_WINDOWS_VERSION = "0.3.1-alpha.1"
+DOTNET_SDK_VERSION = "8.0.423"
+DOTNET_RUNTIME_PACKAGE = (
+    "Microsoft.NETCore.App.Runtime.win-x64",
+    "8.0.29",
+    "XBQUNw6xNOTWm+vblnnpxpPYJOm1eYzSjJpk5wlHvodNU5JXmX5dxffRz8qvqkO4rU5UzN8oruz63yrvP5oHEQ==",
+)
 MAXIMUM_NOTICE_BYTES = 4 * 1024 * 1024
 MAXIMUM_NUGET_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?$")
@@ -390,6 +396,84 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
     return components
 
 
+def _collect_dotnet_runtime(
+    root: Path,
+    nuget_root: Path,
+) -> dict[str, object]:
+    name, version, expected_hash = DOTNET_RUNTIME_PACKAGE
+    package_root = nuget_root / name.casefold() / version
+    sha_files = list(package_root.glob("*.nupkg.sha512"))
+    packages = list(package_root.glob("*.nupkg"))
+    metadata_files = list(package_root.glob(".nupkg.metadata"))
+    if len(sha_files) != 1 or len(packages) != 1 or len(metadata_files) != 1:
+        raise RuntimeError("The pinned .NET runtime package was unavailable.")
+    package_hash = _regular_bytes(sha_files[0]).decode("ascii").strip()
+    if package_hash != expected_hash or _sha512_base64(packages[0]) != expected_hash:
+        raise RuntimeError("The .NET runtime package did not match its reviewed hash.")
+    package_metadata = json.loads(_regular_bytes(metadata_files[0]).decode("utf-8"))
+    if package_metadata.get("contentHash") != expected_hash:
+        raise RuntimeError("The .NET runtime package metadata did not match its reviewed hash.")
+    _validate_expanded_nuget_package(package_root, packages[0])
+    license_type, license_value = _nuspec_license(package_root)
+    if license_type != "expression" or license_value != "MIT":
+        raise RuntimeError("The .NET runtime package license declaration changed.")
+
+    runtime_license = package_root / "LICENSE.TXT"
+    runtime_notices = package_root / "THIRD-PARTY-NOTICES.TXT"
+    bindings = [
+        _write_bound_file(
+            root,
+            PurePosixPath("dotnet", "runtime-license-expression.txt"),
+            b"MIT\n",
+        ),
+        _write_bound_file(
+            root,
+            PurePosixPath("dotnet", "LICENSE.txt"),
+            _regular_bytes(runtime_license),
+        ),
+        _write_bound_file(
+            root,
+            PurePosixPath("dotnet", "ThirdPartyNotices.txt"),
+            _regular_bytes(runtime_notices),
+        ),
+    ]
+    return {
+        "ecosystem": "dotnet-runtime",
+        "name": name,
+        "version": version,
+        "content_hash": expected_hash,
+        "sdk_version": DOTNET_SDK_VERSION,
+        "files": bindings,
+    }
+
+
+def _candidate_scope(
+    source_commit: str | None,
+    source_tree: str | None,
+) -> dict[str, object]:
+    source_bound = bool(source_commit and source_tree)
+    if bool(source_commit) != bool(source_tree):
+        raise RuntimeError("Windows release source binding must name both commit and tree.")
+    if source_bound and (
+        re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+        or re.fullmatch(r"[0-9a-f]{40}", source_tree) is None
+    ):
+        raise RuntimeError("Windows release source binding was invalid.")
+    known_release_gaps = ["final-msix-binary-to-component-inventory"]
+    if not source_bound:
+        known_release_gaps.append("immutable-reviewed-source-staging")
+    return {
+        "distribution_status": (
+            "public-experimental-alpha" if source_bound else "private-unreleased"
+        ),
+        "final_msix_inventory_complete": False,
+        "source_commit_bound": source_bound,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "known_release_gaps": known_release_gaps,
+    }
+
+
 def collect(args: argparse.Namespace) -> None:
     output = args.output.absolute()
     try:
@@ -433,6 +517,7 @@ def collect(args: argparse.Namespace) -> None:
         }
     )
     components.extend(_collect_nuget(output, args.nuget_lock, args.nuget_root))
+    components.append(_collect_dotnet_runtime(output, args.nuget_root))
     project_notices = (
         ("Project-LICENSE", args.project_license),
         ("THIRD_PARTY_NOTICES", args.notice),
@@ -454,15 +539,7 @@ def collect(args: argparse.Namespace) -> None:
         )
     manifest = {
         "schema_version": 1,
-        "candidate_scope": {
-            "distribution_status": "private-unreleased",
-            "final_msix_inventory_complete": False,
-            "source_commit_bound": False,
-            "known_release_gaps": [
-                "self-contained-dotnet-runtime-pack",
-                "immutable-reviewed-source-staging",
-            ],
-        },
+        "candidate_scope": _candidate_scope(args.source_commit, args.source_tree),
         "components": components,
     }
     encoded = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -476,6 +553,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--nuget-root", type=Path, required=True)
     result.add_argument("--project-license", type=Path, required=True)
     result.add_argument("--notice", type=Path, required=True)
+    result.add_argument("--source-commit")
+    result.add_argument("--source-tree")
     return result
 
 

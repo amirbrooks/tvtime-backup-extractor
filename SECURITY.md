@@ -5,8 +5,9 @@
 The current supported release is
 [v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0). Its
 architecture-specific macOS DMGs are Developer ID signed, notarized, stapled, and published through
-the official GitHub release. The current 0.3.0-alpha.1 source is an unpublished alpha. Locally built
-ad-hoc app bundles receive best-effort development support and must not be redistributed.
+the official GitHub release. The current `v0.3.1-alpha.1` source is an unpublished prerelease
+candidate. Locally built artifacts receive best-effort development support and must not be shared
+as official downloads.
 
 ## Report a vulnerability
 
@@ -59,6 +60,11 @@ A public macOS artifact must be architecture-specific, Developer ID signed, nota
 Gatekeeper assessed, privacy scanned, license-complete, and checksum-covered. Until the project
 publishes such artifacts through its official release channel, treat every downloadable app bundle
 as unofficial. Do not bypass macOS trust controls to run one.
+
+A public Windows alpha must come from one reviewed Git commit, bind the final MSIX and every bundled
+file to exact checksums, include bound runtime and dependency notices, and pass hosted install,
+launch, signature, privacy, and package-membership checks. Its self-signed public certificate must
+be limited to the alpha bundle and must never include or expose the signing private key.
 
 The contributor-only ad-hoc build uses a separate helper entitlement profile with library validation
 disabled because ad-hoc nested code has no shared Developer Team ID. This exception exists only in

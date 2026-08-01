@@ -93,6 +93,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("<WindowsAppSDKSelfContained>true", project)
         self.assertIn("<RestorePackagesWithLockFile>true", project)
         self.assertIn("<RestoreLockedMode>true", project)
+        self.assertIn("<TVTimeGeneratedContentRoot", project)
+        self.assertIn("$(TVTimeGeneratedContentRoot)\\Helpers", project)
         self.assertIn("<DebugType>none</DebugType>", project)
         self.assertIn("<DebugSymbols>false</DebugSymbols>", project)
         self.assertIn("<DisableXbfLineInfo>true</DisableXbfLineInfo>", project)
@@ -101,6 +103,49 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertEqual(capabilities, ["runFullTrust"])
         self.assertNotIn("internetClient", manifest)
         self.assertNotIn("broadFileSystemAccess", manifest)
+
+    def test_windows_release_keeps_generated_build_content_outside_source(self) -> None:
+        builder = self.read("script/build_windows_app.ps1")
+        for generated_name in ("Helpers", "Assets", "Notices"):
+            self.assertIn(f'Join-Path $generatedContentRoot "{generated_name}"', builder)
+        for generated_name in ("obj", "bin"):
+            self.assertIn(f'Join-Path $OutputRoot "{generated_name}"', builder)
+        for property_name in (
+            "TVTimeGeneratedContentRoot",
+            "BaseIntermediateOutputPath",
+            "MSBuildProjectExtensionsPath",
+            "BaseOutputPath",
+        ):
+            self.assertIn(f"/p:{property_name}=", builder)
+
+    def test_alpha_installers_pin_trust_helper_across_elevation(self) -> None:
+        installer = self.read("script/install_windows_alpha.ps1")
+        uninstaller = self.read("script/uninstall_windows_alpha.ps1")
+        for source in (installer, uninstaller):
+            self.assertIn("[IO.FileShare]::None", source)
+            self.assertIn("ComputeHash(", source)
+            self.assertIn("[IO.StreamReader]::new(", source)
+        self.assertIn("-TrustHelperPin $trustHelperPin", installer)
+        self.assertNotIn("ReadAllText($TrustHelper", installer)
+        self.assertNotIn("ReadAllText($helperPath", uninstaller)
+
+    def test_machine_certificate_is_retained_for_other_windows_users(self) -> None:
+        trust_helper = self.read("script/windows_certificate_trust.ps1")
+        installer = self.read("script/install_windows_alpha.ps1")
+        uninstaller = self.read("script/uninstall_windows_alpha.ps1")
+        self.assertIn("Get-AppxPackage `", trust_helper)
+        self.assertIn("-AllUsers -Name $packageIdentity", trust_helper)
+        self.assertIn("$_.PackageFullName -ceq $PackageFullName", trust_helper)
+        self.assertIn('$_.Version -eq [Version]"0.3.1.1"', trust_helper)
+        self.assertIn('[string]$_.Architecture -ceq "X64"', trust_helper)
+        self.assertIn("return 11", trust_helper)
+        self.assertIn("$process.ExitCode -in @(0, 11)", installer)
+        self.assertIn("$process.ExitCode -eq 11", uninstaller)
+        self.assertIn('-PackageFullName "$removedPackageFullName"', uninstaller)
+        self.assertIn(
+            "another Windows user still has the same release package installed",
+            uninstaller,
+        )
 
     def test_windows_app_sdk_nuget_dependencies_are_exactly_pinned(self) -> None:
         project = self.read("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj")
@@ -739,20 +784,59 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("missing MSIX path was created", msix_test)
         self.assertIn("missing MSIX ancestor was created", msix_test)
 
-    def test_private_windows_manifest_discloses_unbound_release_inputs(self) -> None:
+    def test_windows_release_manifest_binds_runtime_and_reviewed_source(self) -> None:
         collector = self.read("script/collect_windows_licenses.py")
         guide = self.read("docs/windows.md")
         notices = self.read("windows/THIRD_PARTY_NOTICES.md")
-        for marker in (
-            "self-contained-dotnet-runtime-pack",
-            "immutable-reviewed-source-staging",
-        ):
-            self.assertIn(marker, collector)
+        self.assertIn("DOTNET_RUNTIME_PACKAGE", collector)
         self.assertIn('"final_msix_inventory_complete": False', collector)
-        self.assertIn('"source_commit_bound": False', collector)
-        self.assertIn("SDK-resolved self-contained .NET runtime pack", guide)
-        self.assertIn("stage an immutable `git archive`", guide)
-        self.assertIn("manifest deliberately marks itself incomplete", notices)
+        self.assertIn('"final-msix-binary-to-component-inventory"', collector)
+        self.assertIn('"source_commit_bound": source_bound', collector)
+        self.assertIn('"public-experimental-alpha"', collector)
+        self.assertIn("verified Git archive", notices)
+        self.assertIn("self-contained runtime", notices)
+        self.assertIn("public alpha", guide)
+
+    def test_public_windows_alpha_build_is_source_bound_and_downloadable(self) -> None:
+        builder = self.read("script/build_windows_release.ps1")
+        installer = self.read("script/install_windows_alpha.ps1")
+        uninstaller = self.read("script/uninstall_windows_alpha.ps1")
+        manifest_generator = self.read("script/generate_windows_release_manifest.py")
+        verifier = self.read("script/verify_windows_release.py")
+        workflow = self.read(".github/workflows/windows-alpha.yml")
+        for required in (
+            "git_source_stage.py",
+            "SourceCommit",
+            "SourceTree",
+            "Open-PrivateMsixStrictReadPin",
+            "New-SelfSignedCertificate",
+            "verify_windows_release.py",
+            "scan_macos_release.py",
+        ):
+            self.assertIn(required, builder)
+        self.assertIn('$expectedSource = Join-Path $stageRoot "source"', builder)
+        self.assertIn("TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE", builder)
+        self.assertIn("git_source_stage.py", builder)
+        self.assertIn("& $stagedBuilder", builder)
+        self.assertIn("--remove --repository $checkoutRoot --source $source", builder)
+        self.assertIn("The Windows release checkout changed during the build", builder)
+        self.assertIn('"private_key_included": False', manifest_generator)
+        self.assertIn('"dependency_locks"', manifest_generator)
+        self.assertIn("AcceptCertificateTrust", installer)
+        self.assertIn("Assert-ExactBundleMembership", installer)
+        self.assertIn("Get-AuthenticodeSignature", installer)
+        self.assertIn("-DeleteKey", builder)
+        self.assertIn("verify_windows_signature.ps1", verifier)
+        self.assertIn("Add-AppxPackage", installer)
+        self.assertIn("can delete reports", uninstaller)
+        self.assertIn("Get-FileHash", uninstaller)
+        self.assertIn("Publisher -cne $expectedSubject", uninstaller)
+        self.assertIn("Remove-AppxPackage", uninstaller)
+        self.assertIn("FORBIDDEN_MSIX_NAME_TOKENS", verifier)
+        self.assertIn("ephemeral-self-signed-alpha", verifier)
+        self.assertIn("Build, install, and launch Windows x64 alpha", workflow)
+        self.assertIn("Upload the exact Windows tester artifacts", workflow)
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", workflow)
 
     def test_generated_private_build_paths_are_ignored(self) -> None:
         ignore = self.read(".gitignore")
@@ -785,27 +869,27 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / required).is_file())
 
-    def test_published_alpha_cannot_masquerade_as_stable_or_public_windows(self) -> None:
-        self.assertIn('version = "0.3.0a1"', self.read("pyproject.toml"))
-        self.assertIn('__version__ = "0.3.0a1"', self.read("tvtime_extractor/__init__.py"))
+    def test_v031_alpha_versions_are_explicit_on_every_platform(self) -> None:
+        self.assertIn('version = "0.3.1a1"', self.read("pyproject.toml"))
+        self.assertIn('__version__ = "0.3.1a1"', self.read("tvtime_extractor/__init__.py"))
         self.assertIn(
-            "<string>0.3.0</string>",
+            "<string>0.3.1</string>",
             self.read("macos/Bundle/Info.plist"),
         )
         self.assertIn(
-            "<string>0.3.0</string>",
+            "<string>0.3.1</string>",
             self.read("macos/Bundle/TVTimeHelper-Info.plist"),
         )
         self.assertIn(
-            "<string>0.3.0-alpha.1</string>",
+            "<string>0.3.1-alpha.1</string>",
             self.read("macos/Bundle/Info.plist"),
         )
         self.assertIn(
-            "<string>0.3.0-alpha.1</string>",
+            "<string>0.3.1-alpha.1</string>",
             self.read("macos/Bundle/TVTimeHelper-Info.plist"),
         )
         self.assertIn(
-            'Version="0.3.0.1"',
+            'Version="0.3.1.1"',
             self.read("windows/TVTimeRecovery.Windows/Package.appxmanifest"),
         )
         self.assertIn(
@@ -813,26 +897,18 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             self.read("windows/TVTimeRecovery.Windows/Package.appxmanifest"),
         )
         self.assertIn(
-            'PRIVATE_WINDOWS_VERSION = "0.3.0-alpha.1"',
+            'PRIVATE_WINDOWS_VERSION = "0.3.1-alpha.1"',
             self.read("script/collect_windows_licenses.py"),
         )
         release_builder = self.read("script/build_release_app.sh")
         self.assertIn("release-$RELEASE_VERSION-macos", release_builder)
         self.assertIn("$RELEASE_VERSION-macOS-$package_label.dmg", release_builder)
         changelog = self.read("CHANGELOG.md")
-        self.assertIn("## 0.3.0-alpha.1 - 2026-08-01", changelog)
-        self.assertIn("No MSIX is included", changelog)
+        self.assertIn("## 0.3.1-alpha.1 - Unreleased", changelog)
         self.assertRegex(changelog, r"v0\.2\.0 remains the latest stable\s+release")
-        release_record = self.read("docs/release-v0.3.0-alpha.1.md")
-        self.assertIn("This prerelease was published on 2026-08-01", release_record)
-        self.assertRegex(
-            release_record,
-            r"It does not include an MSIX or another\s+public Windows binary",
-        )
-        self.assertRegex(
-            release_record,
-            r"marks `v0\.3\.0-alpha\.1` as a prerelease, not\s+latest",
-        )
+        release_record = self.read("docs/release-v0.3.1-alpha.1.md")
+        self.assertIn("This prerelease is not published", release_record)
+        self.assertIn("downloadable Windows x64 tester bundle", release_record)
 
 
 if __name__ == "__main__":

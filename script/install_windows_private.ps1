@@ -21,7 +21,7 @@ function Invoke-LocalMachineCertificateTrust {
         throw "The private package certificate could not be passed to the trust helper."
     }
     $helperPath = Join-Path $PSScriptRoot "windows_certificate_trust.ps1"
-    $expectedTrustHelperSha256 = "BCC1A071014879565F1ECFB58FA92417E564B87E5C26E02DE6165DF3901FB10F"
+    $expectedTrustHelperSha256 = "1C3D46E7D89741D710661ACA5D695F8CF14FECB6957E8A06B800084EB9C99463"
     $helperBytes = [IO.File]::ReadAllBytes($helperPath)
     if ($helperBytes.Length -eq 0 -or $helperBytes.Length -gt 16KB) {
         throw "The private package certificate trust helper has invalid size."
@@ -79,7 +79,7 @@ exit `$result
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$installed = @(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Private" -ErrorAction Stop)
+$installed = @(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha" -ErrorAction Stop)
 if ($installed.Count -ne 0) {
     throw "The private package is already installed. Review retained private output before any manual uninstall or versioned update; this installer never removes app data."
 }
@@ -132,8 +132,8 @@ try {
         throw "The private MSIX payload changed after its build scan."
     }
 
-    $subject = "CN=TV Time Backup Extractor Private"
-    $friendlyName = "TV Time Recovery private local install"
+    $subject = "CN=TV Time Backup Extractor Alpha"
+    $friendlyName = "TV Time Recovery alpha local install"
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
     $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object {
         $candidate = $_

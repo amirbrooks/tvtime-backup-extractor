@@ -2,6 +2,26 @@
 
 All notable changes are documented here. The project follows semantic versioning.
 
+## 0.3.1-alpha.1 - Unreleased
+
+This candidate keeps v0.2.0 as the latest stable release and gives Windows testers a downloadable
+x64 app bundle. Windows, Android, and official-export recovery remain experimental.
+
+- Added a source-bound Windows alpha build from one verified Git archive.
+- Added a signed MSIX tester bundle with an exact public certificate, guarded installer and
+  uninstaller, release manifest, license notices, and checksums. The signing private key is never
+  included.
+- Added Windows hosted checks that build, install, launch-smoke, remove, and reverify the exact
+  candidate package.
+- Pinned the .NET SDK and self-contained runtime package, including exact runtime hashes, license
+  text, and third-party notices.
+- Added a final MSIX membership check that rejects AI, machine-learning, and WebView payload names.
+- Kept the app offline, retained the fixed Safe Diagnostics vocabulary, and preserved all existing
+  encrypted-backup, output, and filesystem safety checks.
+
+See the [v0.3.1-alpha.1 release record](docs/release-v0.3.1-alpha.1.md) for the release gates and
+tester limits.
+
 ## 0.3.0-alpha.1 - 2026-08-01
 
 This experimental GitHub prerelease is the first alpha for the 0.3.0 cross-platform work.

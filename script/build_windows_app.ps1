@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$OutputRoot = "",
+    [string]$Python = "py",
+    [string]$SourceCommit = "",
+    [string]$SourceTree = "",
     [switch]$ReturnBuildState
 )
 
@@ -16,10 +19,12 @@ $pythonExe = Join-Path $buildEnvironmentRoot "venv\Scripts\python.exe"
 $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
 $previousNugetPackages = $env:NUGET_PACKAGES
 $project = Join-Path $root "windows\TVTimeRecovery.Windows\TVTimeRecovery.Windows.csproj"
-$helperDestination = Join-Path (Split-Path $project) "Helpers"
-$assetDestination = Join-Path (Split-Path $project) "Assets"
-$noticeDestination = Join-Path (Split-Path $project) "Notices"
-$projectRoot = Split-Path $project
+$generatedContentRoot = Join-Path $OutputRoot "generated-content"
+$helperDestination = Join-Path $generatedContentRoot "Helpers"
+$assetDestination = Join-Path $generatedContentRoot "Assets"
+$noticeDestination = Join-Path $generatedContentRoot "Notices"
+$msbuildIntermediateRoot = (Join-Path $OutputRoot "obj") + [IO.Path]::DirectorySeparatorChar
+$msbuildBinaryRoot = (Join-Path $OutputRoot "bin") + [IO.Path]::DirectorySeparatorChar
 $helperDestinationOwnership = $null
 $assetDestinationOwnership = $null
 $noticeDestinationOwnership = $null
@@ -43,6 +48,7 @@ try {
     }
     $env:NUGET_PACKAGES = $nugetRoot
     $helperBuildState = & (Join-Path $PSScriptRoot "build_windows_helper.ps1") `
+        -Python $Python `
         -OutputRoot $OutputRoot `
         -BuildEnvironmentRoot $buildEnvironmentRoot `
         -PreserveBuildEnvironment `
@@ -71,7 +77,8 @@ try {
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $helperRootOwnership | Out-Null
     $helperDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $projectRoot -Candidate $helperDestination
+        -TrustedRoot $OutputRoot -Candidate $helperDestination `
+        -TrustedRootOwnership $outputRootOwnership
     $helperMembers = @(Get-ChildItem -LiteralPath $helperRoot -Force)
     foreach ($helperMember in $helperMembers) {
         Copy-Item -LiteralPath $helperMember.FullName `
@@ -83,7 +90,8 @@ try {
         throw "The copied Windows helper tree did not match its locked source manifest."
     }
     $assetDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $projectRoot -Candidate $assetDestination
+        -TrustedRoot $OutputRoot -Candidate $assetDestination `
+        -TrustedRootOwnership $outputRootOwnership
     Add-Type -AssemblyName System.Drawing
     $sourceIcon = [Drawing.Image]::FromFile((Join-Path $root "macos\Bundle\AppIcon-1024.png"))
     try {
@@ -120,7 +128,11 @@ try {
     $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
     if (-not $msbuild) { throw "MSBuild was not found." }
     & $msbuild $project /t:Restore /p:RuntimeIdentifier=win-x64 /p:RestoreLockedMode=true `
-        /p:RestorePackagesPath=$nugetRoot | Out-Host
+        /p:RestorePackagesPath=$nugetRoot `
+        /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
+        /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
+        /p:BaseOutputPath=$msbuildBinaryRoot | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The locked Windows dependency restore failed." }
     # Freeze the exact restored package graph before any validator consumes it.
     # Existing package bytes cannot be changed or replaced while the snapshot is
@@ -137,13 +149,25 @@ try {
     $noticeOutputOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $noticeStage -Candidate $noticeStageOutput `
         -TrustedRootOwnership $noticeStageOwnership
+    $dotnetVersion = (& dotnet --version).Trim()
+    if ($LASTEXITCODE -ne 0 -or $dotnetVersion -cne "8.0.423") {
+        throw "The pinned .NET SDK 8.0.423 is required for the Windows package."
+    }
+    $sourceBindingArguments = @()
+    if ($SourceCommit -or $SourceTree) {
+        $sourceBindingArguments = @(
+            "--source-commit", $SourceCommit,
+            "--source-tree", $SourceTree
+        )
+    }
     & $pythonExe -B -I `
         (Join-Path $root "script\collect_windows_licenses.py") `
         --output $noticeStageOutput `
         --nuget-lock (Join-Path (Split-Path $project) "packages.lock.json") `
         --nuget-root $nugetRoot `
         --project-license (Join-Path $root "LICENSE") `
-        --notice (Join-Path $root "windows\THIRD_PARTY_NOTICES.md") | Out-Host
+        --notice (Join-Path $root "windows\THIRD_PARTY_NOTICES.md") `
+        @sourceBindingArguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The private Windows license collection failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
         -OwnershipToken $nugetRootOwnership | Out-Null
@@ -151,7 +175,7 @@ try {
         -OwnershipToken $noticeOutputOwnership
     $noticeDestinationOwnership = Move-ContainedOrdinaryDirectory `
         -OwnershipToken $noticeOutputOwnership `
-        -DestinationTrustedRoot $projectRoot `
+        -DestinationTrustedRoot $OutputRoot `
         -Destination $noticeDestination
     $noticeOutputOwnership = $null
     $msixOutputDirectory = (Join-Path $OutputRoot "msix") + [IO.Path]::DirectorySeparatorChar
@@ -159,7 +183,12 @@ try {
     & $msbuild $project /m /p:Configuration=Release /p:Platform=x64 `
         /p:RuntimeIdentifier=win-x64 /p:GenerateAppxPackageOnBuild=true `
         /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never `
+        /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
+        /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
+        /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
+        /p:BaseOutputPath=$msbuildBinaryRoot `
         $appxPackageDirectoryArgument | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The private Windows MSIX build failed." }
     Assert-ContainedOrdinaryTreeSnapshot `

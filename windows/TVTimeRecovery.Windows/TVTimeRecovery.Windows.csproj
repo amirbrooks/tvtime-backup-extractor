@@ -16,6 +16,7 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
+    <RuntimeFrameworkVersion>8.0.29</RuntimeFrameworkVersion>
     <InvariantGlobalization>false</InvariantGlobalization>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
@@ -24,19 +25,25 @@
     <Deterministic>true</Deterministic>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode>true</RestoreLockedMode>
+    <TVTimeGeneratedContentRoot Condition="'$(TVTimeGeneratedContentRoot)' == ''">$(MSBuildProjectDirectory)</TVTimeGeneratedContentRoot>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="[10.0.26100.4948]" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Assets\*.png" Condition="Exists('Assets\StoreLogo.png')" />
-    <Content Include="Notices\**\*" Condition="Exists('Notices\MANIFEST.json')" />
+    <Content Include="$(TVTimeGeneratedContentRoot)\Assets\*.png" Condition="Exists('$(TVTimeGeneratedContentRoot)\Assets\StoreLogo.png')">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="$(TVTimeGeneratedContentRoot)\Notices\**\*" Condition="Exists('$(TVTimeGeneratedContentRoot)\Notices\MANIFEST.json')">
+      <Link>Notices\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
   </ItemGroup>
-  <ItemGroup Condition="Exists('Helpers\tvtime-helper.exe')">
-    <Content Include="Helpers\**\*">
+  <ItemGroup Condition="Exists('$(TVTimeGeneratedContentRoot)\Helpers\tvtime-helper.exe')">
+    <Content Include="$(TVTimeGeneratedContentRoot)\Helpers\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>%(Identity)</TargetPath>
+      <Link>Helpers\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <TargetPath>Helpers\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
     </Content>
   </ItemGroup>
 </Project>

@@ -1,10 +1,9 @@
 # Windows guide
 
-Public v0.2.0 contains no Windows app. This checkout contains the unpublished v0.3.0-alpha.1 x64
-WinUI 3 candidate for Windows 10 version 1809 or later. It can recover a supported Android source or
-an official TV Time export without uploading anything. On Windows 11 x64, it also contains a
-candidate encrypted iOS recovery route. The route remains unverified until a real Windows build and
-synthetic end-to-end smoke test confirm it.
+The `v0.3.1-alpha.1` candidate adds a downloadable x64 WinUI 3 tester app. Windows 10 version 1809
+or later can test compatible local Android sources and official TV Time exports. Windows 11 x64 can
+also test encrypted iPhone and iPad backup recovery. The candidate is not published yet and remains
+experimental.
 
 ## Security model
 
@@ -29,10 +28,9 @@ internet capability is not an operating-system network sandbox; the no-network c
 source- and package-audited. No broad-filesystem, device, or privacy-sensitive capability is
 declared.
 
-The recovery implementation contains no AI/ML or WebView integration. The locked Windows App SDK
-graph does include transitive packages whose names reference AI/ML and WebView, so a final MSIX
-contents audit remains required before the candidate can be described as package-level no-AI. That
-proof is tracked with the Windows device validation rather than inferred from source inspection.
+The recovery implementation contains no AI, machine-learning, or WebView integration. The release
+gate also inspects final MSIX membership and rejects payload names associated with those features;
+text-only dependency notices remain included.
 
 Every recovery lane requires a source on private local storage. Known cloud-sync and shared roots,
 nonlocal volumes, symbolic links, reparse points, and Windows cloud-placeholder hydration flags are
@@ -47,61 +45,44 @@ After validation, the result screen can open the canonical Markdown report, open
 report, or show the private output folder. Opening a report can add its filename to browser/viewer
 history or Windows Recent Items. The app does not persist the selected source or completed-output
 path for a later session, and it never silently deletes incomplete or completed recovery output.
-Windows can remove packaged local data during uninstall, so review retained results before manually
-removing the private app. The installer refuses to uninstall or replace an existing package.
+Windows can remove packaged local data during uninstall, so copy any reports you want to keep before
+running the bundled removal script. The installer refuses to replace an existing alpha package.
 
-## Build and install privately
+## Install the tester build
 
-Use a private Windows x64 machine with Python 3.13.12, a current Visual Studio installation
-including MSBuild/MSIX tooling, the .NET 8 SDK, and the Windows 10/11 SDK. The direct and transitive
-Windows App SDK dependencies are exact and content-hash bound in `packages.lock.json`; the build
-fails if restore would change that graph. From a clean, non-elevated PowerShell session in this
-source checkout:
+After `v0.3.1-alpha.1` is published:
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\script\install_windows_private.ps1
-```
+1. Download `TV-Time-Backup-Extractor-0.3.1-alpha.1-Windows-x64.zip` and
+   `SHA256SUMS-Windows` from the official GitHub release.
+2. Verify the ZIP checksum, then extract the complete ZIP to a private local folder.
+3. Run `Install-Windows-Alpha.ps1` with PowerShell.
+4. Read the certificate notice, type `INSTALL`, and approve the Windows trust prompt.
 
-The scripts install only hash-locked binary Python dependencies, freeze the architecture-specific
-helper, build one self-contained x64 MSIX, expand and privacy-scan it, create or reuse a per-user
-self-issued certificate with the exact private friendly name and code-signing EKU, trust only its
-public certificate in the local machine's `TrustedPeople` store, sign and verify the package, and
-install it for the current user. A narrow helper prompts for elevation only while it adds or removes
-the exact public certificate; the build, signing tools, package installation, and installed app all
-remain non-elevated. The private signing certificate remains trusted for as long as the private
-package is retained; remove both when this validation install is no longer needed. The scripts do
-not create a tag, commit, release, upload, or public package.
+The alpha uses a project-specific self-signed certificate. The bundle contains the exact public
+certificate and no private signing key. Installation verifies every bundled file, checks that the
+MSIX signature matches the certificate, and requests permission to trust that certificate in the
+local machine's `TrustedPeople` store. The app is installed only for the current user.
 
-The build and installer keep identity-bound directory and package handles across those steps. The
-first MSIX acquisition is handle-relative and no-follow, and records its File ID, complete unsigned
-SHA-256, and block-map SHA-256. The MSIX is then scanned while writes and replacement are blocked;
-signing may change only the signature, not the reviewed block map; and the exact signed file stays
-read-locked through installation.
+Copy any reports you want to keep before removal. Run `Uninstall-Windows-Alpha.ps1`, type `REMOVE`,
+and approve the prompt to remove the package and its exact certificate. On a shared PC, the
+certificate remains while another Windows account still has the same release package installed.
 
-MSBuild returns a pathname after closing its package output, not a producer-owned file handle. This
-private workflow therefore proves the exact bytes from first capability acquisition through local
-installation; it does not claim producer-handle provenance for the earlier MSBuild write. Before
-release-ready status, a clean Windows validation must either use a controlled packager that writes
-through a pre-created handle or provide an equivalent source-bound proof. Do not infer that stronger
-claim from a successful private build.
+## Release build evidence
 
-The private scripts also consume the live checkout directly. They do not require a clean worktree,
-stage an immutable `git archive`, or record a source commit and tree in the package. A distributable
-build must add that reviewed-source staging and attribution before it can be called source-bound.
-This is separate from the later producer-handle gap above.
+The public alpha build uses a verified Git archive from one clean commit. It pins Python 3.13.12,
+.NET SDK 8.0.423, .NET runtime 8.0.29, and the complete NuGet graph. The build records the source
+commit, tree, and dependency-lock digests, scans the expanded MSIX, signs it with a one-build
+certificate, verifies that signing changed only the signature, and binds every downloadable file to
+its exact size and SHA-256 value.
 
-The build also verifies every restored NuGet package against both its downloaded SHA-512 and the
-committed lock content hash, validates the exact Python distribution versions, and embeds their
-available license and notice texts with a content-hashed `Notices/MANIFEST.json`. That manifest is
-explicitly partial: the SDK-resolved self-contained .NET runtime pack is not yet pinned, byte-bound,
-or inventoried with its license texts. The Windows SDK build-tools package remains build-host-only
-and is not copied into the MSIX. A distributable Windows package must close the .NET runtime-pack
-and complete binary-to-component notice audit first.
+The package includes bound CPython, Python dependency, NuGet, .NET runtime, and project license
+records. The alpha does not yet claim a complete final binary-to-component inventory. Hosted Windows
+validation installs the exact package, confirms package registration, launch-smokes the native app,
+removes it, checks certificate cleanup, and reverifies the ZIP.
 
-Generated build material stays in `dist-windows-private` and `.build-tools`; neither location is an
-appropriate place for recovered data. A repeated build fails closed if a previous generated helper
-exists, so it cannot silently replace review evidence.
+These checks establish a downloadable tester build. They do not prove every physical device,
+backup schema, NTFS configuration, or UI path. Keep compatibility reports synthetic and share only
+Safe Diagnostics codes.
 
 ## iOS source
 
@@ -109,10 +90,8 @@ The source chooser accepts a completed encrypted iOS backup folder on Windows 11
 the phone after Apple Devices or iTunes finishes the backup, select the individual backup folder,
 confirm sensitive output, and enter the local-backup password only in the native password field.
 
-This route is a private candidate, not part of v0.2.0. Before it is considered release-ready, it
-requires a locked-dependency Windows build, the real NTFS capability tests, a synthetic UI
-screenshot, and a synthetic end-to-end recovery smoke test. Never use real titles, history,
-identifiers, paths, or recovered output in that evidence.
+This route remains experimental. Never use real titles, history, identifiers, paths, or recovered
+output in public evidence.
 
 ## Android and official-export sources
 
