@@ -96,6 +96,68 @@ struct RecoveryDiagnosticsTests {
       )
     }
   }
+
+  @Test @MainActor
+  func testTroubleshootingReportContainsOnlyBoundedFixedVocabulary() {
+    let diagnostics = UnifiedRecoveryDiagnostics(
+      subsystem: "com.example.synthetic",
+      category: "SyntheticDiagnostics"
+    )
+    diagnostics.record(.milestone(.recovery, .requested))
+    diagnostics.record(.failure(.recovery, .helperCommunicationFailed))
+
+    let report = diagnostics.troubleshootingReport
+    expectEqual(
+      report.lines,
+      [
+        "operation=recovery event=requested",
+        "operation=recovery event=failed reason=helper_communication_failed",
+      ]
+    )
+    expectEqual(
+      report.text,
+      "TV Time Backup Extractor safe diagnostics\n"
+        + "operation=recovery event=requested\n"
+        + "operation=recovery event=failed reason=helper_communication_failed"
+    )
+  }
+
+  @Test @MainActor
+  func testTroubleshootingTrailIsBoundedAndResetForANewAttempt() {
+    let diagnostics = UnifiedRecoveryDiagnostics(
+      subsystem: "com.example.synthetic",
+      category: "SyntheticDiagnostics"
+    )
+    for _ in 0..<20 {
+      diagnostics.record(.milestone(.validation, .started))
+    }
+    expectEqual(diagnostics.troubleshootingReport.lines.count, 16)
+
+    diagnostics.beginAttempt()
+    expectTrue(diagnostics.troubleshootingReport.lines.isEmpty)
+    diagnostics.record(.failure(.backupPicker, .pickerInvalidDirectory))
+    expectEqual(
+      diagnostics.troubleshootingReport.lines,
+      ["operation=backup_picker event=failed reason=picker_invalid_directory"]
+    )
+  }
+
+  @Test @MainActor
+  func testCommittedSourceReplacesCancelledPickerTrail() {
+    let diagnostics = UnifiedRecoveryDiagnostics(
+      subsystem: "com.example.synthetic",
+      category: "SyntheticDiagnostics"
+    )
+    diagnostics.record(.milestone(.backupPicker, .pickerPresented))
+    diagnostics.record(.milestone(.backupPicker, .pickerCancelled))
+
+    diagnostics.beginSourceAttempt()
+
+    expectEqual(
+      diagnostics.troubleshootingReport.lines,
+      ["operation=backup_picker event=backup_accepted"]
+    )
+  }
 }
 
 private struct SensitiveSyntheticError: LocalizedError {

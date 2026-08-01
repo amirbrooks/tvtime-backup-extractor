@@ -4,6 +4,13 @@ import TVTimeRecoveryCore
 
 @MainActor
 final class WorkspaceActions {
+  func copyTroubleshootingReport(_ report: RecoveryTroubleshootingReport) throws {
+    NSPasteboard.general.clearContents()
+    guard NSPasteboard.general.setString(report.text, forType: .string) else {
+      throw WorkspaceActionError.copyFailed
+    }
+  }
+
   func openReport(_ report: URL, within output: URL) throws {
     try validate(report, within: output, expectedDirectory: false)
     guard NSWorkspace.shared.open(report) else {
@@ -98,12 +105,15 @@ final class WorkspaceActions {
 }
 
 private enum WorkspaceActionError: LocalizedError {
+  case copyFailed
   case unsafeArtifact
   case missingArtifact
   case openFailed
 
   var errorDescription: String? {
     switch self {
+    case .copyFailed:
+      "macOS could not copy the safe diagnostics. Select the text and copy it manually."
     case .unsafeArtifact:
       "The recovered artifact did not pass the local path safety check."
     case .missingArtifact:

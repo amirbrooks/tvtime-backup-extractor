@@ -67,8 +67,10 @@ final class RecoverySessionTests {
   @Test
   func testAcquisitionFailureReturnsToSourceSelectionInsteadOfIOSPreflight() throws {
     let helper = FakeRecoveryHelperClient()
+    let diagnostics = RecordingRecoveryDiagnostics()
     let session = RecoverySession(
       helperClient: helper,
+      diagnostics: diagnostics,
       destinationEncryptionValidator: { _ in syntheticDestinationIdentity }
     )
     let root = try trackedDirectory()
@@ -92,6 +94,13 @@ final class RecoverySessionTests {
 
     expectEqual(session.phase, .chooseBackup)
     expectEqual(helper.invocations.count, 0)
+    expectEqual(
+      diagnostics.events,
+      [
+        .milestone(.recovery, .requested),
+        .failure(.recovery, .invalidFrame),
+      ]
+    )
   }
 
   @Test
@@ -651,7 +660,8 @@ final class RecoverySessionTests {
   func testPasswordFailureCreatesFreshOutputAndRequiresNewPreflightBeforeConfirmation()
     async throws
   {
-    let context = try await makeRunningSession()
+    let diagnostics = RecordingRecoveryDiagnostics()
+    let context = try await makeRunningSession(diagnostics: diagnostics)
     let originalOutput = try requireValue(context.session.outputDirectory)
     try await deliverFailure(code: "backup_password_rejected", to: context)
     expectEqual(context.session.preflightSummary, TestFixtures.preflight())
@@ -670,6 +680,14 @@ final class RecoverySessionTests {
     guard case .preflighting = context.session.phase else {
       return failTest("Expected password recovery to rerun preflight")
     }
+    expectEqual(diagnostics.beginAttemptCalls, 1)
+    expectEqual(
+      diagnostics.events,
+      [
+        .milestone(.preflight, .requested),
+        .milestone(.preflight, .started),
+      ]
+    )
 
     let refreshedSummary = TestFixtures.preflight(backupRegularFiles: 102)
     context.helper.send(
@@ -791,7 +809,6 @@ final class RecoverySessionTests {
     expectEqual(
       diagnostics.events,
       [
-        .milestone(.backupPicker, .backupAccepted),
         .milestone(.preflight, .requested),
         .milestone(.preflight, .started),
         .milestone(.preflight, .completed),
@@ -804,10 +821,13 @@ final class RecoverySessionTests {
     )
   }
 
-  private func makePreflightingSession() throws -> SessionContext {
+  private func makePreflightingSession(
+    diagnostics: any RecoveryDiagnosticsSink = UnifiedRecoveryDiagnostics()
+  ) throws -> SessionContext {
     let helper = FakeRecoveryHelperClient()
     let session = RecoverySession(
       helperClient: helper,
+      diagnostics: diagnostics,
       destinationEncryptionValidator: { _ in syntheticDestinationIdentity }
     )
     let root = try trackedDirectory()
@@ -826,8 +846,10 @@ final class RecoverySessionTests {
     return SessionContext(session: session, helper: helper)
   }
 
-  private func makeRunningSession() async throws -> SessionContext {
-    let context = try makePreflightingSession()
+  private func makeRunningSession(
+    diagnostics: any RecoveryDiagnosticsSink = UnifiedRecoveryDiagnostics()
+  ) async throws -> SessionContext {
+    let context = try makePreflightingSession(diagnostics: diagnostics)
     context.helper.send(try TestFixtures.preflightCompletionEvent(), finish: true)
     try await waitUntil { context.session.phase == .confirm(TestFixtures.preflight()) }
     context.session.startRecovery(password: "password", acknowledgeSensitiveOutput: true)
@@ -1002,6 +1024,12 @@ private enum FakeError: Error {
 @MainActor
 private final class RecordingRecoveryDiagnostics: RecoveryDiagnosticsSink {
   private(set) var events: [RecoveryDiagnosticEvent] = []
+  private(set) var beginAttemptCalls = 0
+
+  func beginAttempt() {
+    beginAttemptCalls += 1
+    events.removeAll(keepingCapacity: true)
+  }
 
   func record(_ event: RecoveryDiagnosticEvent) {
     events.append(event)
