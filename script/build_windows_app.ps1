@@ -14,6 +14,8 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+$trustedOutputParent = Get-WindowsPackagingOutputParent `
+    -SourceRoot $root -OutputRoot $OutputRoot
 $buildEnvironmentRoot = Join-Path $OutputRoot (".build-tools-" + [Guid]::NewGuid().ToString("N"))
 $pythonExe = Join-Path $buildEnvironmentRoot "venv\Scripts\python.exe"
 $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
@@ -41,8 +43,6 @@ $unsignedBlockMapDigest = $null
 $outerError = $null
 $packageResult = $null
 try {
-    Assert-ContainedOrdinaryDirectoryPath `
-        -TrustedRoot $root -Candidate $OutputRoot -AllowMissingCandidate | Out-Null
     if ($null -ne (Get-Item -LiteralPath $OutputRoot -Force -ErrorAction SilentlyContinue)) {
         throw "The private Windows build output must be fresh."
     }

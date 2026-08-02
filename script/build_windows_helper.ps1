@@ -18,9 +18,8 @@ function Assert-NativeSuccess([string]$Message) {
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
-if (-not $OutputRoot.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "The private Windows build output must remain beneath the repository build root."
-}
+$trustedOutputParent = Get-WindowsPackagingOutputParent `
+    -SourceRoot $root -OutputRoot $OutputRoot
 $outputRootOwnership = $null
 $buildEnvironmentOwnership = $null
 $stageOwnership = $null
@@ -29,13 +28,11 @@ $completed = $false
 $helperResult = $null
 $bodyError = $null
 try {
-    Assert-ContainedOrdinaryDirectoryPath `
-        -TrustedRoot $root -Candidate $OutputRoot -AllowMissingCandidate | Out-Null
     if ($null -ne (Get-Item -LiteralPath $OutputRoot -Force -ErrorAction SilentlyContinue)) {
         throw "The private Windows build output must be fresh."
     }
     $outputRootOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $root -Candidate $OutputRoot
+        -TrustedRoot $trustedOutputParent -Candidate $OutputRoot
 
     $outputPrefix = $OutputRoot + [IO.Path]::DirectorySeparatorChar
     if (-not $BuildEnvironmentRoot) {

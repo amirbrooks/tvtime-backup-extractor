@@ -583,6 +583,10 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("TrustedRootOwnership", library)
         self.assertIn("DestinationRootOwnership", library)
         self.assertIn("OwnershipToken.Identity", library)
+        self.assertIn("function Get-WindowsPackagingOutputParent", library)
+        self.assertIn('Join-Path $sourcePath ".build-tools"', library)
+        self.assertIn("Get-WindowsPackagingOutputParent", helper)
+        self.assertIn("Get-WindowsPackagingOutputParent", app)
 
         self.assertIn("function Remove-ContainedOrdinaryTrees", library)
         self.assertNotIn("New-Item -ItemType Directory", library)

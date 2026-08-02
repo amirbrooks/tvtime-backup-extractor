@@ -85,6 +85,26 @@ function Assert-DirectContainedChild {
     Write-Output $candidatePath
 }
 
+function Get-WindowsPackagingOutputParent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$OutputRoot
+    )
+
+    $sourcePath = [IO.Path]::GetFullPath($SourceRoot)
+    $outputParent = $sourcePath
+    if ([Environment]::GetEnvironmentVariable(
+        "TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE",
+        "Process"
+    ) -ceq "1") {
+        $outputParent = Join-Path $sourcePath ".build-tools"
+    }
+    Assert-DirectContainedChild `
+        -TrustedRoot $outputParent -Candidate $OutputRoot | Out-Null
+    Write-Output $outputParent
+}
+
 function New-ContainedOrdinaryDirectory {
     [CmdletBinding()]
     param(
