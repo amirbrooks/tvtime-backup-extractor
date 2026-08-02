@@ -64,15 +64,17 @@ def _windows_user_sid() -> str:
     return rows[0][1]
 
 
-def _run_windows_tree_acl(root: Path, *arguments: str) -> None:
+def _run_windows_acl(root: Path, *arguments: str, recursive: bool = True) -> None:
+    command = [
+        str(_windows_system_tool("icacls.exe")),
+        str(root),
+        *arguments,
+    ]
+    if recursive:
+        command.append("/T")
+    command.append("/Q")
     completed = subprocess.run(
-        [
-            str(_windows_system_tool("icacls.exe")),
-            str(root),
-            *arguments,
-            "/T",
-            "/Q",
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -83,22 +85,27 @@ def _run_windows_tree_acl(root: Path, *arguments: str) -> None:
 
 def _set_windows_tree_access(root: Path, rights: str) -> None:
     sid = _windows_user_sid()
-    _run_windows_tree_acl(
+    _run_windows_acl(
         root,
         "/inheritance:r",
         "/grant:r",
-        f"*{sid}:(OI)(CI){rights}",
+        f"*{sid}:{rights}",
     )
 
 
 def _deny_windows_tree_mutation(root: Path) -> None:
     sid = _windows_user_sid()
-    denied_rights = "(OI)(CI)(WD,AD,WEA,WA,DE,DC)"
-    _run_windows_tree_acl(root, "/deny", f"*{sid}:{denied_rights}")
+    denied_rights = "(WD,AD,WEA,WA,DE,DC)"
+    _run_windows_acl(root, "/deny", f"*{sid}:{denied_rights}")
 
 
 def _remove_windows_tree_deny(root: Path) -> None:
-    _run_windows_tree_acl(root, "/remove:d", f"*{_windows_user_sid()}")
+    _run_windows_acl(root, "/remove:d", f"*{_windows_user_sid()}")
+
+
+def _allow_windows_generated_descendants(root: Path) -> None:
+    sid = _windows_user_sid()
+    _run_windows_acl(root, "/grant", f"*{sid}:(OI)(CI)F", recursive=False)
 
 
 def _lock_windows_source(source: Path) -> None:
@@ -107,6 +114,7 @@ def _lock_windows_source(source: Path) -> None:
     generated = source / GENERATED_DIRECTORY
     _remove_windows_tree_deny(generated)
     _set_windows_tree_access(generated, "F")
+    _allow_windows_generated_descendants(generated)
 
 
 def _assert_windows_source_locked(source: Path) -> None:

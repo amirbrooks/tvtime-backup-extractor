@@ -1218,13 +1218,13 @@ class MacReleaseSourceProvenanceTests(unittest.TestCase):
             git_source_stage._lock_windows_source(Path("C:/synthetic/source"))
 
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 5)
         self.assertEqual(
             commands[0][2:],
             [
                 "/inheritance:r",
                 "/grant:r",
-                "*S-1-5-21-1-2-3-1001:(OI)(CI)RX",
+                "*S-1-5-21-1-2-3-1001:RX",
                 "/T",
                 "/Q",
             ],
@@ -1233,13 +1233,21 @@ class MacReleaseSourceProvenanceTests(unittest.TestCase):
         self.assertEqual(commands[1][2], "/deny")
         self.assertEqual(
             commands[1][3],
-            "*S-1-5-21-1-2-3-1001:(OI)(CI)(WD,AD,WEA,WA,DE,DC)",
+            "*S-1-5-21-1-2-3-1001:(WD,AD,WEA,WA,DE,DC)",
         )
         self.assertEqual(commands[2][2], "/remove:d")
         self.assertEqual(commands[2][3], "*S-1-5-21-1-2-3-1001")
         for command in commands[2:]:
             self.assertIn(".build-tools", command[1])
-        self.assertEqual(commands[3][4], "*S-1-5-21-1-2-3-1001:(OI)(CI)F")
+        self.assertEqual(commands[3][4], "*S-1-5-21-1-2-3-1001:F")
+        self.assertEqual(
+            commands[4][2:],
+            [
+                "/grant",
+                "*S-1-5-21-1-2-3-1001:(OI)(CI)F",
+                "/Q",
+            ],
+        )
 
     def test_windows_source_stage_removes_deny_before_cleanup_full_control(self) -> None:
         with (
