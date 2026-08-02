@@ -20,6 +20,7 @@ from script.collect_windows_licenses import (
     DOTNET_SDK_VERSION,
     PRIVATE_WINDOWS_VERSION,
     REVIEWED_CPYTHON_VERSION,
+    REVIEWED_NUGET_PACKAGE_SHA512,
     _candidate_scope,
     _collect_dotnet_runtime,
     _collect_nuget,
@@ -114,8 +115,9 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             BUILD_ONLY_NUGET_PACKAGES,
             {("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948")},
         )
+        self.assertEqual(len(REVIEWED_NUGET_PACKAGE_SHA512), 15)
 
-    def synthetic_package(self, root: Path) -> tuple[Path, Path]:
+    def synthetic_package(self, root: Path) -> tuple[Path, Path, dict[tuple[str, str], str]]:
         package_root = root / "fake.package" / "1.2.3"
         package_root.mkdir(parents=True)
         package = package_root / "fake.package.1.2.3.nupkg"
@@ -142,7 +144,9 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
         (package_root / "fake.package.1.2.3.nupkg.sha512").write_text(
             package_hash, encoding="ascii"
         )
-        content_hash = package_hash
+        content_hash = base64.b64encode(
+            hashlib.sha512(b"synthetic-nuget-content-hash").digest()
+        ).decode("ascii")
         (package_root / ".nupkg.metadata").write_text(
             json.dumps({"version": 2, "contentHash": content_hash, "source": "synthetic"}),
             encoding="utf-8",
@@ -169,67 +173,71 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return lock, package
+        return lock, package, {("Fake.Package", "1.2.3"): package_hash}
 
     def test_nuget_collection_binds_package_hash_metadata_and_license(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, _package = self.synthetic_package(root)
+            lock, _package, reviewed_hashes = self.synthetic_package(root)
             output = root / "notices"
             output.mkdir()
-            components = _collect_nuget(output, lock, root)
+            components = _collect_nuget(output, lock, root, reviewed_hashes)
             self.assertEqual(len(components), 1)
             self.assertEqual(components[0]["name"], "Fake.Package")
+            self.assertNotEqual(
+                components[0]["content_hash"],
+                components[0]["package_sha512"],
+            )
             license_path = output / "nuget" / "Fake.Package" / "license-expression.txt"
             self.assertEqual(license_path.read_text(encoding="utf-8"), "MIT\n")
 
     def test_nuget_collection_rejects_package_byte_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, package = self.synthetic_package(root)
+            lock, package, reviewed_hashes = self.synthetic_package(root)
             package.write_bytes(b"tampered-synthetic-package")
             output = root / "notices"
             output.mkdir()
             with self.assertRaisesRegex(RuntimeError, "downloaded hash"):
-                _collect_nuget(output, lock, root)
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_nuget_collection_rejects_expanded_asset_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, _package = self.synthetic_package(root)
+            lock, _package, reviewed_hashes = self.synthetic_package(root)
             expanded = root / "fake.package" / "1.2.3" / "lib" / "net8.0" / "synthetic.dll"
             expanded.write_bytes(b"tampered-expanded-asset")
             output = root / "notices"
             output.mkdir()
             with self.assertRaisesRegex(RuntimeError, "expanded NuGet asset"):
-                _collect_nuget(output, lock, root)
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_nuget_collection_rejects_missing_required_archive_member(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, _package = self.synthetic_package(root)
+            lock, _package, reviewed_hashes = self.synthetic_package(root)
             (root / "fake.package" / "1.2.3" / "lib" / "net8.0" / "synthetic.dll").unlink()
             output = root / "notices"
             output.mkdir()
             with self.assertRaisesRegex(RuntimeError, "required package archive member"):
-                _collect_nuget(output, lock, root)
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_nuget_collection_rejects_unarchived_expanded_asset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, _package = self.synthetic_package(root)
+            lock, _package, reviewed_hashes = self.synthetic_package(root)
             (root / "fake.package" / "1.2.3" / "synthetic-extra.bin").write_bytes(
                 b"synthetic-unarchived-asset"
             )
             output = root / "notices"
             output.mkdir()
             with self.assertRaisesRegex(RuntimeError, "not bound to its package archive"):
-                _collect_nuget(output, lock, root)
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_nuget_collection_rejects_coordinated_cache_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, package = self.synthetic_package(root)
+            lock, package, reviewed_hashes = self.synthetic_package(root)
             package_root = package.parent
             nuspec = (package_root / "fake.package.nuspec").read_text(encoding="utf-8")
             replacement_asset = b"synthetic-coordinated-replacement"
@@ -246,13 +254,13 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             (package_root / "lib" / "net8.0" / "synthetic.dll").write_bytes(replacement_asset)
             output = root / "notices"
             output.mkdir()
-            with self.assertRaisesRegex(RuntimeError, "committed lock hash"):
-                _collect_nuget(output, lock, root)
+            with self.assertRaisesRegex(RuntimeError, "reviewed package hash"):
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_nuget_collection_rejects_linked_expanded_asset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            lock, _package = self.synthetic_package(root)
+            lock, _package, reviewed_hashes = self.synthetic_package(root)
             package_root = root / "fake.package" / "1.2.3"
             (package_root / "linked-asset").symlink_to(
                 package_root / "lib" / "net8.0" / "synthetic.dll"
@@ -260,7 +268,7 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             output = root / "notices"
             output.mkdir()
             with self.assertRaisesRegex(RuntimeError, "linked asset"):
-                _collect_nuget(output, lock, root)
+                _collect_nuget(output, lock, root, reviewed_hashes)
 
     def test_dotnet_runtime_collection_binds_exact_package_notices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -291,12 +299,15 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             package_hash = base64.b64encode(hashlib.sha512(package.read_bytes()).digest()).decode(
                 "ascii"
             )
+            content_hash = base64.b64encode(
+                hashlib.sha512(b"synthetic-dotnet-content-hash").digest()
+            ).decode("ascii")
             (package_root / f"{name.casefold()}.{version}.nupkg.sha512").write_text(
                 package_hash,
                 encoding="ascii",
             )
             (package_root / ".nupkg.metadata").write_text(
-                json.dumps({"version": 2, "contentHash": package_hash}),
+                json.dumps({"version": 2, "contentHash": content_hash}),
                 encoding="utf-8",
             )
             (package_root / f"{name}.nuspec").write_text(nuspec, encoding="utf-8")
@@ -316,11 +327,13 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             with mock.patch.object(
                 windows_licenses,
                 "DOTNET_RUNTIME_PACKAGE",
-                (name, version, package_hash),
+                (name, version, content_hash, package_hash),
             ):
                 component = _collect_dotnet_runtime(output, root)
             self.assertEqual(component["ecosystem"], "dotnet-runtime")
             self.assertEqual(component["sdk_version"], "8.0.423")
+            self.assertEqual(component["content_hash"], content_hash)
+            self.assertEqual(component["package_sha512"], package_hash)
             self.assertEqual(
                 (output / "dotnet" / "runtime-license-expression.txt").read_text(encoding="utf-8"),
                 "MIT\n",

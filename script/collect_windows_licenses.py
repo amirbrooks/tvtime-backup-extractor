@@ -9,6 +9,7 @@ import stat
 import sys
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Mapping
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 
@@ -35,8 +36,56 @@ DOTNET_SDK_VERSION = "8.0.423"
 DOTNET_RUNTIME_PACKAGE = (
     "Microsoft.NETCore.App.Runtime.win-x64",
     "8.0.29",
+    "Xic9teVR3xPPivqfC1ZtTUUuuUaDou8aJMqDs9ThXqXWi4Jb174IhlgyQzsM8tke9dBTIombzgEU+oTwnyzNtg==",
     "XBQUNw6xNOTWm+vblnnpxpPYJOm1eYzSjJpk5wlHvodNU5JXmX5dxffRz8qvqkO4rU5UzN8oruz63yrvP5oHEQ==",
 )
+REVIEWED_NUGET_PACKAGE_SHA512 = {
+    ("Microsoft.Web.WebView2", "1.0.3719.77"): (
+        "Cpq7EGgijiCN0lg1RlTZuZcRkzyo/USU9cEJMSPh6FG4PLjmTEpJ5NKuJqQ06ONnVVARCcTLf31IjjhFJUrApw=="
+    ),
+    ("Microsoft.Windows.AI.MachineLearning", "2.1.70"): (
+        "3hjZVutsGnlGL4RFNxXfF8OGXpiPBRb8vNxj0j4T9CDj64DlZGvQAZuJUzWihQ8Emh5p/zeYVVC6BiCU/9Am4w=="
+    ),
+    ("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948"): (
+        "cmungnLvmFQo50GkX+tJ//+hevjgL1VIM1H6kx6QAjxyAIzmZ5op/v5GPa3k8/cVSlVukWZDFVTHFPKRDL/Eeg=="
+    ),
+    ("Microsoft.Windows.SDK.BuildTools.MSIX", "1.7.251221100"): (
+        "3OEJjmDvPQH649p73taTt2n4AeY9dMg/gaDdZHQZh4xOOTAjdfuzuuw2FxSedpQuP9Pbki7FNGoE1mM4kjf0Mw=="
+    ),
+    ("Microsoft.WindowsAppSDK", "2.2.0"): (
+        "bmOhIRMAUUtpWggnJ/DqdKAVdMuqDoFhUruUmeGEAdRCSCeOtsGhg/o2PwOojqadzDAFYOzoCUdI29VR7VHz2g=="
+    ),
+    ("Microsoft.WindowsAppSDK.AI", "2.2.3"): (
+        "v6Lbm2VdS7zv2f8Wz1T3cIB19EugboEejt4GJQH4drNHmJqoilA9rnM5qgw5Pnq2u7Zy1LPtAwan2toUH3MaEg=="
+    ),
+    ("Microsoft.WindowsAppSDK.Base", "2.0.4"): (
+        "Mjy6K7l9kj1+5UNPg8y/fkHx2be0TdLYaIWJsf7SlkZHEcFd6bl5L8uSjPNYK0Xz5vfaYELO5yKszHHIbaO75A=="
+    ),
+    ("Microsoft.WindowsAppSDK.DWrite", "2.1.0"): (
+        "lm1mJMhQA6HV702Oom3Yjm7e5A0ZUfU6Ji0JFDhgYSUP71AlBe3hQMMNYc1oCuqOd/b7UdHl6aJwXGzkP+20Hw=="
+    ),
+    ("Microsoft.WindowsAppSDK.Foundation", "2.1.0"): (
+        "R7jyix4rXyFtGva55FvSaVt1nw2TGS0bVWEJMlTo46Hprrnvyz8LKtUsc02P5tByuc9DN7v742LsY0/pJ8O3dg=="
+    ),
+    ("Microsoft.WindowsAppSDK.InteractiveExperiences", "2.0.15"): (
+        "TCJ88/ggWwMXd23u38HHjhPDATu14CgMC6OFqIsP7Kll6QVxIjA9+XVo6XPmGxnzn71UK71XJYR2QHRbRYOiqQ=="
+    ),
+    ("Microsoft.WindowsAppSDK.ML", "2.1.70"): (
+        "xwORZXuPJWh10JX6wJXOet3VIb7Ui9dDVbpot9zbIeUT4nYEVmLX4IAcjCe2vdQWGTOBa9tKbP5VIdz0a42Mng=="
+    ),
+    ("Microsoft.WindowsAppSDK.Runtime", "2.2.0"): (
+        "Lx/BvrhrYrSecSkUcCfBzV8I3ye7Zd5AFSLeObSuhmap+rMsVmQUKQ1tzdtZfMOUgDYOuyfQFyWG0x7m3VrWNA=="
+    ),
+    ("Microsoft.WindowsAppSDK.Widgets", "2.0.5"): (
+        "uqMIWloLBnsdSKsCP2K523jO+FhGeIcH54BBsJg/TSKHvdQ/w8RQDi5ZRGVBjh7ovrw8bjSJdfEBA0u1+nC6dw=="
+    ),
+    ("Microsoft.WindowsAppSDK.WinUI", "2.2.1"): (
+        "rfTm/Deoj5PrhmUXu4YziVSgqv8oxeDUSTyYdOVsxy7CRm/zsbIgQZrcp23i2i6tZ1abW+x8311q7DbyGk8dgg=="
+    ),
+    ("System.Numerics.Tensors", "9.0.0"): (
+        "razlju7UgILQ/Vb7BoW1RR/xIEBDc8Ynq0sRk74KpLBHay3QMZJfgK8ly4IEzlJlbFYlCOxpdPa7DNBUYaYtIw=="
+    ),
+}
 MAXIMUM_NOTICE_BYTES = 4 * 1024 * 1024
 MAXIMUM_NUGET_PACKAGE_BYTES = 4 * 1024 * 1024 * 1024
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?$")
@@ -311,10 +360,25 @@ def _validate_expanded_nuget_package(package_root: Path, package: Path) -> None:
         raise RuntimeError("A restored NuGet package could not be validated safely.") from exc
 
 
-def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[str, object]]:
+def _collect_nuget(
+    root: Path,
+    lock_path: Path,
+    nuget_root: Path,
+    reviewed_package_sha512: Mapping[tuple[str, str], str] | None = None,
+) -> list[dict[str, object]]:
     lock = json.loads(_regular_bytes(lock_path).decode("utf-8"))
+    bindings = _nuget_bindings(lock)
+    reviewed_hashes = dict(
+        REVIEWED_NUGET_PACKAGE_SHA512
+        if reviewed_package_sha512 is None
+        else reviewed_package_sha512
+    )
+    if set(reviewed_hashes) != set(bindings):
+        raise RuntimeError(
+            "The reviewed NuGet package hash inventory did not match the committed lock."
+        )
     components: list[dict[str, object]] = []
-    for (name, version), expected_hash in sorted(_nuget_bindings(lock).items()):
+    for (name, version), expected_hash in sorted(bindings.items()):
         package_root = nuget_root / name.casefold() / version
         sha_files = list(package_root.glob("*.nupkg.sha512"))
         packages = list(package_root.glob("*.nupkg"))
@@ -328,8 +392,8 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
             raise RuntimeError("A locked NuGet package hash was malformed.") from exc
         if _sha512_base64(packages[0]) != package_hash:
             raise RuntimeError("A restored NuGet package did not match its downloaded hash.")
-        if package_hash != expected_hash:
-            raise RuntimeError("A restored NuGet package did not match its committed lock hash.")
+        if package_hash != reviewed_hashes[(name, version)]:
+            raise RuntimeError("A restored NuGet package did not match its reviewed package hash.")
         package_metadata = json.loads(_regular_bytes(metadata_files[0]).decode("utf-8"))
         if package_metadata.get("contentHash") != expected_hash:
             raise RuntimeError("A restored NuGet package did not match the committed content hash.")
@@ -341,6 +405,7 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
                     "name": name,
                     "version": version,
                     "content_hash": expected_hash,
+                    "package_sha512": package_hash,
                     "files": [],
                 }
             )
@@ -390,6 +455,7 @@ def _collect_nuget(root: Path, lock_path: Path, nuget_root: Path) -> list[dict[s
                 "name": name,
                 "version": version,
                 "content_hash": expected_hash,
+                "package_sha512": package_hash,
                 "files": bindings,
             }
         )
@@ -400,7 +466,7 @@ def _collect_dotnet_runtime(
     root: Path,
     nuget_root: Path,
 ) -> dict[str, object]:
-    name, version, expected_hash = DOTNET_RUNTIME_PACKAGE
+    name, version, expected_content_hash, expected_package_sha512 = DOTNET_RUNTIME_PACKAGE
     package_root = nuget_root / name.casefold() / version
     sha_files = list(package_root.glob("*.nupkg.sha512"))
     packages = list(package_root.glob("*.nupkg"))
@@ -408,10 +474,13 @@ def _collect_dotnet_runtime(
     if len(sha_files) != 1 or len(packages) != 1 or len(metadata_files) != 1:
         raise RuntimeError("The pinned .NET runtime package was unavailable.")
     package_hash = _regular_bytes(sha_files[0]).decode("ascii").strip()
-    if package_hash != expected_hash or _sha512_base64(packages[0]) != expected_hash:
+    if (
+        package_hash != expected_package_sha512
+        or _sha512_base64(packages[0]) != expected_package_sha512
+    ):
         raise RuntimeError("The .NET runtime package did not match its reviewed hash.")
     package_metadata = json.loads(_regular_bytes(metadata_files[0]).decode("utf-8"))
-    if package_metadata.get("contentHash") != expected_hash:
+    if package_metadata.get("contentHash") != expected_content_hash:
         raise RuntimeError("The .NET runtime package metadata did not match its reviewed hash.")
     _validate_expanded_nuget_package(package_root, packages[0])
     license_type, license_value = _nuspec_license(package_root)
@@ -441,7 +510,8 @@ def _collect_dotnet_runtime(
         "ecosystem": "dotnet-runtime",
         "name": name,
         "version": version,
-        "content_hash": expected_hash,
+        "content_hash": expected_content_hash,
+        "package_sha512": expected_package_sha512,
         "sdk_version": DOTNET_SDK_VERSION,
         "files": bindings,
     }
