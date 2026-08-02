@@ -140,7 +140,8 @@ try {
     }
     New-Item -ItemType Directory -Path $OutputRoot -ErrorAction Stop | Out-Null
 
-    $privateOutput = Join-Path $source ".build-tools\windows-release-private"
+    # .NET Framework-based MSIX tasks still require a legacy-length assembly path.
+    $privateOutput = Join-Path $source ".build-tools\w"
     $buildState = & $stagedScript `
         -OutputRoot $privateOutput `
         -Python $pythonExecutable `

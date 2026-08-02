@@ -16,7 +16,7 @@ if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 $trustedOutputParent = Get-WindowsPackagingOutputParent `
     -SourceRoot $root -OutputRoot $OutputRoot
-$buildEnvironmentRoot = Join-Path $OutputRoot (".build-tools-" + [Guid]::NewGuid().ToString("N"))
+$buildEnvironmentRoot = Join-Path $OutputRoot (".t-" + [Guid]::NewGuid().ToString("N"))
 $pythonExe = Join-Path $buildEnvironmentRoot "venv\Scripts\python.exe"
 $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
 $previousNugetPackages = $env:NUGET_PACKAGES
@@ -128,6 +128,14 @@ try {
         /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
         /p:BaseOutputPath=$msbuildBinaryRoot | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The locked Windows dependency restore failed." }
+    $msixTaskAssembly = Join-Path $nugetRoot `
+        "microsoft.windows.sdk.buildtools.msix\1.7.251221100\tools\net472\Microsoft.Windows.SDK.BuildTools.MSIX.dll"
+    if ($msixTaskAssembly.Length -ge 260) {
+        throw "The private Windows build root is too long for the MSIX toolchain."
+    }
+    if (-not (Test-Path -LiteralPath $msixTaskAssembly -PathType Leaf)) {
+        throw "The locked Windows MSIX build task was unavailable."
+    }
     # Freeze the exact restored package graph before any validator consumes it.
     # Existing package bytes cannot be changed or replaced while the snapshot is
     # held; additions remain detectable by the post-consumer revalidation.
