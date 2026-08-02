@@ -21,7 +21,7 @@ function Invoke-LocalMachineCertificateTrust {
         throw "The private package certificate could not be passed to the trust helper."
     }
     $helperPath = Join-Path $PSScriptRoot "windows_certificate_trust.ps1"
-    $expectedTrustHelperSha256 = "FE7E1D36401A30218FBF8B6C7D15B8F8E1929199D62F03364DC2C37038066904"
+    $expectedTrustHelperSha256 = "EAB48BDD7898235D27B6EF4833DD2B6735ADAF36705F117435B4E23610988BE8"
     $helperBytes = [IO.File]::ReadAllBytes($helperPath)
     if ($helperBytes.Length -eq 0 -or $helperBytes.Length -gt 16KB) {
         throw "The private package certificate trust helper has invalid size."
@@ -64,13 +64,16 @@ exit `$result
             -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encodedCommand) `
             -Verb RunAs -Wait -PassThru
     } catch {
+        if ($Operation -eq "Add") {
+            throw "Windows could not start the private certificate trust helper (safe code 29)."
+        }
         throw $unresolvedTrustMessage
     }
     if ($Operation -eq "Add") {
         if ($elevatedProcess.ExitCode -eq 0) { return $true }
         if ($elevatedProcess.ExitCode -eq 10) { return $false }
-        if ($elevatedProcess.ExitCode -eq 20) {
-            throw "Windows could not update the exact private package certificate trust."
+        if ($elevatedProcess.ExitCode -in @(20, 22, 23, 24, 25, 27, 28)) {
+            throw "Windows could not update the exact private package certificate trust (safe code $($elevatedProcess.ExitCode))."
         }
     } elseif ($elevatedProcess.ExitCode -eq 0) {
         return

@@ -174,7 +174,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn('$_.Version -eq [Version]"0.3.1.1"', trust_helper)
         self.assertIn('[string]$_.Architecture -ceq "X64"', trust_helper)
         self.assertIn("return 11", trust_helper)
-        for safe_code in (24, 25, 26, 27, 28):
+        for safe_code in (24, 25, 27, 28):
             self.assertIn(f"$failureCode = {safe_code}", trust_helper)
         for safe_code in (22, 23):
             self.assertIn(f"return {safe_code}", trust_helper)
@@ -188,6 +188,9 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertNotIn("X509Certificate2($rawCertificate)", trust_helper)
         self.assertIn("safe code $($process.ExitCode)", installer)
         self.assertIn("safe code $($process.ExitCode)", uninstaller)
+        self.assertIn("safe code 29", installer)
+        self.assertIn("safe code 29", uninstaller)
+        self.assertNotIn("$failureCode = 26", trust_helper)
         self.assertIn("$process.ExitCode -in @(0, 11)", installer)
         self.assertIn("$process.ExitCode -eq 11", uninstaller)
         self.assertIn('-PackageFullName "$removedPackageFullName"', uninstaller)
@@ -861,7 +864,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("$installationError = $_", installer)
         self.assertIn("$installationError.Exception", installer)
         self.assertIn("Machine trust may remain", installer)
-        self.assertIn("$elevatedProcess.ExitCode -eq 20", installer)
+        self.assertIn(
+            "$elevatedProcess.ExitCode -in @(20, 22, 23, 24, 25, 27, 28)",
+            installer,
+        )
+        self.assertIn("safe code $($elevatedProcess.ExitCode)", installer)
         self.assertIn("throw $unresolvedTrustMessage", installer)
         first_strict = installer.index("$packageStrictPin = Open-PrivateMsixStrictReadPin")
         sign = installer.index("& $signTool.FullName sign")

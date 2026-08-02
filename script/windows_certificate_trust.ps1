@@ -112,7 +112,6 @@ function Set-PrivateWindowsCertificateTrust {
                     return 0
                 }
 
-                $failureCode = 26
                 $dependentPackages = @(Get-AppxPackage `
                     -AllUsers -Name $packageIdentity -ErrorAction Stop |
                     Where-Object {

@@ -143,9 +143,13 @@ exit `$result
     $powerShell = Join-Path ([Environment]::GetFolderPath(
         [Environment+SpecialFolder]::Windows
     )) "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $process = Start-Process -FilePath $powerShell `
-        -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encodedCommand) `
-        -Verb RunAs -Wait -PassThru
+    try {
+        $process = Start-Process -FilePath $powerShell `
+            -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encodedCommand) `
+            -Verb RunAs -Wait -PassThru
+    } catch {
+        throw "Windows could not start the certificate trust helper (safe code 29)."
+    }
     if ($process.ExitCode -eq 11) {
         $certificateRetainedForOtherUsers = $true
     } elseif ($process.ExitCode -ne 0) {
