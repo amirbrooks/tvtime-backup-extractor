@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sqlite3
 import stat
 import tempfile
@@ -100,7 +101,7 @@ class AndroidAcquisitionTests(unittest.TestCase):
         metadata.assert_called_once_with(source)
 
     def test_snapshot_selection_uses_protected_optional_file_opens(self) -> None:
-        root = Path("/synthetic-snapshot")
+        root = Path(Path.cwd().anchor) / "synthetic-snapshot"
         selected = root / "databases" / "DioCache.db"
 
         def protect(candidate: Path, *, volume_already_validated: bool) -> Path | None:
@@ -283,6 +284,7 @@ class AndroidAcquisitionTests(unittest.TestCase):
             self.assertNotIn(target, [Path(database) for database in opened[1:]])
             self.assertGreater(target.stat().st_size, 0)
 
+    @unittest.skipIf(os.name == "nt", "POSIX retained-inode SQLite fallback")
     def test_normalized_official_export_uses_safe_legacy_sqlite_backup(self) -> None:
         class LegacyConnection:
             def __init__(self, connection: sqlite3.Connection) -> None:
@@ -420,6 +422,7 @@ class AndroidAcquisitionTests(unittest.TestCase):
                 [],
             )
 
+    @unittest.skipIf(os.name == "nt", "POSIX live-WAL snapshot regression")
     def test_preserved_snapshot_binds_and_copies_committed_wal_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

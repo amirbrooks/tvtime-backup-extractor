@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from tvtime_extractor.android_device import (
     probe_android_device,
 )
 from tvtime_extractor.errors import TVTimeError, UserInputError
+from tvtime_extractor.safety import require_private_path
 
 
 class _SyntheticADB:
@@ -249,7 +251,10 @@ class AndroidCapabilityProbeTests(unittest.TestCase):
             )
             self.assertEqual(result.android_backup_version, 5)
             self.assertTrue(destination.is_file())
-            self.assertEqual(destination.stat().st_mode & 0o077, 0)
+            if os.name == "nt":
+                require_private_path(destination, expected_type=stat.S_IFREG)
+            else:
+                self.assertEqual(destination.stat().st_mode & 0o077, 0)
 
     @unittest.skipIf(os.name == "nt", "POSIX descriptor-alias regression")
     def test_capture_path_substitution_cannot_redirect_adb_bytes(self) -> None:

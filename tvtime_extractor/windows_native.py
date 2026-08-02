@@ -1332,6 +1332,24 @@ def _mark_handle_for_deletion(handle: int) -> None:
         raise _last_error("A private Windows temporary entry could not be removed safely.")
 
 
+def delete_empty_directory(handle: int) -> None:
+    """Delete one exact held directory only when it is already empty."""
+
+    information = handle_information(handle)
+    if (
+        not information.is_directory
+        or information.is_reparse_point
+        or information.is_cloud_hydrated
+    ):
+        raise WindowsNativeError("A private Windows temporary directory was unsafe.")
+    if directory_entries(handle):
+        raise WindowsNativeError("A private Windows temporary directory was not empty.")
+    # SetFileInformationByHandle applies to this exact directory identity. If a
+    # concurrent writer creates an entry after the enumeration, Windows rejects
+    # the disposition rather than deleting a non-empty directory.
+    _mark_handle_for_deletion(handle)
+
+
 def delete_private_tree(root_handle: int) -> None:
     """Delete one exact held tree without performing a destructive path reopen."""
 
