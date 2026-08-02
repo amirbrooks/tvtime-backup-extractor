@@ -85,14 +85,24 @@ jobs:
           Start-Process explorer.exe `
             "shell:AppsFolder\$($package[0].PackageFamilyName)!App"
           $process = $null
-          for ($attempt = 0; $attempt -lt 30 -and $null -eq $process; $attempt++) {
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
             Start-Sleep -Milliseconds 500
-            $process = Get-Process -Name "TVTimeRecovery.Windows" -ErrorAction SilentlyContinue
+            $process = Get-Process -Name "TVTimeRecovery.Windows" `
+              -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $process -and $process.MainWindowHandle -ne 0) {
+              break
+            }
           }
-          if ($null -eq $process) {
-            throw "The installed Windows alpha did not remain running for launch smoke."
+          if ($null -eq $process -or $process.MainWindowHandle -eq 0) {
+            throw "The installed Windows alpha did not open an application window."
           }
-          $process | Stop-Process -Force
+          $processId = $process.Id
+          Start-Sleep -Seconds 5
+          $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+          if ($null -eq $process -or $process.MainWindowHandle -eq 0 -or -not $process.Responding) {
+            throw "The installed Windows alpha did not remain open and responsive."
+          }
+          Stop-Process -Id $processId -Force
       - name: Remove the Windows alpha and certificate
         if: always()
         shell: powershell

@@ -1391,11 +1391,17 @@ def _windows_rename_handle_no_replace(
     """Rename one exact Windows file or directory handle without replacement."""
 
     parent_handle = -1
+    parent_owned = False
     try:
-        parent_handle, _parent_identity = _windows_open_locked_directory(
-            destination.parent,
-            allow_child_creation=True,
-        )
+        parent_binding = _windows_bound_directory_binding(destination.parent)
+        if parent_binding is not None:
+            _parent_visible, parent_handle, _parent_identity = parent_binding
+        else:
+            parent_handle, _parent_identity = _windows_open_locked_directory(
+                destination.parent,
+                allow_child_creation=True,
+            )
+            parent_owned = True
         try:
             _windows_native.rename_handle_relative(
                 native_handle,
@@ -1410,7 +1416,8 @@ def _windows_rename_handle_no_replace(
         except _windows_native.WindowsNativeError as exc:
             raise UnsafePathError("The private Windows file could not be promoted safely.") from exc
     finally:
-        _windows_close_handles((parent_handle,))
+        if parent_owned:
+            _windows_close_handles((parent_handle,))
 
 
 def _windows_promote_held_file_no_replace(
@@ -2068,6 +2075,51 @@ def _windows_delete_private_tree_handle(
         _windows_close_handles((handle,))
     if recovery_path_exists(path):
         raise UnsafePathError("A private Windows temporary directory remained after cleanup.")
+
+
+def remove_empty_private_directory(path: Path) -> None:
+    """Remove one exact private directory, refusing any unexpected contents."""
+
+    candidate = no_link_absolute_path(path)
+    if _running_on_windows():
+        state = _WINDOWS_BOUND_OUTPUT_STATE.get()
+        if state is None:
+            raise UnsafePathError("A trusted Windows output-root handle was not active.")
+        key = _casefolded_path(candidate)
+        entry = state.descendant_handles.get(key)
+        if entry is None:
+            raise UnsafePathError("A private Windows temporary directory handle was unavailable.")
+        for other_key, (
+            other_visible,
+            _other_handle,
+            _other_identity,
+        ) in state.descendant_handles.items():
+            if other_key != key and _is_within_casefolded(other_visible, candidate):
+                raise UnsafePathError(
+                    "A temporary Windows recovery directory still retained a child capability."
+                )
+        visible, handle, identity = entry
+        if _windows_directory_identity(handle) != identity:
+            raise UnsafePathError("A private Windows temporary directory identity changed.")
+        _windows_require_private_acl(handle)
+        _require_windows_visible_directory_identity(visible, expected_identity=identity)
+        try:
+            _windows_native.delete_empty_directory(handle)
+        except _windows_native.WindowsNativeError as exc:
+            raise UnsafePathError(
+                "The private temporary directory was not empty at completion."
+            ) from exc
+        state.descendant_handles.pop(key)
+        _windows_close_handle(handle)
+        if recovery_path_exists(candidate):
+            raise UnsafePathError("The private temporary directory remained after safe removal.")
+        return
+    try:
+        candidate.rmdir()
+    except OSError as exc:
+        raise UnsafePathError(
+            "The private temporary directory was not empty at completion."
+        ) from exc
 
 
 def windows_delete_bound_private_tree(path: Path) -> None:
@@ -2761,6 +2813,26 @@ def anchored_existing_extraction_root(
 
     visible_root = require_local_recovery_source(extraction_root)
     if _running_on_windows():
+        existing_binding = _windows_bound_directory_binding(visible_root)
+        if existing_binding is not None:
+            _visible, root_handle, root_identity = existing_binding
+            _windows_require_private_acl(root_handle)
+            _windows_hold_existing_descendant_directories(
+                visible_root,
+                cancellation_check=cancellation_check,
+            )
+            try:
+                yield visible_root
+            finally:
+                if _windows_directory_identity(root_handle) != root_identity:
+                    raise UnsafePathError(
+                        "The trusted Windows extraction-root handle identity changed."
+                    )
+                _require_visible_existing_directory_identity(
+                    visible_root,
+                    expected_identity=root_identity,
+                )
+            return
         token = None
         root_identity = (0, 0)
         windows_state: _WindowsBoundOutputState | None = None

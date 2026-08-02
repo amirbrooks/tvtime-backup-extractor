@@ -48,6 +48,7 @@ from .safety import (
     no_link_absolute_path,
     optional_local_recovery_regular_file,
     regular_binary_reader,
+    remove_empty_private_directory,
     require_bound_destination_parent,
     require_local_recovery_source,
     require_private_local_destination,
@@ -630,13 +631,7 @@ def _seal_acquisition(
             cancellation_check=cancellation_check,
         ),
     )
-    temporary_root = extraction_root / ".tmp"
-    try:
-        temporary_root.rmdir()
-    except OSError as exc:
-        raise UnsafePathError(
-            "The private acquisition staging directory was not empty at completion."
-        ) from exc
+    remove_empty_private_directory(extraction_root / ".tmp")
     return ExtractionResult(extraction_root=extraction_root, summary=summary)
 
 

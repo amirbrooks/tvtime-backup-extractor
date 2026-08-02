@@ -799,6 +799,48 @@ class WindowsNativeUnitTests(unittest.TestCase):
             [True, False, True, False],
         )
 
+    def test_empty_directory_cleanup_refuses_contents_before_disposition(self) -> None:
+        information = windows_native.WindowsHandleInformation(
+            attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
+            identity=(7, 10),
+            byte_size=0,
+            last_write_time=19,
+        )
+        entry = windows_native.WindowsDirectoryEntryInformation(
+            name="unexpected.bin",
+            attributes=windows_native.FILE_ATTRIBUTE_NORMAL,
+            identity=(7, 11),
+            byte_size=9,
+            last_write_time=19,
+            last_access_time=17,
+            short_name=None,
+        )
+        with (
+            mock.patch.object(windows_native, "handle_information", return_value=information),
+            mock.patch.object(windows_native, "directory_entries", return_value=(entry,)),
+            mock.patch.object(windows_native, "_mark_handle_for_deletion") as mark,
+            self.assertRaisesRegex(windows_native.WindowsNativeError, "not empty"),
+        ):
+            windows_native.delete_empty_directory(100)
+
+        mark.assert_not_called()
+
+    def test_empty_directory_cleanup_marks_the_exact_handle_for_deletion(self) -> None:
+        information = windows_native.WindowsHandleInformation(
+            attributes=windows_native.FILE_ATTRIBUTE_DIRECTORY,
+            identity=(7, 10),
+            byte_size=0,
+            last_write_time=19,
+        )
+        with (
+            mock.patch.object(windows_native, "handle_information", return_value=information),
+            mock.patch.object(windows_native, "directory_entries", return_value=()),
+            mock.patch.object(windows_native, "_mark_handle_for_deletion") as mark,
+        ):
+            windows_native.delete_empty_directory(100)
+
+        mark.assert_called_once_with(100)
+
     def test_cleanup_child_handle_blocks_rename_and_opens_the_reparse_itself(self) -> None:
         information = windows_native.WindowsHandleInformation(
             attributes=(
