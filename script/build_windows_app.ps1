@@ -129,9 +129,15 @@ try {
     $assetDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
         -OwnershipToken $assetDestinationOwnership
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere -PathType Leaf)) { throw "A current Visual Studio installation with MSBuild and MSIX tooling is required." }
-    $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
-    if (-not $msbuild) { throw "MSBuild was not found." }
+    if (-not (Test-Path $vswhere -PathType Leaf)) {
+        throw "Visual Studio 2022 with MSBuild and MSIX tooling is required."
+    }
+    $msbuild = & $vswhere -latest -products * -version "[17.0,18.0)" `
+        -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe |
+        Select-Object -First 1
+    if (-not $msbuild) {
+        throw "The reviewed Visual Studio 2022 MSBuild toolchain was not found."
+    }
     & $msbuild $project /t:Restore /p:RuntimeIdentifier=win-x64 /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
         /p:TVTimeGeneratedContentRoot=$generatedContentRoot `

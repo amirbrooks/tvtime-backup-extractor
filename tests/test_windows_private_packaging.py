@@ -818,6 +818,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
 
     def test_public_windows_alpha_build_is_source_bound_and_downloadable(self) -> None:
         builder = self.read("script/build_windows_release.ps1")
+        app_builder = self.read("script/build_windows_app.ps1")
         installer = self.read("script/install_windows_alpha.ps1")
         uninstaller = self.read("script/uninstall_windows_alpha.ps1")
         manifest_generator = self.read("script/generate_windows_release_manifest.py")
@@ -843,6 +844,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("The Windows release checkout changed during the build", builder)
         self.assertIn('"private_key_included": False', manifest_generator)
         self.assertIn('"dependency_locks"', manifest_generator)
+        self.assertIn('-version "[17.0,18.0)"', app_builder)
         self.assertIn("AcceptCertificateTrust", installer)
         self.assertIn("Assert-ExactBundleMembership", installer)
         self.assertIn("Get-AuthenticodeSignature", installer)
@@ -856,6 +858,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FORBIDDEN_MSIX_NAME_TOKENS", verifier)
         self.assertIn("ephemeral-self-signed-alpha", verifier)
         self.assertIn("Build, install, and launch Windows x64 alpha", workflow)
+        self.assertIn("runs-on: windows-2022", workflow)
+        self.assertNotIn("runs-on: windows-latest", workflow)
         self.assertIn("Upload the exact Windows tester artifacts", workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", workflow)
 
