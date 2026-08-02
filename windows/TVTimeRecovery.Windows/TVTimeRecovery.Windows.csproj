@@ -27,6 +27,7 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode>true</RestoreLockedMode>
     <TVTimeGeneratedContentRoot Condition="'$(TVTimeGeneratedContentRoot)' == ''">$(MSBuildProjectDirectory)</TVTimeGeneratedContentRoot>
+    <TVTimeHelperContentRoot Condition="'$(TVTimeHelperContentRoot)' == ''">$(TVTimeGeneratedContentRoot)\Helpers</TVTimeHelperContentRoot>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
@@ -40,8 +41,8 @@
       <Link>Notices\%(RecursiveDir)%(Filename)%(Extension)</Link>
     </Content>
   </ItemGroup>
-  <ItemGroup Condition="Exists('$(TVTimeGeneratedContentRoot)\Helpers\tvtime-helper.exe')">
-    <Content Include="$(TVTimeGeneratedContentRoot)\Helpers\**\*">
+  <ItemGroup Condition="Exists('$(TVTimeHelperContentRoot)\tvtime-helper.exe')">
+    <Content Include="$(TVTimeHelperContentRoot)\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Helpers\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <TargetPath>Helpers\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>

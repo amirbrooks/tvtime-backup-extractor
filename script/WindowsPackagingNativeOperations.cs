@@ -79,31 +79,6 @@ namespace TVTimeWindowsPackaging
             }
         }
 
-        internal static SafeFileHandle OpenRelativeForDelete(
-            SafeFileHandle trustedParent,
-            string childName,
-            bool directory)
-        {
-            uint desiredAccess = DeleteAccess | FileReadAttributes |
-                FileWriteAttributes | Synchronize;
-            uint options = FileSynchronousIoNonAlert | FileOpenReparsePoint;
-            if (directory)
-            {
-                desiredAccess |= FileListDirectory | FileTraverse;
-                options |= FileDirectoryFile;
-            }
-            else
-            {
-                options |= FileNonDirectoryFile;
-            }
-            return OpenRelativePinned(
-                trustedParent,
-                childName,
-                desiredAccess,
-                FileShareRead | FileShareWrite,
-                options);
-        }
-
         internal static string RenameRetainedRoot(
             SafeFileHandle handle,
             string expectedIdentity,

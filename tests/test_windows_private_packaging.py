@@ -96,7 +96,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("<RestorePackagesWithLockFile>true", project)
         self.assertIn("<RestoreLockedMode>true", project)
         self.assertIn("<TVTimeGeneratedContentRoot", project)
-        self.assertIn("$(TVTimeGeneratedContentRoot)\\Helpers", project)
+        self.assertIn("<TVTimeHelperContentRoot", project)
+        self.assertIn("$(TVTimeHelperContentRoot)\\tvtime-helper.exe", project)
         self.assertIn("<DebugType>none</DebugType>", project)
         self.assertIn("<DebugSymbols>false</DebugSymbols>", project)
         self.assertIn("<DisableXbfLineInfo>true</DisableXbfLineInfo>", project)
@@ -108,12 +109,13 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
 
     def test_windows_release_keeps_generated_build_content_outside_source(self) -> None:
         builder = self.read("script/build_windows_app.ps1")
-        for generated_name in ("Helpers", "Assets", "Notices"):
+        for generated_name in ("Assets", "Notices"):
             self.assertIn(f'Join-Path $generatedContentRoot "{generated_name}"', builder)
         for generated_name in ("obj", "bin"):
             self.assertIn(f'Join-Path $OutputRoot "{generated_name}"', builder)
         for property_name in (
             "TVTimeGeneratedContentRoot",
+            "TVTimeHelperContentRoot",
             "BaseIntermediateOutputPath",
             "MSBuildProjectExtensionsPath",
             "BaseOutputPath",
@@ -639,12 +641,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn("FileDispositionInfo", capabilities)
         self.assertIn("FileBasicInfo", capabilities)
-        self.assertIn("OpenRelativeForDelete", capabilities)
-        self.assertIn("DeleteChildren(path, rootHandle", capabilities)
-        self.assertIn("locked-move-source", self.read("script/test_windows_packaging_lib.ps1"))
         self.assertIn("LockTree", capabilities)
-        self.assertIn("LockTreeForMove", capabilities)
-        self.assertIn("New-ContainedPromotableOrdinaryTreeSnapshot", library)
         self.assertIn("$dist = $OutputRoot", helper)
         self.assertIn("foreach ($directory in @($work, $spec))", helper)
         self.assertIn("ReadTreeManifest", capabilities)
@@ -656,11 +653,6 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FileNonDirectoryFile", capabilities)
         self.assertIn("expectedIdentity", capabilities)
         self.assertIn("FileShareRead | FileShareWrite", capabilities)
-        self.assertIn(
-            "WindowsPackagingNative.FileShareRead |\n"
-            "                            WindowsPackagingNative.FileShareDelete",
-            capabilities,
-        )
         move_section = library[library.index("function Move-ContainedOrdinaryDirectory") :]
         owned_move = move_section.index(
             "$movedDestination = [TVTimeWindowsPackaging.DirectoryCapabilities]::Rename"
@@ -679,8 +671,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("windows_packaging_lib.ps1", helper)
         self.assertIn("windows_packaging_lib.ps1", app)
         self.assertIn("windows_msix_integrity.ps1", app)
-        self.assertIn("Move-ContainedOrdinaryDirectory", helper)
-        self.assertIn("Move-ContainedOrdinaryDirectory", app)
+        self.assertNotIn("Move-ContainedOrdinaryDirectory", helper)
+        self.assertNotIn("Move-ContainedOrdinaryDirectory", app)
         self.assertNotIn("Copy-Item -LiteralPath $helperMember.FullName", app)
         self.assertIn("-PrimaryError $buildError", app)
         self.assertIn("-PrimaryError $bodyError", helper)
@@ -688,11 +680,9 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("HelperOwnership", helper)
         self.assertIn("HelperManifest", helper)
         self.assertIn("$generatedContentRootOwnership = New-ContainedOrdinaryDirectory", app)
-        self.assertIn("-Destination $helperDestination", app)
-        self.assertIn("$helperRootOwnership = $null", app)
+        self.assertIn("TVTimeHelperContentRoot=$helperRoot", app)
         self.assertIn("-TrustedRoot $generatedContentRoot -Candidate $assetDestination", app)
         self.assertIn("-TrustedRoot $generatedContentRoot -Candidate $noticeDestination", app)
-        self.assertIn("helperDestinationOwnership.Manifest -cne $helperManifest", app)
         self.assertIn("packagedHelperManifest -cne $helperManifest", app)
         self.assertIn("packagedAssetManifest -cne $assetDestinationOwnership.Manifest", app)
         self.assertIn("packagedNoticeManifest -cne $noticeDestinationOwnership.Manifest", app)
@@ -708,10 +698,6 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             "Get-PrivateMsixBlockMapDigest",
         ):
             self.assertIn(required, app)
-        self.assertLess(
-            app.index("$helperDestinationOwnership = Move-ContainedOrdinaryDirectory"),
-            app.index("helperDestinationOwnership.Manifest -cne $helperManifest"),
-        )
         self.assertIn(
             "-OwnershipTokens @($buildEnvironmentOwnership, $outputRootOwnership)",
             app,

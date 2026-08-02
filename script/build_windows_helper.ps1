@@ -167,33 +167,24 @@ if (-not (Test-Path (Join-Path $helper "tvtime-helper.exe") -PathType Leaf)) {
 }
 & $pythonExe -B -I (Join-Path $root "script\scan_macos_release.py") --root $helper --forbidden-value $root | Out-Host
 Assert-NativeSuccess "The private Windows helper failed its privacy scan."
-$helperOwnership = New-ContainedPromotableOrdinaryTreeSnapshot `
+$helperOwnership = New-ContainedOrdinaryTreeSnapshot `
     -TrustedRoot $dist -Candidate $helper
-# The exact tree that will be promoted is scanned again while all of its
+# The exact tree that MSBuild will package is scanned again while all of its
 # directory and file capabilities deny mutation and replacement.
 & $pythonExe -B -I (Join-Path $root "script\scan_macos_release.py") --root $helper --forbidden-value $root | Out-Host
 Assert-NativeSuccess "The locked private Windows helper failed its privacy scan."
 
-$final = Join-Path $OutputRoot "helper"
-Assert-ContainedOrdinaryDirectoryOwnership `
-    -OwnershipToken $outputRootOwnership | Out-Null
-if (Test-Path $final) { throw "A previous private helper build exists. Remove it only after review." }
-$helperOwnership = Move-ContainedOrdinaryDirectory `
-    -OwnershipToken $helperOwnership `
-    -DestinationTrustedRoot $OutputRoot `
-    -Destination $final `
-    -DestinationRootOwnership $outputRootOwnership
 $completed = $true
 $helperResult = if ($ReturnBuildState) {
     [pscustomobject]@{
-        HelperRoot = $final
+        HelperRoot = $helper
         OutputRootOwnership = $outputRootOwnership
         BuildEnvironmentOwnership = $buildEnvironmentOwnership
         HelperOwnership = $helperOwnership
         HelperManifest = $helperOwnership.Manifest
     }
 } else {
-    $final
+    $helper
 }
 } catch {
     $bodyError = $_

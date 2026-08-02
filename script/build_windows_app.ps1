@@ -22,13 +22,11 @@ $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
 $previousNugetPackages = $env:NUGET_PACKAGES
 $project = Join-Path $root "windows\TVTimeRecovery.Windows\TVTimeRecovery.Windows.csproj"
 $generatedContentRoot = Join-Path $OutputRoot "generated-content"
-$helperDestination = Join-Path $generatedContentRoot "Helpers"
 $assetDestination = Join-Path $generatedContentRoot "Assets"
 $noticeDestination = Join-Path $generatedContentRoot "Notices"
 $msbuildIntermediateRoot = (Join-Path $OutputRoot "obj") + [IO.Path]::DirectorySeparatorChar
 $msbuildBinaryRoot = (Join-Path $OutputRoot "bin") + [IO.Path]::DirectorySeparatorChar
 $generatedContentRootOwnership = $null
-$helperDestinationOwnership = $null
 $assetDestinationOwnership = $null
 $noticeDestinationOwnership = $null
 $outputRootOwnership = $null
@@ -72,22 +70,12 @@ try {
     $generatedContentRootOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $OutputRoot -Candidate $generatedContentRoot `
         -TrustedRootOwnership $outputRootOwnership
-    if (Test-Path $helperDestination) { throw "The generated helper staging directory already exists." }
     if (Test-Path $assetDestination) { throw "The generated Windows asset staging directory already exists." }
     if (Test-Path $noticeDestination) { throw "The generated Windows notice staging directory already exists." }
     $buildError = $null
     try {
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $helperRootOwnership | Out-Null
-    $helperDestinationOwnership = Move-ContainedOrdinaryDirectory `
-        -OwnershipToken $helperRootOwnership `
-        -DestinationTrustedRoot $generatedContentRoot `
-        -Destination $helperDestination `
-        -DestinationRootOwnership $generatedContentRootOwnership
-    $helperRootOwnership = $null
-    if ($helperDestinationOwnership.Manifest -cne $helperManifest) {
-        throw "The promoted Windows helper tree did not match its locked source manifest."
-    }
     $assetDestinationOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $generatedContentRoot -Candidate $assetDestination `
         -TrustedRootOwnership $generatedContentRootOwnership
@@ -135,6 +123,7 @@ try {
     & $msbuild $project /t:Restore /p:RuntimeIdentifier=win-x64 /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
         /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:TVTimeHelperContentRoot=$helperRoot `
         /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
         /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
         /p:BaseOutputPath=$msbuildBinaryRoot | Out-Host
@@ -181,6 +170,7 @@ try {
         /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
         /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:TVTimeHelperContentRoot=$helperRoot `
         /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
         /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
         /p:BaseOutputPath=$msbuildBinaryRoot `
@@ -196,7 +186,6 @@ try {
 } finally {
     Remove-ContainedOrdinaryTrees `
         -OwnershipTokens @(
-            $helperDestinationOwnership,
             $assetDestinationOwnership,
             $noticeDestinationOwnership,
             $generatedContentRootOwnership
