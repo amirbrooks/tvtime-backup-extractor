@@ -16,7 +16,8 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <RuntimeFrameworkVersion>8.0.29</RuntimeFrameworkVersion>
+    <!-- global.json pins SDK 8.0.423, which carries runtime 8.0.29. Do not set
+         RuntimeFrameworkVersion: it also overrides the implicit Windows SDK reference. -->
     <InvariantGlobalization>false</InvariantGlobalization>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>

@@ -91,6 +91,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("<Platforms>x64</Platforms>", project)
         self.assertIn("<RuntimeIdentifiers>win-x64</RuntimeIdentifiers>", project)
         self.assertIn("<WindowsAppSDKSelfContained>true", project)
+        self.assertNotIn("<RuntimeFrameworkVersion>", project)
+        self.assertIn("global.json pins SDK 8.0.423", project)
         self.assertIn("<RestorePackagesWithLockFile>true", project)
         self.assertIn("<RestoreLockedMode>true", project)
         self.assertIn("<TVTimeGeneratedContentRoot", project)
