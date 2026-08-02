@@ -51,6 +51,7 @@ try {
         -Python $Python `
         -OutputRoot $OutputRoot `
         -BuildEnvironmentRoot $buildEnvironmentRoot `
+        -SourceCommit $SourceCommit `
         -PreserveBuildEnvironment `
         -ReturnBuildState
     if ($null -eq $helperBuildState -or

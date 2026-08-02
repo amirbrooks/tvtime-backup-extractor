@@ -71,7 +71,8 @@ namespace TVTimeWindowsPackaging
                 relativePath,
                 WindowsPackagingNative.FileShareRead |
                     WindowsPackagingNative.FileShareWrite,
-                null);
+                null,
+                false);
         }
 
         public static PinnedFile OpenStrictReadPin(
@@ -87,7 +88,36 @@ namespace TVTimeWindowsPackaging
                 trustedRoot,
                 relativePath,
                 WindowsPackagingNative.FileShareRead,
-                expectedIdentity);
+                expectedIdentity,
+                false);
+        }
+
+        public static PinnedFile OpenBuildSourceIdentityPin(
+            SafeFileHandle trustedRoot)
+        {
+            return WindowsPackagingNative.OpenPinnedFile(
+                trustedRoot,
+                "reviewed-source.tar.gz",
+                WindowsPackagingNative.FileShareRead |
+                    WindowsPackagingNative.FileShareWrite,
+                null,
+                true);
+        }
+
+        public static PinnedFile OpenBuildSourceStrictReadPin(
+            SafeFileHandle trustedRoot,
+            string expectedIdentity)
+        {
+            if (String.IsNullOrEmpty(expectedIdentity))
+                throw new ArgumentException(
+                    "An expected Windows build source identity was unavailable.",
+                    "expectedIdentity");
+            return WindowsPackagingNative.OpenPinnedFile(
+                trustedRoot,
+                "reviewed-source.tar.gz",
+                WindowsPackagingNative.FileShareRead,
+                expectedIdentity,
+                true);
         }
     }
 
@@ -101,10 +131,13 @@ namespace TVTimeWindowsPackaging
             SafeFileHandle trustedRoot,
             string relativePath,
             uint fileShareMode,
-            string expectedIdentity)
+            string expectedIdentity,
+            bool buildSourceArchive)
         {
             RequireOrdinaryDirectory(trustedRoot);
-            string[] parts = ValidateRelativePackagePath(relativePath);
+            string[] parts = buildSourceArchive
+                ? ValidateBuildSourceArchivePath(relativePath)
+                : ValidateRelativePackagePath(relativePath);
             List<SafeFileHandle> ancestors = new List<SafeFileHandle>();
             SafeFileHandle file = null;
             try
@@ -250,6 +283,16 @@ namespace TVTimeWindowsPackaging
                     "The private Windows package path was invalid.");
             foreach (string part in parts) ValidateChildName(part);
             return parts;
+        }
+
+        private static string[] ValidateBuildSourceArchivePath(string relativePath)
+        {
+            const string expectedName = "reviewed-source.tar.gz";
+            if (!String.Equals(relativePath, expectedName, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "The reviewed Windows build source path was invalid.");
+            ValidateChildName(relativePath);
+            return new string[] { relativePath };
         }
     }
 }

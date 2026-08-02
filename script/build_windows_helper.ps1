@@ -3,6 +3,7 @@ param(
     [string]$Python = "py",
     [string]$OutputRoot = "",
     [string]$BuildEnvironmentRoot = "",
+    [string]$SourceCommit = "",
     [switch]$PreserveBuildEnvironment,
     [switch]$ReturnBuildState
 )
@@ -24,6 +25,7 @@ $outputRootOwnership = $null
 $buildEnvironmentOwnership = $null
 $stageOwnership = $null
 $helperOwnership = $null
+$sourceArchivePin = $null
 $completed = $false
 $helperResult = $null
 $bodyError = $null
@@ -57,6 +59,43 @@ try {
         -TrustedRoot $OutputRoot -Candidate $BuildEnvironmentRoot `
         -TrustedRootOwnership $outputRootOwnership
 
+    $projectInstallSource = $root
+    if ([Environment]::GetEnvironmentVariable(
+        "TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE",
+        "Process"
+    ) -ceq "1") {
+        if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
+            throw "The reviewed Windows helper source commit was invalid."
+        }
+        $checkoutRoot = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable(
+            "TVTIME_WINDOWS_RELEASE_CHECKOUT_ROOT",
+            "Process"
+        ))
+        $gitExecutable = (
+            Get-Command git -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1
+        ).Source
+        $sourceArchive = Join-Path $BuildEnvironmentRoot "reviewed-source.tar.gz"
+        & $gitExecutable -C $checkoutRoot archive `
+            --format=tar.gz "--output=$sourceArchive" $SourceCommit
+        Assert-NativeSuccess "The reviewed Windows helper source archive could not be created."
+        $nativeBuildEnvironment = Get-OwnershipNativeCapability `
+            -OwnershipToken $buildEnvironmentOwnership
+        $identityPin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceIdentityPin(
+            $nativeBuildEnvironment.Handle
+        )
+        try {
+            $sourceArchiveIdentity = $identityPin.Identity
+        } finally {
+            $identityPin.Dispose()
+        }
+        $sourceArchivePin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceStrictReadPin(
+            $nativeBuildEnvironment.Handle,
+            $sourceArchiveIdentity
+        )
+        $projectInstallSource = $sourceArchive
+    }
+
     $tools = $BuildEnvironmentRoot
     $venv = Join-Path $BuildEnvironmentRoot "venv"
     $pythonExe = Join-Path $venv "Scripts\python.exe"
@@ -74,8 +113,15 @@ Assert-NativeSuccess "Windows helper builds require reviewed x64 Python."
 
 & $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --require-hashes --only-binary=:all: -r (Join-Path $root "requirements-windows-build.lock") | Out-Host
 Assert-NativeSuccess "The hash-locked Windows helper dependencies could not be installed."
-& $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --no-index --no-build-isolation --no-deps $root | Out-Host
-Assert-NativeSuccess "The local Windows helper source could not be installed."
+& $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --no-index --no-build-isolation --no-deps $projectInstallSource | Out-Host
+$sourceInstallExitCode = $LASTEXITCODE
+if ($null -ne $sourceArchivePin) {
+    $sourceArchivePin.Dispose()
+    $sourceArchivePin = $null
+}
+if ($sourceInstallExitCode -ne 0) {
+    throw "The local Windows helper source could not be installed."
+}
 & $pythonExe -B -I -m pip check | Out-Host
 Assert-NativeSuccess "The Windows helper dependency environment is inconsistent."
 & $pythonExe -B -I (Join-Path $root "script\verify_windows_python_environment.py") | Out-Host
@@ -104,6 +150,9 @@ foreach ($font in $fonts) {
     $dataArgs += @("--add-data", ($fontPath + ";reportlab/fonts"))
 }
 
+# In immutable release mode, $root is the recursively ACL-locked and
+# inventory-verified Git stage. The pinned archive above is only pip's
+# out-of-tree build input; PyInstaller deliberately consumes the locked stage.
 & $pythonExe -B -I -m PyInstaller --clean --noconfirm --onedir --console --noupx `
     --name tvtime-helper --contents-directory _internal @dataArgs --paths $root `
     --distpath $dist --workpath $work --specpath $spec `
@@ -146,6 +195,10 @@ $helperResult = if ($ReturnBuildState) {
 } catch {
     $bodyError = $_
 } finally {
+    if ($null -ne $sourceArchivePin) {
+        $sourceArchivePin.Dispose()
+        $sourceArchivePin = $null
+    }
     $cleanupTokens = @()
     if (-not $completed) { $cleanupTokens += $helperOwnership }
     $cleanupTokens += $stageOwnership
