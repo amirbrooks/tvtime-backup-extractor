@@ -67,7 +67,7 @@ try {
 
     $trustStore = [Security.Cryptography.X509Certificates.X509Store]::new(
         "TrustedPeople",
-        "CurrentUser"
+        "LocalMachine"
     )
     $trustStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
     $matches = @(
@@ -77,7 +77,7 @@ try {
         ($matches.Count -eq 1 -and
             [Convert]::ToBase64String($matches[0].RawData) -cne
                 [Convert]::ToBase64String($publicCertificate.RawData))) {
-        throw "The current-user trust store contained ambiguous alpha certificate state."
+        throw "The machine trust store contained ambiguous alpha certificate state."
     }
     if ($matches.Count -eq 0) {
         $trustStore.Add($publicCertificate)
@@ -108,7 +108,7 @@ try {
                     $_.Thumbprint -ceq $ExpectedThumbprint
                 }
             ).Count -ne 0) {
-                throw "Temporary current-user alpha trust remained after verification."
+                throw "Temporary machine alpha trust remained after verification."
             }
         } catch {
             if ($null -eq $bodyError) {

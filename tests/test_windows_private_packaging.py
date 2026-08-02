@@ -154,6 +154,16 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertNotIn("$matchingUsages", installer)
 
+    def test_release_signature_verifier_uses_the_proven_machine_trust_scope(self) -> None:
+        verifier = self.read("script/verify_windows_signature.ps1")
+        self.assertRegex(
+            verifier,
+            r'X509Store\]::new\(\s*"TrustedPeople",\s*"LocalMachine"\s*\)',
+        )
+        self.assertNotIn('"CurrentUser"', verifier)
+        self.assertIn("if ($certificateAdded", verifier)
+        self.assertIn("$trustStore.Remove($addedMatch)", verifier)
+
     def test_machine_certificate_is_retained_for_other_windows_users(self) -> None:
         trust_helper = self.read("script/windows_certificate_trust.ps1")
         installer = self.read("script/install_windows_alpha.ps1")
