@@ -574,9 +574,22 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("build environment must be fresh", helper)
         self.assertIn("build environment used a reserved output name", helper)
         self.assertIn("private Windows build output must be fresh", helper)
-        self.assertIn('(".t-" + [Guid]::NewGuid().ToString("N"))', app)
+        self.assertIn('Join-Path $OutputRoot ".t"', app)
+        self.assertIn("Bin\\amd64\\MSBuild.exe", app)
         self.assertIn("$msixTaskAssembly.Length -ge 260", app)
         self.assertIn("build root is too long for the MSIX toolchain", app)
+        self.assertIn("$makeAppx.Length -ge 260", app)
+        self.assertIn("10.0.26100.0\\x64\\MakeAppx.exe", app)
+        self.assertIn("/p:MakeAppxExeFullPath=$makeAppx", app)
+        self.assertIn("/m:1 /nr:false", app)
+        self.assertLess(
+            app.index("collect_windows_licenses.py"),
+            app.index("& $makeAppx /? | Out-Null"),
+        )
+        self.assertLess(
+            app.index("& $makeAppx /? | Out-Null"),
+            app.index("/p:MakeAppxExeFullPath=$makeAppx"),
+        )
         self.assertIn("/p:RestorePackagesPath=$nugetRoot", app)
         self.assertIn("Remove-ContainedOrdinaryTree", app)
         self.assertIn("[IO.FileAttributes]::ReparsePoint", library)

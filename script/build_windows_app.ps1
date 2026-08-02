@@ -16,7 +16,7 @@ if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 $trustedOutputParent = Get-WindowsPackagingOutputParent `
     -SourceRoot $root -OutputRoot $OutputRoot
-$buildEnvironmentRoot = Join-Path $OutputRoot (".t-" + [Guid]::NewGuid().ToString("N"))
+$buildEnvironmentRoot = Join-Path $OutputRoot ".t"
 $pythonExe = Join-Path $buildEnvironmentRoot "venv\Scripts\python.exe"
 $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
 $previousNugetPackages = $env:NUGET_PACKAGES
@@ -115,10 +115,10 @@ try {
         throw "Visual Studio 2022 with MSBuild and MSIX tooling is required."
     }
     $msbuild = & $vswhere -latest -products * -version "[17.0,18.0)" `
-        -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe |
+        -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\amd64\MSBuild.exe |
         Select-Object -First 1
     if (-not $msbuild) {
-        throw "The reviewed Visual Studio 2022 MSBuild toolchain was not found."
+        throw "The reviewed 64-bit Visual Studio 2022 MSBuild toolchain was not found."
     }
     & $msbuild $project /t:Restore /p:RuntimeIdentifier=win-x64 /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
@@ -135,6 +135,14 @@ try {
     }
     if (-not (Test-Path -LiteralPath $msixTaskAssembly -PathType Leaf)) {
         throw "The locked Windows MSIX build task was unavailable."
+    }
+    $makeAppx = Join-Path $nugetRoot `
+        "microsoft.windows.sdk.buildtools\10.0.26100.4948\bin\10.0.26100.0\x64\MakeAppx.exe"
+    if ($makeAppx.Length -ge 260) {
+        throw "The private Windows build root is too long for the x64 packaging tool."
+    }
+    if (-not (Test-Path -LiteralPath $makeAppx -PathType Leaf)) {
+        throw "The locked x64 Windows packaging tool was unavailable."
     }
     # Freeze the exact restored package graph before any validator consumes it.
     # Existing package bytes cannot be changed or replaced while the snapshot is
@@ -168,17 +176,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "The private Windows license collection failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
         -OwnershipToken $nugetRootOwnership | Out-Null
+    & $makeAppx /? | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The locked x64 Windows packaging tool could not start."
+    }
     $noticeDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
         -OwnershipToken $noticeDestinationOwnership
     $msixOutputDirectory = (Join-Path $OutputRoot "msix") + [IO.Path]::DirectorySeparatorChar
     $appxPackageDirectoryArgument = "/p:AppxPackageDir=$msixOutputDirectory"
-    & $msbuild $project /m /p:Configuration=Release /p:Platform=x64 `
+    & $msbuild $project /m:1 /nr:false /p:Configuration=Release /p:Platform=x64 `
         /p:RuntimeIdentifier=win-x64 /p:GenerateAppxPackageOnBuild=true `
         /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never `
         /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
         /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
         /p:TVTimeHelperContentRoot=$helperRoot `
+        /p:MakeAppxExeFullPath=$makeAppx `
         /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
         /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
         /p:BaseOutputPath=$msbuildBinaryRoot `
