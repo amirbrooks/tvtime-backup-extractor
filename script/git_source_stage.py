@@ -83,8 +83,12 @@ def _run_windows_tree_acl(root: Path, *arguments: str) -> None:
 
 def _set_windows_tree_access(root: Path, rights: str) -> None:
     sid = _windows_user_sid()
-    _run_windows_tree_acl(root, "/inheritance:r")
-    _run_windows_tree_acl(root, "/grant:r", f"*{sid}:(OI)(CI){rights}")
+    _run_windows_tree_acl(
+        root,
+        "/inheritance:r",
+        "/grant:r",
+        f"*{sid}:(OI)(CI){rights}",
+    )
 
 
 def _deny_windows_tree_mutation(root: Path) -> None:
