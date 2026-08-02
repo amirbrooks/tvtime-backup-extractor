@@ -164,11 +164,13 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn('$_.Version -eq [Version]"0.3.1.1"', trust_helper)
         self.assertIn('[string]$_.Architecture -ceq "X64"', trust_helper)
         self.assertIn("return 11", trust_helper)
-        for safe_code in (24, 25, 26):
+        for safe_code in (24, 25, 26, 27, 28):
             self.assertIn(f"$failureCode = {safe_code}", trust_helper)
         for safe_code in (22, 23):
             self.assertIn(f"return {safe_code}", trust_helper)
         self.assertIn("return $failureCode", trust_helper)
+        self.assertIn("[Security.Principal.WindowsPrincipal]::new(", trust_helper)
+        self.assertNotIn("WindowsPrincipal($currentIdentity)", trust_helper)
         self.assertIn("safe code $($process.ExitCode)", installer)
         self.assertIn("safe code $($process.ExitCode)", uninstaller)
         self.assertIn("$process.ExitCode -in @(0, 11)", installer)

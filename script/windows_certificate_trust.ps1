@@ -25,10 +25,12 @@ function Set-PrivateWindowsCertificateTrust {
         if ($RawCertificateBase64.Length -gt 4096) {
             throw "The requested alpha package certificate is too large."
         }
+        $failureCode = 27
         $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try {
-            $currentPrincipal = New-Object `
-                Security.Principal.WindowsPrincipal($currentIdentity)
+            $currentPrincipal = [Security.Principal.WindowsPrincipal]::new(
+                $currentIdentity
+            )
             $isAdministrator = $currentPrincipal.IsInRole(
                 [Security.Principal.WindowsBuiltInRole]::Administrator
             )
@@ -37,6 +39,7 @@ function Set-PrivateWindowsCertificateTrust {
         }
         if (-not $isAdministrator) { return 22 }
 
+        $failureCode = 28
         $rawCertificate = [Convert]::FromBase64String($RawCertificateBase64)
         $certificate = New-Object `
             System.Security.Cryptography.X509Certificates.X509Certificate2($rawCertificate)
