@@ -43,26 +43,14 @@ REVIEWED_NUGET_PACKAGE_SHA512 = {
     ("Microsoft.Web.WebView2", "1.0.3719.77"): (
         "Cpq7EGgijiCN0lg1RlTZuZcRkzyo/USU9cEJMSPh6FG4PLjmTEpJ5NKuJqQ06ONnVVARCcTLf31IjjhFJUrApw=="
     ),
-    ("Microsoft.Windows.AI.MachineLearning", "2.1.70"): (
-        "3hjZVutsGnlGL4RFNxXfF8OGXpiPBRb8vNxj0j4T9CDj64DlZGvQAZuJUzWihQ8Emh5p/zeYVVC6BiCU/9Am4w=="
-    ),
     ("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948"): (
         "cmungnLvmFQo50GkX+tJ//+hevjgL1VIM1H6kx6QAjxyAIzmZ5op/v5GPa3k8/cVSlVukWZDFVTHFPKRDL/Eeg=="
     ),
     ("Microsoft.Windows.SDK.BuildTools.MSIX", "1.7.251221100"): (
         "3OEJjmDvPQH649p73taTt2n4AeY9dMg/gaDdZHQZh4xOOTAjdfuzuuw2FxSedpQuP9Pbki7FNGoE1mM4kjf0Mw=="
     ),
-    ("Microsoft.WindowsAppSDK", "2.2.0"): (
-        "bmOhIRMAUUtpWggnJ/DqdKAVdMuqDoFhUruUmeGEAdRCSCeOtsGhg/o2PwOojqadzDAFYOzoCUdI29VR7VHz2g=="
-    ),
-    ("Microsoft.WindowsAppSDK.AI", "2.2.3"): (
-        "v6Lbm2VdS7zv2f8Wz1T3cIB19EugboEejt4GJQH4drNHmJqoilA9rnM5qgw5Pnq2u7Zy1LPtAwan2toUH3MaEg=="
-    ),
     ("Microsoft.WindowsAppSDK.Base", "2.0.4"): (
         "Mjy6K7l9kj1+5UNPg8y/fkHx2be0TdLYaIWJsf7SlkZHEcFd6bl5L8uSjPNYK0Xz5vfaYELO5yKszHHIbaO75A=="
-    ),
-    ("Microsoft.WindowsAppSDK.DWrite", "2.1.0"): (
-        "lm1mJMhQA6HV702Oom3Yjm7e5A0ZUfU6Ji0JFDhgYSUP71AlBe3hQMMNYc1oCuqOd/b7UdHl6aJwXGzkP+20Hw=="
     ),
     ("Microsoft.WindowsAppSDK.Foundation", "2.1.0"): (
         "R7jyix4rXyFtGva55FvSaVt1nw2TGS0bVWEJMlTo46Hprrnvyz8LKtUsc02P5tByuc9DN7v742LsY0/pJ8O3dg=="
@@ -70,20 +58,11 @@ REVIEWED_NUGET_PACKAGE_SHA512 = {
     ("Microsoft.WindowsAppSDK.InteractiveExperiences", "2.0.15"): (
         "TCJ88/ggWwMXd23u38HHjhPDATu14CgMC6OFqIsP7Kll6QVxIjA9+XVo6XPmGxnzn71UK71XJYR2QHRbRYOiqQ=="
     ),
-    ("Microsoft.WindowsAppSDK.ML", "2.1.70"): (
-        "xwORZXuPJWh10JX6wJXOet3VIb7Ui9dDVbpot9zbIeUT4nYEVmLX4IAcjCe2vdQWGTOBa9tKbP5VIdz0a42Mng=="
-    ),
     ("Microsoft.WindowsAppSDK.Runtime", "2.2.0"): (
         "Lx/BvrhrYrSecSkUcCfBzV8I3ye7Zd5AFSLeObSuhmap+rMsVmQUKQ1tzdtZfMOUgDYOuyfQFyWG0x7m3VrWNA=="
     ),
-    ("Microsoft.WindowsAppSDK.Widgets", "2.0.5"): (
-        "uqMIWloLBnsdSKsCP2K523jO+FhGeIcH54BBsJg/TSKHvdQ/w8RQDi5ZRGVBjh7ovrw8bjSJdfEBA0u1+nC6dw=="
-    ),
     ("Microsoft.WindowsAppSDK.WinUI", "2.2.1"): (
         "rfTm/Deoj5PrhmUXu4YziVSgqv8oxeDUSTyYdOVsxy7CRm/zsbIgQZrcp23i2i6tZ1abW+x8311q7DbyGk8dgg=="
-    ),
-    ("System.Numerics.Tensors", "9.0.0"): (
-        "razlju7UgILQ/Vb7BoW1RR/xIEBDc8Ynq0sRk74KpLBHay3QMZJfgK8ly4IEzlJlbFYlCOxpdPa7DNBUYaYtIw=="
     ),
 }
 MAXIMUM_NOTICE_BYTES = 4 * 1024 * 1024

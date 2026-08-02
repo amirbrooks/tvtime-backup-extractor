@@ -115,7 +115,31 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             BUILD_ONLY_NUGET_PACKAGES,
             {("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948")},
         )
-        self.assertEqual(len(REVIEWED_NUGET_PACKAGE_SHA512), 15)
+        expected_nuget_packages = {
+            ("Microsoft.Web.WebView2", "1.0.3719.77"),
+            ("Microsoft.Windows.SDK.BuildTools", "10.0.26100.4948"),
+            ("Microsoft.Windows.SDK.BuildTools.MSIX", "1.7.251221100"),
+            ("Microsoft.WindowsAppSDK.Base", "2.0.4"),
+            ("Microsoft.WindowsAppSDK.Foundation", "2.1.0"),
+            ("Microsoft.WindowsAppSDK.InteractiveExperiences", "2.0.15"),
+            ("Microsoft.WindowsAppSDK.Runtime", "2.2.0"),
+            ("Microsoft.WindowsAppSDK.WinUI", "2.2.1"),
+        }
+        self.assertEqual(set(REVIEWED_NUGET_PACKAGE_SHA512), expected_nuget_packages)
+        lock = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "windows"
+                / "TVTimeRecovery.Windows"
+                / "packages.lock.json"
+            ).read_text(encoding="utf-8")
+        )
+        locked_nuget_packages = {
+            (name, binding["resolved"])
+            for target in lock["dependencies"].values()
+            for name, binding in target.items()
+        }
+        self.assertEqual(locked_nuget_packages, expected_nuget_packages)
 
     def synthetic_package(self, root: Path) -> tuple[Path, Path, dict[tuple[str, str], str]]:
         package_root = root / "fake.package" / "1.2.3"

@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from tvtime_extractor.analyze import MAXIMUM_ANALYSIS_SUMMARY_BYTES
@@ -29,6 +30,17 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             path.read_text(encoding="utf-8")
             for path in sorted(source_root.glob("RecoveryOutputValidator*.cs"))
         )
+
+    def package_references(self, relative: str) -> list[tuple[str, str, str | None]]:
+        project = ET.fromstring(self.read(relative))
+        return [
+            (
+                node.attrib["Include"],
+                node.attrib["Version"],
+                node.attrib.get("ExcludeAssets"),
+            )
+            for node in project.iter("PackageReference")
+        ]
 
     def csharp_long_constant(self, source: str, name: str) -> int:
         match = re.search(rf"\b{name}\s*=\s*([0-9L *]+);", source)
@@ -152,16 +164,19 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
 
     def test_windows_app_sdk_nuget_dependencies_are_exactly_pinned(self) -> None:
-        project = self.read("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj")
-        references = re.findall(r'<PackageReference Include="([^"]+)" Version="([^"]+)"', project)
+        references = self.package_references(
+            "windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj"
+        )
         self.assertEqual(
             references,
             [
-                ("Microsoft.WindowsAppSDK", "[2.2.0]"),
-                ("Microsoft.Windows.SDK.BuildTools", "[10.0.26100.4948]"),
+                ("Microsoft.WindowsAppSDK.Runtime", "[2.2.0]", None),
+                ("Microsoft.WindowsAppSDK.WinUI", "[2.2.1]", None),
+                ("Microsoft.Web.WebView2", "[1.0.3719.77]", "all"),
+                ("Microsoft.Windows.SDK.BuildTools", "[10.0.26100.4948]", None),
             ],
         )
-        for _, version in references:
+        for _, version, _ in references:
             self.assertRegex(version, r"^\[\d+\.\d+\.\d+(?:\.\d+)?\]$")
 
         lock = json.loads(self.read("windows/TVTimeRecovery.Windows/packages.lock.json"))
@@ -171,10 +186,26 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             {"net8.0-windows10.0.26100", "net8.0-windows10.0.26100/win-x64"},
         )
         direct = dependencies["net8.0-windows10.0.26100"]
-        self.assertEqual(direct["Microsoft.WindowsAppSDK"]["resolved"], "2.2.0")
+        self.assertEqual(direct["Microsoft.WindowsAppSDK.Runtime"]["resolved"], "2.2.0")
+        self.assertEqual(direct["Microsoft.WindowsAppSDK.WinUI"]["resolved"], "2.2.1")
+        self.assertEqual(direct["Microsoft.Web.WebView2"]["resolved"], "1.0.3719.77")
         self.assertEqual(
             direct["Microsoft.Windows.SDK.BuildTools"]["resolved"],
             "10.0.26100.4948",
+        )
+        locked_packages = {package for target in dependencies.values() for package in target}
+        self.assertTrue(
+            locked_packages.isdisjoint(
+                {
+                    "Microsoft.Windows.AI.MachineLearning",
+                    "Microsoft.WindowsAppSDK",
+                    "Microsoft.WindowsAppSDK.AI",
+                    "Microsoft.WindowsAppSDK.DWrite",
+                    "Microsoft.WindowsAppSDK.ML",
+                    "Microsoft.WindowsAppSDK.Widgets",
+                    "System.Numerics.Tensors",
+                }
+            )
         )
         for target in dependencies.values():
             for binding in target.values():
@@ -194,6 +225,13 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("<OutputType>Exe</OutputType>", project)
         self.assertIn('<Compile Include="Program.cs" />', project)
         self.assertIn("<WindowsAppSdkAutoInitialize>false", project)
+        self.assertEqual(
+            self.package_references(
+                "windows/TVTimeRecovery.Windows.CompileCheck/"
+                "TVTimeRecovery.Windows.CompileCheck.csproj"
+            ),
+            self.package_references("windows/TVTimeRecovery.Windows/TVTimeRecovery.Windows.csproj"),
+        )
         self.assertNotIn("<UseWinUI>true", project)
 
         harness = self.read("windows/TVTimeRecovery.Windows.CompileCheck/Program.cs")
@@ -420,9 +458,17 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             "WindowsAppSDK.AI",
             "WindowsAppSDK.ML",
             "VideoScaler",
-            "WebView2",
         ):
             self.assertNotIn(forbidden, production_source)
+
+        production_code = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(source_root.rglob("*"))
+            if path.is_file()
+            and path.suffix.casefold() in {".cs", ".xaml"}
+            and not {"bin", "obj"}.intersection(path.relative_to(source_root).parts)
+        )
+        self.assertNotIn("WebView2", production_code)
 
         python_imports: set[str] = set()
         for path in production_python_paths:
