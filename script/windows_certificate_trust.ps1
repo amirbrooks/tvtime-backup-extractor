@@ -41,8 +41,9 @@ function Set-PrivateWindowsCertificateTrust {
 
         $failureCode = 28
         $rawCertificate = [Convert]::FromBase64String($RawCertificateBase64)
-        $certificate = New-Object `
-            System.Security.Cryptography.X509Certificates.X509Certificate2($rawCertificate)
+        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $rawCertificate
+        )
         try {
             $subject = "CN=TV Time Backup Extractor Alpha"
             $packageIdentity = "AmirBrooks.TVTimeBackupExtractor.Alpha"

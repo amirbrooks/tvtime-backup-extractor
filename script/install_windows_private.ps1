@@ -21,7 +21,7 @@ function Invoke-LocalMachineCertificateTrust {
         throw "The private package certificate could not be passed to the trust helper."
     }
     $helperPath = Join-Path $PSScriptRoot "windows_certificate_trust.ps1"
-    $expectedTrustHelperSha256 = "6B3B7DC178D44BA22E2015B3A96BBCEB13E2A3E30551171BBE0A82DBB36DF174"
+    $expectedTrustHelperSha256 = "FE7E1D36401A30218FBF8B6C7D15B8F8E1929199D62F03364DC2C37038066904"
     $helperBytes = [IO.File]::ReadAllBytes($helperPath)
     if ($helperBytes.Length -eq 0 -or $helperBytes.Length -gt 16KB) {
         throw "The private package certificate trust helper has invalid size."

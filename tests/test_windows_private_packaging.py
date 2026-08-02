@@ -170,7 +170,12 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
             self.assertIn(f"return {safe_code}", trust_helper)
         self.assertIn("return $failureCode", trust_helper)
         self.assertIn("[Security.Principal.WindowsPrincipal]::new(", trust_helper)
+        self.assertIn(
+            "[Security.Cryptography.X509Certificates.X509Certificate2]::new(",
+            trust_helper,
+        )
         self.assertNotIn("WindowsPrincipal($currentIdentity)", trust_helper)
+        self.assertNotIn("X509Certificate2($rawCertificate)", trust_helper)
         self.assertIn("safe code $($process.ExitCode)", installer)
         self.assertIn("safe code $($process.ExitCode)", uninstaller)
         self.assertIn("$process.ExitCode -in @(0, 11)", installer)
