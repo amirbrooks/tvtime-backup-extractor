@@ -48,6 +48,9 @@ try {
     )) {
         throw "The Windows helper build environment must remain beneath its private output root."
     }
+    if ([IO.Path]::GetFileName($BuildEnvironmentRoot) -in @("helper", "tvtime-helper")) {
+        throw "The Windows helper build environment used a reserved output name."
+    }
     if ($null -ne (Get-Item `
         -LiteralPath $BuildEnvironmentRoot `
         -Force `
@@ -128,13 +131,13 @@ Assert-NativeSuccess "The Windows helper dependency environment is inconsistent.
 Assert-NativeSuccess "The installed Windows helper dependency bytes did not match their RECORD hashes."
 
 $stage = Join-Path $OutputRoot (".helper-stage-" + [Guid]::NewGuid().ToString("N"))
-$dist = Join-Path $stage "dist"
+$dist = $OutputRoot
 $work = Join-Path $stage "work"
 $spec = Join-Path $stage "spec"
 $stageOwnership = New-ContainedOrdinaryDirectory `
     -TrustedRoot $OutputRoot -Candidate $stage `
     -TrustedRootOwnership $outputRootOwnership
-foreach ($directory in @($dist, $work, $spec)) {
+foreach ($directory in @($work, $spec)) {
     $directoryOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $stage -Candidate $directory `
         -TrustedRootOwnership $stageOwnership
@@ -164,7 +167,7 @@ if (-not (Test-Path (Join-Path $helper "tvtime-helper.exe") -PathType Leaf)) {
 }
 & $pythonExe -B -I (Join-Path $root "script\scan_macos_release.py") --root $helper --forbidden-value $root | Out-Host
 Assert-NativeSuccess "The private Windows helper failed its privacy scan."
-$helperOwnership = New-ContainedPromotableOrdinaryTreeSnapshot `
+$helperOwnership = New-ContainedOrdinaryTreeSnapshot `
     -TrustedRoot $dist -Candidate $helper
 # The exact tree that will be promoted is scanned again while all of its
 # directory and file capabilities deny mutation and replacement.

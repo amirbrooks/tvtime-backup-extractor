@@ -201,7 +201,7 @@ try {
     Set-Content -LiteralPath (Join-Path $lockedMoveSource "helper.exe") `
         -Value "synthetic-helper" -Encoding Ascii -NoNewline
     Release-ContainedOrdinaryDirectoryOwnership -OwnershipToken $lockedMoveMutable
-    $lockedMove = New-ContainedPromotableOrdinaryTreeSnapshot `
+    $lockedMove = New-ContainedOrdinaryTreeSnapshot `
         -TrustedRoot $testRoot -Candidate $lockedMoveSource
     $lockedManifest = $lockedMove.Manifest
     $lockedMoveDestination = Join-Path $testRoot "locked-move-destination"

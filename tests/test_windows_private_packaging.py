@@ -570,6 +570,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertGreaterEqual(helper.count("-B -I"), 8)
         self.assertGreaterEqual(helper.count("--no-compile"), 2)
         self.assertIn("build environment must be fresh", helper)
+        self.assertIn("build environment used a reserved output name", helper)
         self.assertIn("private Windows build output must be fresh", helper)
         self.assertIn(".build-tools-", app)
         self.assertIn("/p:RestorePackagesPath=$nugetRoot", app)
@@ -638,12 +639,10 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn("FileDispositionInfo", capabilities)
         self.assertIn("FileBasicInfo", capabilities)
-        self.assertIn("OpenRelativeForDelete", capabilities)
-        self.assertIn("DeleteChildren(path, rootHandle", capabilities)
         self.assertIn("locked-move-source", self.read("script/test_windows_packaging_lib.ps1"))
         self.assertIn("LockTree", capabilities)
-        self.assertIn("LockTreeForMove", capabilities)
-        self.assertIn("New-ContainedPromotableOrdinaryTreeSnapshot", library)
+        self.assertIn("$dist = $OutputRoot", helper)
+        self.assertIn("foreach ($directory in @($work, $spec))", helper)
         self.assertIn("ReadTreeManifest", capabilities)
         self.assertIn("RevalidateTree", capabilities)
         self.assertIn("RelockAfterMove", capabilities)
@@ -653,11 +652,6 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FileNonDirectoryFile", capabilities)
         self.assertIn("expectedIdentity", capabilities)
         self.assertIn("FileShareRead | FileShareWrite", capabilities)
-        self.assertIn(
-            "WindowsPackagingNative.FileShareRead |\n"
-            "                            WindowsPackagingNative.FileShareDelete",
-            capabilities,
-        )
         move_section = library[library.index("function Move-ContainedOrdinaryDirectory") :]
         owned_move = move_section.index(
             "$movedDestination = [TVTimeWindowsPackaging.DirectoryCapabilities]::Rename"

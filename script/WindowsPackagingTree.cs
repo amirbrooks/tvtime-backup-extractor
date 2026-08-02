@@ -27,22 +27,12 @@ namespace TVTimeWindowsPackaging
                     "An owned Windows packaging directory was replaced during cleanup.");
 
             int entries = 0;
-            DeleteChildren(path, rootHandle, 0, ref entries);
+            DeleteChildren(path, 0, ref entries);
             WindowsPackagingNative.ClearReadOnly(rootHandle);
             WindowsPackagingNative.MarkDelete(rootHandle);
         }
 
         internal static TreeSnapshot Lock(string path)
-        {
-            return Lock(path, false);
-        }
-
-        internal static TreeSnapshot LockForMove(string path)
-        {
-            return Lock(path, true);
-        }
-
-        private static TreeSnapshot Lock(string path, bool permitRootMove)
         {
             List<SafeFileHandle> handles = new List<SafeFileHandle>();
             List<string> manifest = new List<string>();
@@ -57,10 +47,7 @@ namespace TVTimeWindowsPackaging
                         WindowsPackagingNative.FileReadAttributes |
                         WindowsPackagingNative.FileWriteAttributes |
                         WindowsPackagingNative.Synchronize,
-                    permitRootMove
-                        ? WindowsPackagingNative.FileShareRead |
-                            WindowsPackagingNative.FileShareDelete
-                        : WindowsPackagingNative.FileShareRead);
+                    WindowsPackagingNative.FileShareRead);
                 WindowsPackagingNative.RequireOrdinaryDirectory(root);
                 handles.Add(root);
                 manifest.Add("D\t");
@@ -239,11 +226,7 @@ namespace TVTimeWindowsPackaging
             }
         }
 
-        private static void DeleteChildren(
-            string path,
-            SafeFileHandle directoryHandle,
-            int depth,
-            ref int entries)
+        private static void DeleteChildren(string path, int depth, ref int entries)
         {
             if (depth > MaximumDepth)
                 throw new InvalidOperationException("A Windows packaging cleanup tree was too deep.");
@@ -256,12 +239,13 @@ namespace TVTimeWindowsPackaging
                     throw new InvalidOperationException(
                         "A Windows packaging cleanup tree contained too many entries.");
 
-                FileAttributes pathAttributes = File.GetAttributes(child);
-                bool pathDirectory = (pathAttributes & FileAttributes.Directory) != 0;
-                using (SafeFileHandle handle = WindowsPackagingNative.OpenRelativeForDelete(
-                    directoryHandle,
-                    Path.GetFileName(child),
-                    pathDirectory))
+                using (SafeFileHandle handle = WindowsPackagingNative.Open(
+                    child,
+                    WindowsPackagingNative.DeleteAccess |
+                        WindowsPackagingNative.FileReadAttributes |
+                        WindowsPackagingNative.FileWriteAttributes,
+                    WindowsPackagingNative.FileShareRead |
+                        WindowsPackagingNative.FileShareWrite))
                 {
                     WindowsPackagingNative.ByHandleFileInformation basic =
                         WindowsPackagingNative.BasicInformation(handle);
@@ -269,11 +253,8 @@ namespace TVTimeWindowsPackaging
                         (basic.FileAttributes & WindowsPackagingNative.FileAttributeDirectory) != 0;
                     bool isReparse =
                         (basic.FileAttributes & WindowsPackagingNative.FileAttributeReparsePoint) != 0;
-                    if (isDirectory != pathDirectory)
-                        throw new InvalidOperationException(
-                            "A Windows packaging cleanup entry changed type.");
                     if (isDirectory && !isReparse)
-                        DeleteChildren(child, handle, depth + 1, ref entries);
+                        DeleteChildren(child, depth + 1, ref entries);
 
                     WindowsPackagingNative.ClearReadOnly(handle);
                     WindowsPackagingNative.MarkDelete(handle);

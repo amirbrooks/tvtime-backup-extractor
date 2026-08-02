@@ -167,28 +167,6 @@ function New-ContainedOrdinaryTreeSnapshot {
     }
 }
 
-function New-ContainedPromotableOrdinaryTreeSnapshot {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$TrustedRoot,
-        [Parameter(Mandatory = $true)][string]$Candidate
-    )
-
-    $candidatePath = Assert-ContainedOrdinaryDirectoryPath `
-        -TrustedRoot $TrustedRoot -Candidate $Candidate
-    $snapshot = [TVTimeWindowsPackaging.DirectoryCapabilities]::LockTreeForMove(
-        $candidatePath
-    )
-    [pscustomobject]@{
-        TrustedRoot = [IO.Path]::GetFullPath($TrustedRoot)
-        Candidate = $candidatePath
-        Identity = $snapshot.Identity
-        Capability = $null
-        Snapshot = $snapshot
-        Manifest = $snapshot.Manifest
-    }
-}
-
 function Convert-ContainedOrdinaryDirectoryToTreeSnapshot {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$OwnershipToken)
