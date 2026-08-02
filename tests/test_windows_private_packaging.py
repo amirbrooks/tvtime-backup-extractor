@@ -882,6 +882,7 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("Build, install, and launch Windows x64 alpha", workflow)
         self.assertIn("runs-on: windows-2022", workflow)
         self.assertNotIn("runs-on: windows-latest", workflow)
+        self.assertIn("A partial Windows alpha build left the package installed", workflow)
         self.assertIn("Upload the exact Windows tester artifacts", workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", workflow)
 

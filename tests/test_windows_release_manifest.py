@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -17,6 +19,18 @@ THUMBPRINT = "A" * 40
 
 
 class WindowsReleaseManifestTests(unittest.TestCase):
+    def test_manifest_generator_runs_with_isolated_python(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "script/generate_windows_release_manifest.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [sys.executable, "-I", str(script), "--help"],
+                cwd=temporary,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def write_msix(self, path: Path, extra_name: str | None = None) -> None:
         manifest = """<?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"

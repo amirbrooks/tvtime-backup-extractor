@@ -4,12 +4,16 @@ import argparse
 import hashlib
 import json
 import re
+import runpy
 from pathlib import Path
 
-try:
-    from script.release_version import parse_release_version
-except ModuleNotFoundError:
-    from release_version import parse_release_version
+_RELEASE_VERSION_NAMESPACE = runpy.run_path(
+    str(Path(__file__).with_name("release_version.py")),
+    run_name="tvtime_windows_release_version",
+)
+parse_release_version = _RELEASE_VERSION_NAMESPACE.get("parse_release_version")
+if not callable(parse_release_version):
+    raise RuntimeError("The reviewed release-version parser was unavailable.")
 
 GIT_OBJECT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")

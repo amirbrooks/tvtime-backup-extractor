@@ -106,6 +106,13 @@ jobs:
           if ($bundleRoot.Count -ne 1) {
             throw "Windows alpha cleanup found ambiguous release state."
           }
+          $manifestPath = Join-Path $bundleRoot[0].FullName "windows-release-manifest.json"
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            if (@(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha").Count -ne 0) {
+              throw "A partial Windows alpha build left the package installed."
+            }
+            return
+          }
           & (Join-Path $bundleRoot[0].FullName "Uninstall-Windows-Alpha.ps1") `
             -ConfirmRemoval -NonInteractive
           if (@(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha").Count -ne 0) {
