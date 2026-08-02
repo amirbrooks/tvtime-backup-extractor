@@ -192,6 +192,32 @@ try {
     Assert-ContainedOrdinaryTreeSnapshot -OwnershipToken $nonemptyMove | Out-Null
     Remove-ContainedOrdinaryTree -OwnershipToken $nonemptyMove
 
+    # The release helper locks an existing PyInstaller tree, rather than freezing
+    # a directory created by this library. Exercise that exact root-share mode.
+    $lockedMoveMutable = New-ContainedOrdinaryDirectory `
+        -TrustedRoot $testRoot -Candidate (Join-Path $testRoot "locked-move-source") `
+        -TrustedRootOwnership $testRootOwnership
+    $lockedMoveSource = $lockedMoveMutable.Candidate
+    Set-Content -LiteralPath (Join-Path $lockedMoveSource "helper.exe") `
+        -Value "synthetic-helper" -Encoding Ascii -NoNewline
+    Release-ContainedOrdinaryDirectoryOwnership -OwnershipToken $lockedMoveMutable
+    $lockedMove = New-ContainedPromotableOrdinaryTreeSnapshot `
+        -TrustedRoot $testRoot -Candidate $lockedMoveSource
+    $lockedManifest = $lockedMove.Manifest
+    $lockedMoveDestination = Join-Path $testRoot "locked-move-destination"
+    $lockedMove = Move-ContainedOrdinaryDirectory `
+        -OwnershipToken $lockedMove `
+        -DestinationTrustedRoot $testRoot `
+        -Destination $lockedMoveDestination `
+        -DestinationRootOwnership $testRootOwnership
+    if ((Test-Path -LiteralPath $lockedMoveSource) -or
+        -not (Test-Path -LiteralPath (Join-Path $lockedMoveDestination "helper.exe")) -or
+        $lockedMove.Manifest -cne $lockedManifest) {
+        throw "A locked existing Windows tree did not move and relock exactly."
+    }
+    Assert-ContainedOrdinaryTreeSnapshot -OwnershipToken $lockedMove | Out-Null
+    Remove-ContainedOrdinaryTree -OwnershipToken $lockedMove
+
     # Exercise the exact native state after rename but before descendant relock.
     # Reflection is test-only: it makes this otherwise internal failure boundary
     # deterministic without a timing race or a production injection hook.

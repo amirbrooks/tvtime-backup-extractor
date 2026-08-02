@@ -196,6 +196,11 @@ namespace TVTimeWindowsPackaging
             return WindowsPackagingTree.Lock(path);
         }
 
+        public static TreeSnapshot LockTreeForMove(string path)
+        {
+            return WindowsPackagingTree.LockForMove(path);
+        }
+
         public static TreeSnapshot FreezeTree(OwnedDirectory owned, string path)
         {
             return WindowsPackagingTree.Freeze(owned, path);

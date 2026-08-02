@@ -638,7 +638,12 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn("FileDispositionInfo", capabilities)
         self.assertIn("FileBasicInfo", capabilities)
+        self.assertIn("OpenRelativeForDelete", capabilities)
+        self.assertIn("DeleteChildren(path, rootHandle", capabilities)
+        self.assertIn("locked-move-source", self.read("script/test_windows_packaging_lib.ps1"))
         self.assertIn("LockTree", capabilities)
+        self.assertIn("LockTreeForMove", capabilities)
+        self.assertIn("New-ContainedPromotableOrdinaryTreeSnapshot", library)
         self.assertIn("ReadTreeManifest", capabilities)
         self.assertIn("RevalidateTree", capabilities)
         self.assertIn("RelockAfterMove", capabilities)
@@ -648,6 +653,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FileNonDirectoryFile", capabilities)
         self.assertIn("expectedIdentity", capabilities)
         self.assertIn("FileShareRead | FileShareWrite", capabilities)
+        self.assertIn(
+            "WindowsPackagingNative.FileShareRead |\n"
+            "                            WindowsPackagingNative.FileShareDelete",
+            capabilities,
+        )
         move_section = library[library.index("function Move-ContainedOrdinaryDirectory") :]
         owned_move = move_section.index(
             "$movedDestination = [TVTimeWindowsPackaging.DirectoryCapabilities]::Rename"
@@ -666,18 +676,19 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("windows_packaging_lib.ps1", helper)
         self.assertIn("windows_packaging_lib.ps1", app)
         self.assertIn("windows_msix_integrity.ps1", app)
-        self.assertIn(".notices-stage-", app)
+        self.assertIn("Move-ContainedOrdinaryDirectory", helper)
         self.assertIn("Move-ContainedOrdinaryDirectory", app)
+        self.assertNotIn("Copy-Item -LiteralPath $helperMember.FullName", app)
         self.assertIn("-PrimaryError $buildError", app)
         self.assertIn("-PrimaryError $bodyError", helper)
         self.assertIn("-ReturnBuildState", app)
         self.assertIn("HelperOwnership", helper)
         self.assertIn("HelperManifest", helper)
         self.assertIn("$generatedContentRootOwnership = New-ContainedOrdinaryDirectory", app)
-        self.assertIn("-TrustedRoot $generatedContentRoot -Candidate $helperDestination", app)
+        self.assertIn("-Destination $helperDestination", app)
+        self.assertIn("$helperRootOwnership = $null", app)
         self.assertIn("-TrustedRoot $generatedContentRoot -Candidate $assetDestination", app)
-        self.assertIn("-DestinationTrustedRoot $generatedContentRoot", app)
-        self.assertIn("-DestinationRootOwnership $generatedContentRootOwnership", app)
+        self.assertIn("-TrustedRoot $generatedContentRoot -Candidate $noticeDestination", app)
         self.assertIn("helperDestinationOwnership.Manifest -cne $helperManifest", app)
         self.assertIn("packagedHelperManifest -cne $helperManifest", app)
         self.assertIn("packagedAssetManifest -cne $assetDestinationOwnership.Manifest", app)
@@ -695,8 +706,8 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         ):
             self.assertIn(required, app)
         self.assertLess(
-            app.index("$helperDestinationOwnership = New-ContainedOrdinaryDirectory"),
-            app.index("Copy-Item -LiteralPath $helperMember.FullName"),
+            app.index("$helperDestinationOwnership = Move-ContainedOrdinaryDirectory"),
+            app.index("helperDestinationOwnership.Manifest -cne $helperManifest"),
         )
         self.assertIn(
             "-OwnershipTokens @($buildEnvironmentOwnership, $outputRootOwnership)",

@@ -31,8 +31,6 @@ $generatedContentRootOwnership = $null
 $helperDestinationOwnership = $null
 $assetDestinationOwnership = $null
 $noticeDestinationOwnership = $null
-$noticeStageOwnership = $null
-$noticeOutputOwnership = $null
 $outputRootOwnership = $null
 $buildEnvironmentOwnership = $null
 $helperRootOwnership = $null
@@ -81,18 +79,14 @@ try {
     try {
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $helperRootOwnership | Out-Null
-    $helperDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $generatedContentRoot -Candidate $helperDestination `
-        -TrustedRootOwnership $generatedContentRootOwnership
-    $helperMembers = @(Get-ChildItem -LiteralPath $helperRoot -Force)
-    foreach ($helperMember in $helperMembers) {
-        Copy-Item -LiteralPath $helperMember.FullName `
-            -Destination $helperDestination -Recurse -Force
-    }
-    $helperDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
-        -OwnershipToken $helperDestinationOwnership
+    $helperDestinationOwnership = Move-ContainedOrdinaryDirectory `
+        -OwnershipToken $helperRootOwnership `
+        -DestinationTrustedRoot $generatedContentRoot `
+        -Destination $helperDestination `
+        -DestinationRootOwnership $generatedContentRootOwnership
+    $helperRootOwnership = $null
     if ($helperDestinationOwnership.Manifest -cne $helperManifest) {
-        throw "The copied Windows helper tree did not match its locked source manifest."
+        throw "The promoted Windows helper tree did not match its locked source manifest."
     }
     $assetDestinationOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $generatedContentRoot -Candidate $assetDestination `
@@ -152,14 +146,9 @@ try {
         -TrustedRoot $buildEnvironmentRoot -Candidate $nugetRoot
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $outputRootOwnership | Out-Null
-    $noticeStage = Join-Path $OutputRoot (".notices-stage-" + [Guid]::NewGuid().ToString("N"))
-    $noticeStageOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $OutputRoot -Candidate $noticeStage `
-        -TrustedRootOwnership $outputRootOwnership
-    $noticeStageOutput = Join-Path $noticeStage "Notices"
-    $noticeOutputOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $noticeStage -Candidate $noticeStageOutput `
-        -TrustedRootOwnership $noticeStageOwnership
+    $noticeDestinationOwnership = New-ContainedOrdinaryDirectory `
+        -TrustedRoot $generatedContentRoot -Candidate $noticeDestination `
+        -TrustedRootOwnership $generatedContentRootOwnership
     $dotnetVersion = (& dotnet --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $dotnetVersion -cne "8.0.423") {
         throw "The pinned .NET SDK 8.0.423 is required for the Windows package."
@@ -173,7 +162,7 @@ try {
     }
     & $pythonExe -B -I `
         (Join-Path $root "script\collect_windows_licenses.py") `
-        --output $noticeStageOutput `
+        --output $noticeDestination `
         --nuget-lock (Join-Path (Split-Path $project) "packages.lock.json") `
         --nuget-root $nugetRoot `
         --project-license (Join-Path $root "LICENSE") `
@@ -182,14 +171,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "The private Windows license collection failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
         -OwnershipToken $nugetRootOwnership | Out-Null
-    $noticeOutputOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
-        -OwnershipToken $noticeOutputOwnership
-    $noticeDestinationOwnership = Move-ContainedOrdinaryDirectory `
-        -OwnershipToken $noticeOutputOwnership `
-        -DestinationTrustedRoot $generatedContentRoot `
-        -Destination $noticeDestination `
-        -DestinationRootOwnership $generatedContentRootOwnership
-    $noticeOutputOwnership = $null
+    $noticeDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
+        -OwnershipToken $noticeDestinationOwnership
     $msixOutputDirectory = (Join-Path $OutputRoot "msix") + [IO.Path]::DirectorySeparatorChar
     $appxPackageDirectoryArgument = "/p:AppxPackageDir=$msixOutputDirectory"
     & $msbuild $project /m /p:Configuration=Release /p:Platform=x64 `
@@ -216,8 +199,6 @@ try {
             $helperDestinationOwnership,
             $assetDestinationOwnership,
             $noticeDestinationOwnership,
-            $noticeOutputOwnership,
-            $noticeStageOwnership,
             $generatedContentRootOwnership
         ) `
         -PrimaryError $buildError
