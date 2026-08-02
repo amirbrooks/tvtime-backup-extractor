@@ -11,33 +11,42 @@ function Set-PrivateWindowsCertificateTrust {
 
         [Parameter(Mandatory = $true)]
         [ValidatePattern("^[A-Za-z0-9+/]+={0,2}$")]
-        [string]$RawCertificateBase64
+        [string]$RawCertificateBase64,
+
+        [ValidatePattern("^[A-Za-z0-9._-]{0,255}$")]
+        [string]$PackageFullName = ""
     )
 
     $ErrorActionPreference = "Stop"
     Set-StrictMode -Version Latest
     $certificateAdded = $false
+    $failureCode = 20
     try {
         if ($RawCertificateBase64.Length -gt 4096) {
-            throw "The requested private package certificate is too large."
+            throw "The requested alpha package certificate is too large."
         }
+        $failureCode = 27
         $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try {
-            $currentPrincipal = New-Object `
-                Security.Principal.WindowsPrincipal($currentIdentity)
+            $currentPrincipal = [Security.Principal.WindowsPrincipal]::new(
+                $currentIdentity
+            )
             $isAdministrator = $currentPrincipal.IsInRole(
                 [Security.Principal.WindowsBuiltInRole]::Administrator
             )
         } finally {
             $currentIdentity.Dispose()
         }
-        if (-not $isAdministrator) { throw "Machine certificate trust requires elevation." }
+        if (-not $isAdministrator) { return 22 }
 
+        $failureCode = 28
         $rawCertificate = [Convert]::FromBase64String($RawCertificateBase64)
-        $certificate = New-Object `
-            System.Security.Cryptography.X509Certificates.X509Certificate2($rawCertificate)
+        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $rawCertificate
+        )
         try {
-            $subject = "CN=TV Time Backup Extractor Private"
+            $subject = "CN=TV Time Backup Extractor Alpha"
+            $packageIdentity = "AmirBrooks.TVTimeBackupExtractor.Alpha"
             $codeSigningOid = "1.3.6.1.5.5.7.3.3"
             $ekuExtensions = @(
                 $certificate.Extensions | Where-Object { $_.Oid.Value -eq "2.5.29.37" }
@@ -62,9 +71,10 @@ function Set-PrivateWindowsCertificateTrust {
                 $certificate.NotBefore -gt (Get-Date) -or
                 $certificate.NotAfter -le (Get-Date).AddDays(30) -or
                 $certificate.HasPrivateKey) {
-                throw "The requested private package certificate is not allowed."
+                return 23
             }
 
+            $failureCode = 24
             $store = New-Object `
                 System.Security.Cryptography.X509Certificates.X509Store(
                     "TrustedPeople",
@@ -86,6 +96,7 @@ function Set-PrivateWindowsCertificateTrust {
 
                 if ($Operation -eq "Add") {
                     if ($matches.Count -eq 1) { return 10 }
+                    $failureCode = 25
                     $store.Add($certificate)
                     $certificateAdded = $true
                     $added = @(
@@ -96,9 +107,27 @@ function Set-PrivateWindowsCertificateTrust {
                         }
                     )
                     if ($added.Count -ne 1) {
-                        throw "The private package certificate was not trusted exactly."
+                        throw "The alpha package certificate was not trusted exactly."
                     }
                     return 0
+                }
+
+                $dependentPackages = @(Get-AppxPackage `
+                    -AllUsers -Name $packageIdentity -ErrorAction Stop |
+                    Where-Object {
+                        $_.Publisher -ceq $subject -and
+                        (
+                            ($PackageFullName -and
+                                $_.PackageFullName -ceq $PackageFullName) -or
+                            (-not $PackageFullName -and
+                                $_.Version -eq [Version]"0.3.1.1" -and
+                                [string]$_.Architecture -ceq "X64")
+                        )
+                    })
+                if ($dependentPackages.Count -ne 0) {
+                    # Trust is machine-wide while MSIX registration is per-user.
+                    # Preserve it until the last matching package is removed.
+                    return 11
                 }
 
                 if ($matches.Count -eq 1) { $store.Remove($matches[0]) }
@@ -106,7 +135,7 @@ function Set-PrivateWindowsCertificateTrust {
                     $store.Certificates | Where-Object { $_.Thumbprint -ceq $Thumbprint }
                 )
                 if ($remaining.Count -ne 0) {
-                    throw "The private package certificate trust was not removed."
+                    throw "The alpha package certificate trust was not removed."
                 }
                 return 0
             } finally {
@@ -141,7 +170,7 @@ function Set-PrivateWindowsCertificateTrust {
                         }
                     )
                     if ($rollbackRemaining.Count -ne 0) {
-                        throw "The private package certificate trust rollback did not complete."
+                        throw "The alpha package certificate trust rollback did not complete."
                     }
                 } finally {
                     $rollbackStore.Close()
@@ -151,6 +180,6 @@ function Set-PrivateWindowsCertificateTrust {
             }
         }
         if ($Operation -eq "Remove") { return 21 }
-        return 20
+        return $failureCode
     }
 }

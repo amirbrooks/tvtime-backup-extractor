@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [string]$OutputRoot = "",
+    [string]$Python = "py",
+    [string]$SourceCommit = "",
+    [string]$SourceTree = "",
     [switch]$ReturnBuildState
 )
 
@@ -11,20 +14,21 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
-$buildEnvironmentRoot = Join-Path $OutputRoot (".build-tools-" + [Guid]::NewGuid().ToString("N"))
+$trustedOutputParent = Get-WindowsPackagingOutputParent `
+    -SourceRoot $root -OutputRoot $OutputRoot
+$buildEnvironmentRoot = Join-Path $OutputRoot ".t"
 $pythonExe = Join-Path $buildEnvironmentRoot "venv\Scripts\python.exe"
 $nugetRoot = Join-Path $buildEnvironmentRoot "nuget"
 $previousNugetPackages = $env:NUGET_PACKAGES
 $project = Join-Path $root "windows\TVTimeRecovery.Windows\TVTimeRecovery.Windows.csproj"
-$helperDestination = Join-Path (Split-Path $project) "Helpers"
-$assetDestination = Join-Path (Split-Path $project) "Assets"
-$noticeDestination = Join-Path (Split-Path $project) "Notices"
-$projectRoot = Split-Path $project
-$helperDestinationOwnership = $null
+$generatedContentRoot = Join-Path $OutputRoot "generated-content"
+$assetDestination = Join-Path $generatedContentRoot "Assets"
+$noticeDestination = Join-Path $generatedContentRoot "Notices"
+$msbuildIntermediateRoot = (Join-Path $OutputRoot "obj") + [IO.Path]::DirectorySeparatorChar
+$msbuildBinaryRoot = (Join-Path $OutputRoot "bin") + [IO.Path]::DirectorySeparatorChar
+$generatedContentRootOwnership = $null
 $assetDestinationOwnership = $null
 $noticeDestinationOwnership = $null
-$noticeStageOwnership = $null
-$noticeOutputOwnership = $null
 $outputRootOwnership = $null
 $buildEnvironmentOwnership = $null
 $helperRootOwnership = $null
@@ -36,15 +40,15 @@ $unsignedBlockMapDigest = $null
 $outerError = $null
 $packageResult = $null
 try {
-    Assert-ContainedOrdinaryDirectoryPath `
-        -TrustedRoot $root -Candidate $OutputRoot -AllowMissingCandidate | Out-Null
     if ($null -ne (Get-Item -LiteralPath $OutputRoot -Force -ErrorAction SilentlyContinue)) {
         throw "The private Windows build output must be fresh."
     }
     $env:NUGET_PACKAGES = $nugetRoot
     $helperBuildState = & (Join-Path $PSScriptRoot "build_windows_helper.ps1") `
+        -Python $Python `
         -OutputRoot $OutputRoot `
         -BuildEnvironmentRoot $buildEnvironmentRoot `
+        -SourceCommit $SourceCommit `
         -PreserveBuildEnvironment `
         -ReturnBuildState
     if ($null -eq $helperBuildState -or
@@ -63,27 +67,18 @@ try {
     $helperManifest = [string]$helperBuildState.HelperManifest
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $outputRootOwnership | Out-Null
-    if (Test-Path $helperDestination) { throw "The generated helper staging directory already exists." }
+    $generatedContentRootOwnership = New-ContainedOrdinaryDirectory `
+        -TrustedRoot $OutputRoot -Candidate $generatedContentRoot `
+        -TrustedRootOwnership $outputRootOwnership
     if (Test-Path $assetDestination) { throw "The generated Windows asset staging directory already exists." }
     if (Test-Path $noticeDestination) { throw "The generated Windows notice staging directory already exists." }
     $buildError = $null
     try {
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $helperRootOwnership | Out-Null
-    $helperDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $projectRoot -Candidate $helperDestination
-    $helperMembers = @(Get-ChildItem -LiteralPath $helperRoot -Force)
-    foreach ($helperMember in $helperMembers) {
-        Copy-Item -LiteralPath $helperMember.FullName `
-            -Destination $helperDestination -Recurse -Force
-    }
-    $helperDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
-        -OwnershipToken $helperDestinationOwnership
-    if ($helperDestinationOwnership.Manifest -cne $helperManifest) {
-        throw "The copied Windows helper tree did not match its locked source manifest."
-    }
     $assetDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $projectRoot -Candidate $assetDestination
+        -TrustedRoot $generatedContentRoot -Candidate $assetDestination `
+        -TrustedRootOwnership $generatedContentRootOwnership
     Add-Type -AssemblyName System.Drawing
     $sourceIcon = [Drawing.Image]::FromFile((Join-Path $root "macos\Bundle\AppIcon-1024.png"))
     try {
@@ -116,12 +111,39 @@ try {
     $assetDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
         -OwnershipToken $assetDestinationOwnership
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere -PathType Leaf)) { throw "A current Visual Studio installation with MSBuild and MSIX tooling is required." }
-    $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
-    if (-not $msbuild) { throw "MSBuild was not found." }
+    if (-not (Test-Path $vswhere -PathType Leaf)) {
+        throw "Visual Studio 2022 with MSBuild and MSIX tooling is required."
+    }
+    $msbuild = & $vswhere -latest -products * -version "[17.0,18.0)" `
+        -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\amd64\MSBuild.exe |
+        Select-Object -First 1
+    if (-not $msbuild) {
+        throw "The reviewed 64-bit Visual Studio 2022 MSBuild toolchain was not found."
+    }
     & $msbuild $project /t:Restore /p:RuntimeIdentifier=win-x64 /p:RestoreLockedMode=true `
-        /p:RestorePackagesPath=$nugetRoot | Out-Host
+        /p:RestorePackagesPath=$nugetRoot `
+        /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:TVTimeHelperContentRoot=$helperRoot `
+        /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
+        /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
+        /p:BaseOutputPath=$msbuildBinaryRoot | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The locked Windows dependency restore failed." }
+    $msixTaskAssembly = Join-Path $nugetRoot `
+        "microsoft.windows.sdk.buildtools.msix\1.7.251221100\tools\net472\Microsoft.Windows.SDK.BuildTools.MSIX.dll"
+    if ($msixTaskAssembly.Length -ge 260) {
+        throw "The private Windows build root is too long for the MSIX toolchain."
+    }
+    if (-not (Test-Path -LiteralPath $msixTaskAssembly -PathType Leaf)) {
+        throw "The locked Windows MSIX build task was unavailable."
+    }
+    $makeAppx = Join-Path $nugetRoot `
+        "microsoft.windows.sdk.buildtools\10.0.26100.4948\bin\10.0.26100.0\x64\MakeAppx.exe"
+    if ($makeAppx.Length -ge 260) {
+        throw "The private Windows build root is too long for the x64 packaging tool."
+    }
+    if (-not (Test-Path -LiteralPath $makeAppx -PathType Leaf)) {
+        throw "The locked x64 Windows packaging tool was unavailable."
+    }
     # Freeze the exact restored package graph before any validator consumes it.
     # Existing package bytes cannot be changed or replaced while the snapshot is
     # held; additions remain detectable by the post-consumer revalidation.
@@ -129,37 +151,52 @@ try {
         -TrustedRoot $buildEnvironmentRoot -Candidate $nugetRoot
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $outputRootOwnership | Out-Null
-    $noticeStage = Join-Path $OutputRoot (".notices-stage-" + [Guid]::NewGuid().ToString("N"))
-    $noticeStageOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $OutputRoot -Candidate $noticeStage `
-        -TrustedRootOwnership $outputRootOwnership
-    $noticeStageOutput = Join-Path $noticeStage "Notices"
-    $noticeOutputOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $noticeStage -Candidate $noticeStageOutput `
-        -TrustedRootOwnership $noticeStageOwnership
+    $noticeDestinationOwnership = New-ContainedOrdinaryDirectory `
+        -TrustedRoot $generatedContentRoot -Candidate $noticeDestination `
+        -TrustedRootOwnership $generatedContentRootOwnership
+    $dotnetVersion = (& dotnet --version).Trim()
+    if ($LASTEXITCODE -ne 0 -or $dotnetVersion -cne "8.0.423") {
+        throw "The pinned .NET SDK 8.0.423 is required for the Windows package."
+    }
+    $sourceBindingArguments = @()
+    if ($SourceCommit -or $SourceTree) {
+        $sourceBindingArguments = @(
+            "--source-commit", $SourceCommit,
+            "--source-tree", $SourceTree
+        )
+    }
     & $pythonExe -B -I `
         (Join-Path $root "script\collect_windows_licenses.py") `
-        --output $noticeStageOutput `
+        --output $noticeDestination `
         --nuget-lock (Join-Path (Split-Path $project) "packages.lock.json") `
         --nuget-root $nugetRoot `
         --project-license (Join-Path $root "LICENSE") `
-        --notice (Join-Path $root "windows\THIRD_PARTY_NOTICES.md") | Out-Host
+        --notice (Join-Path $root "windows\THIRD_PARTY_NOTICES.md") `
+        @sourceBindingArguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The private Windows license collection failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
         -OwnershipToken $nugetRootOwnership | Out-Null
-    $noticeOutputOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
-        -OwnershipToken $noticeOutputOwnership
-    $noticeDestinationOwnership = Move-ContainedOrdinaryDirectory `
-        -OwnershipToken $noticeOutputOwnership `
-        -DestinationTrustedRoot $projectRoot `
-        -Destination $noticeDestination
-    $noticeOutputOwnership = $null
+    # MakeAppx returns a non-zero status for its help screen even when the
+    # executable loaded correctly. Require its fixed tool signature instead.
+    $makeAppxProbe = (& $makeAppx /? 2>&1 | Out-String)
+    if ($makeAppxProbe -notmatch "(?i)makeappx") {
+        throw "The locked x64 Windows packaging tool could not start."
+    }
+    $noticeDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
+        -OwnershipToken $noticeDestinationOwnership
     $msixOutputDirectory = (Join-Path $OutputRoot "msix") + [IO.Path]::DirectorySeparatorChar
     $appxPackageDirectoryArgument = "/p:AppxPackageDir=$msixOutputDirectory"
-    & $msbuild $project /m /p:Configuration=Release /p:Platform=x64 `
+    & $msbuild $project /m:1 /nr:false /p:Configuration=Release /p:Platform=x64 `
         /p:RuntimeIdentifier=win-x64 /p:GenerateAppxPackageOnBuild=true `
         /p:AppxPackageSigningEnabled=false /p:AppxBundle=Never `
+        /p:RestoreLockedMode=true `
         /p:RestorePackagesPath=$nugetRoot `
+        /p:TVTimeGeneratedContentRoot=$generatedContentRoot `
+        /p:TVTimeHelperContentRoot=$helperRoot `
+        /p:MakeAppxExeFullPath=$makeAppx `
+        /p:BaseIntermediateOutputPath=$msbuildIntermediateRoot `
+        /p:MSBuildProjectExtensionsPath=$msbuildIntermediateRoot `
+        /p:BaseOutputPath=$msbuildBinaryRoot `
         $appxPackageDirectoryArgument | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "The private Windows MSIX build failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
@@ -172,11 +209,9 @@ try {
 } finally {
     Remove-ContainedOrdinaryTrees `
         -OwnershipTokens @(
-            $helperDestinationOwnership,
             $assetDestinationOwnership,
             $noticeDestinationOwnership,
-            $noticeOutputOwnership,
-            $noticeStageOwnership
+            $generatedContentRootOwnership
         ) `
         -PrimaryError $buildError
 }

@@ -9,15 +9,12 @@ The project is free and open source. iMazing is not required. It does not modify
 backup, contact TV Time, restore data to the app, or provide an official cloud-account export.
 
 > **Release status:** [v0.2.0](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.2.0)
-> remains the latest stable release. Technical testers can also try the
-> [v0.3.0-alpha.1 prerelease](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.3.0-alpha.1),
-> which provides separate Developer ID-signed, notarized, and stapled DMGs for Apple silicon and
-> Intel, plus verified Python wheel and source packages. The alpha adds experimental Android and
-> official-export recovery. It includes no Windows binary. Download only from the official release
-> and verify the selected DMG against `SHA256SUMS`.
+> remains the latest stable release. The `v0.3.1-alpha.1` candidate adds a downloadable Windows x64
+> tester build alongside updated Mac and Python packages. It is not published yet. Windows, Android,
+> and official-export recovery remain experimental.
 
-The [v0.3.0-alpha.1 release record](docs/release-v0.3.0-alpha.1.md) documents its evidence,
-intentionally limited public artifact set, and deferred device validation.
+The [v0.3.1-alpha.1 release record](docs/release-v0.3.1-alpha.1.md) lists the required evidence and
+remaining device-specific limits.
 
 This project is independent and is not affiliated with or endorsed by TV Time or Apple. TV Time and
 related marks belong to their respective owners. Use it only with data you own or are authorized to
@@ -29,7 +26,7 @@ access, and comply with applicable law and service terms.
 | --- | --- | --- |
 | Native macOS app | Most Mac users | macOS 14 or later and the v0.2.0 DMG matching the Mac's architecture |
 | Python CLI recovery | macOS, Linux, automation, and development | An explicitly selected Python 3.10 through 3.13 plus the pinned dependencies |
-| Private Windows app candidate | Encrypted iOS, local Android, and export recovery | Windows 11 x64 for encrypted iOS recovery, device encryption or BitLocker, and a private source build |
+| Windows alpha app | Encrypted iOS, local Android, and export recovery testing | Windows x64, BitLocker or device encryption, and the signed alpha tester bundle |
 | Android/export recovery | Mac, Windows, or CLI users with an already-preserved source | Supported legacy backup, allowlisted snapshot, or official ZIP/CSV export |
 
 The published native app is the normal Mac installation:

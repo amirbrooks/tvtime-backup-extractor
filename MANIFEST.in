@@ -3,6 +3,7 @@ include CHANGELOG.md
 include CONTRIBUTING.md
 include SECURITY.md
 include SUPPORT.md
+include global.json
 include requirements.txt
 include requirements.lock
 include requirements-dev.txt
@@ -17,7 +18,7 @@ recursive-include docs *.md
 recursive-include macos/Bundle *.entitlements *.icns *.json *.md *.plist *.png *.txt
 recursive-include macos/Sources *.swift
 recursive-include macos/Tests *.swift
-recursive-include windows *.appxmanifest *.cs *.csproj *.json *.manifest *.md *.xaml
+recursive-include windows *.appxmanifest *.cs *.csproj *.json *.manifest *.md *.txt *.xaml
 prune windows/TVTimeRecovery.Windows/Assets
 prune windows/TVTimeRecovery.Windows/Helpers
 prune windows/TVTimeRecovery.Windows/Notices

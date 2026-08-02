@@ -16,7 +16,12 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from script import build_visual_report_fixture, collect_macos_licenses, scan_macos_release
+from script import (
+    build_visual_report_fixture,
+    collect_macos_licenses,
+    git_source_stage,
+    scan_macos_release,
+)
 from script.build_python_distributions import (
     capture_source_identity,
     reject_python_environment_overrides,
@@ -25,6 +30,7 @@ from script.build_python_distributions import (
 from script.git_source_stage import (
     make_source_removable,
     prepare_source_stage,
+    remove_source_stage,
     verify_source_stage,
 )
 from script.sdist_metadata import normalize_sdist_metadata, verify_sdist_metadata
@@ -1148,8 +1154,132 @@ class PythonDistributionProvenanceTests(unittest.TestCase):
             reject_python_environment_overrides()
 
 
+@unittest.skipUnless(sys.platform == "win32", "Windows source ACL test needs Windows")
+class WindowsReleaseSourceAclTests(unittest.TestCase):
+    def test_source_is_immutable_build_root_is_writable_and_cleanup_restores_access(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            tracked_directory = source / "tracked"
+            tracked_directory.mkdir(parents=True)
+            tracked_file = tracked_directory / "nested.txt"
+            tracked_file.write_text("synthetic reviewed source\n", encoding="utf-8")
+            generated = source / git_source_stage.GENERATED_DIRECTORY
+            generated.mkdir()
+
+            try:
+                git_source_stage._lock_windows_source(source)
+                for mutation in (
+                    lambda: (source / "unexpected.txt").write_text(
+                        "synthetic mutation\n", encoding="utf-8"
+                    ),
+                    lambda: tracked_file.write_text("synthetic mutation\n", encoding="utf-8"),
+                    tracked_file.unlink,
+                    lambda: tracked_file.rename(tracked_directory / "renamed.txt"),
+                ):
+                    with self.assertRaises(OSError):
+                        mutation()
+
+                build_file = generated / "build.txt"
+                build_file.write_text("synthetic build output\n", encoding="utf-8")
+                build_file.write_text("synthetic replacement\n", encoding="utf-8")
+                build_file.unlink()
+            finally:
+                make_source_removable(source)
+
+            tracked_file.chmod(0o600)
+            tracked_file.write_text("synthetic cleanup proof\n", encoding="utf-8")
+            tracked_file.unlink()
+            shutil.rmtree(source)
+            self.assertFalse(source.exists())
+
+
 @unittest.skipUnless(Path("/usr/bin/git").is_file(), "macOS release staging needs /usr/bin/git")
 class MacReleaseSourceProvenanceTests(unittest.TestCase):
+    def test_windows_source_stage_applies_recursive_acl_with_one_writable_build_root(
+        self,
+    ) -> None:
+        completed = mock.Mock(returncode=0)
+        with (
+            mock.patch.object(git_source_stage, "WINDOWS_HOST", True),
+            mock.patch.object(
+                git_source_stage,
+                "_windows_system_tool",
+                return_value=Path("C:/Windows/System32/icacls.exe"),
+            ),
+            mock.patch.object(
+                git_source_stage,
+                "_windows_user_sid",
+                return_value="S-1-5-21-1-2-3-1001",
+            ),
+            mock.patch.object(git_source_stage.subprocess, "run", return_value=completed) as run,
+        ):
+            git_source_stage._lock_windows_source(Path("C:/synthetic/source"))
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(commands), 5)
+        self.assertEqual(
+            commands[0][2:],
+            [
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-21-1-2-3-1001:RX",
+                "/T",
+                "/Q",
+            ],
+        )
+        self.assertIn("C:/synthetic/source", commands[0])
+        self.assertEqual(commands[1][2], "/deny")
+        self.assertEqual(
+            commands[1][3],
+            "*S-1-5-21-1-2-3-1001:(WD,AD,WEA,WA,DE,DC)",
+        )
+        self.assertEqual(commands[2][2], "/remove:d")
+        self.assertEqual(commands[2][3], "*S-1-5-21-1-2-3-1001")
+        for command in commands[2:]:
+            self.assertIn(".build-tools", command[1])
+        self.assertEqual(commands[3][4], "*S-1-5-21-1-2-3-1001:F")
+        self.assertEqual(
+            commands[4][2:],
+            [
+                "/grant",
+                "*S-1-5-21-1-2-3-1001:(OI)(CI)F",
+                "/Q",
+            ],
+        )
+
+    def test_windows_source_stage_removes_deny_before_cleanup_full_control(self) -> None:
+        with (
+            mock.patch.object(git_source_stage, "WINDOWS_HOST", True),
+            mock.patch.object(git_source_stage, "_remove_windows_tree_deny") as remove_deny,
+            mock.patch.object(git_source_stage, "_set_windows_tree_access") as set_access,
+            mock.patch.object(git_source_stage.os, "walk", return_value=[]),
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch.object(Path, "is_symlink", return_value=False),
+        ):
+            make_source_removable(Path("C:/synthetic/source"))
+
+        remove_deny.assert_called_once_with(Path("C:/synthetic/source"))
+        set_access.assert_called_once_with(Path("C:/synthetic/source"), "F")
+
+    def test_windows_partial_lock_cleanup_still_attempts_full_control(self) -> None:
+        with (
+            mock.patch.object(git_source_stage, "WINDOWS_HOST", True),
+            mock.patch.object(
+                git_source_stage,
+                "_remove_windows_tree_deny",
+                side_effect=RuntimeError("synthetic missing deny"),
+            ),
+            mock.patch.object(git_source_stage, "_set_windows_tree_access") as set_access,
+            mock.patch.object(git_source_stage.os, "walk", return_value=[]),
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch.object(Path, "is_symlink", return_value=False),
+        ):
+            make_source_removable(Path("C:/synthetic/source"))
+
+        set_access.assert_called_once_with(Path("C:/synthetic/source"), "F")
+
     def test_release_builder_reexecutes_and_reverifies_the_committed_source_stage(self) -> None:
         contents = (ROOT / "script" / "build_release_app.sh").read_text(encoding="utf-8")
         self.assertIn(
@@ -1211,6 +1341,42 @@ class MacReleaseSourceProvenanceTests(unittest.TestCase):
                     verify_source_stage(repository, commit, source)
             finally:
                 make_source_removable(source)
+
+    def test_release_stage_removal_is_confined_to_its_owned_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            repository.mkdir()
+
+            def run_git(*arguments: str) -> str:
+                completed = subprocess.run(
+                    ["/usr/bin/git", "-C", str(repository), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout.strip()
+
+            run_git("init", "--quiet")
+            run_git("config", "user.name", "Synthetic Test")
+            run_git("config", "user.email", "synthetic@example.invalid")
+            (repository / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            (repository / "reviewed-source.txt").write_text(
+                "reviewed synthetic source\n",
+                encoding="utf-8",
+            )
+            run_git("add", ".gitignore", "reviewed-source.txt")
+            run_git("commit", "--quiet", "-m", "synthetic reviewed source")
+            commit = run_git("rev-parse", "HEAD")
+
+            release_stage = prepare_source_stage(repository, commit)
+            source = release_stage / "source"
+            remove_source_stage(repository, source)
+            self.assertFalse(release_stage.exists())
+
+            outside = repository / "outside"
+            outside.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "controlled release root"):
+                remove_source_stage(repository, outside)
 
 
 class RepositoryPrivacyIgnoreContractTests(unittest.TestCase):

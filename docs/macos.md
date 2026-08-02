@@ -9,9 +9,9 @@ for end users.
 > produced by `script/build_local_app.sh` remains ad-hoc signed for contributor use and is not a
 > substitute for the official release.
 
-The current checkout's Android and official-export source chooser is part of the unpublished
-v0.3.0-alpha.1 candidate. It is available only after a new local ad-hoc build; it is not present in
-the published v0.2.0 DMGs.
+The [published v0.3.0-alpha.1 prerelease](https://github.com/amirbrooks/tvtime-backup-extractor/releases/tag/v0.3.0-alpha.1)
+includes signed and notarized Mac builds with the experimental Android and official-export source
+chooser. The current checkout is preparing the next alpha; v0.2.0 remains the stable release.
 
 Contributor app builds use exact CPython 3.13.12 plus a reviewed native-runtime license profile;
 the broader Python 3.10-through-3.13 range applies to the CLI, not native app packaging. See

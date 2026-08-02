@@ -16,6 +16,8 @@
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
+    <!-- global.json pins SDK 8.0.423, which carries runtime 8.0.29. Do not set
+         RuntimeFrameworkVersion: it also overrides the implicit Windows SDK reference. -->
     <InvariantGlobalization>false</InvariantGlobalization>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
@@ -24,19 +26,29 @@
     <Deterministic>true</Deterministic>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode>true</RestoreLockedMode>
+    <TVTimeGeneratedContentRoot Condition="'$(TVTimeGeneratedContentRoot)' == ''">$(MSBuildProjectDirectory)</TVTimeGeneratedContentRoot>
+    <TVTimeHelperContentRoot Condition="'$(TVTimeHelperContentRoot)' == ''">$(TVTimeGeneratedContentRoot)\Helpers</TVTimeHelperContentRoot>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="[2.2.0]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="[2.2.1]" />
+    <!-- This app has no web surface; retain only the locked dependency and notice. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.3719.77]" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="[10.0.26100.4948]" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Assets\*.png" Condition="Exists('Assets\StoreLogo.png')" />
-    <Content Include="Notices\**\*" Condition="Exists('Notices\MANIFEST.json')" />
+    <Content Include="$(TVTimeGeneratedContentRoot)\Assets\*.png" Condition="Exists('$(TVTimeGeneratedContentRoot)\Assets\StoreLogo.png')">
+      <Link>Assets\%(Filename)%(Extension)</Link>
+    </Content>
+    <Content Include="$(TVTimeGeneratedContentRoot)\Notices\**\*" Condition="Exists('$(TVTimeGeneratedContentRoot)\Notices\MANIFEST.json')">
+      <Link>Notices\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    </Content>
   </ItemGroup>
-  <ItemGroup Condition="Exists('Helpers\tvtime-helper.exe')">
-    <Content Include="Helpers\**\*">
+  <ItemGroup Condition="Exists('$(TVTimeHelperContentRoot)\tvtime-helper.exe')">
+    <Content Include="$(TVTimeHelperContentRoot)\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>%(Identity)</TargetPath>
+      <Link>Helpers\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <TargetPath>Helpers\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
     </Content>
   </ItemGroup>
 </Project>

@@ -3,6 +3,7 @@ param(
     [string]$Python = "py",
     [string]$OutputRoot = "",
     [string]$BuildEnvironmentRoot = "",
+    [string]$SourceCommit = "",
     [switch]$PreserveBuildEnvironment,
     [switch]$ReturnBuildState
 )
@@ -18,24 +19,22 @@ function Assert-NativeSuccess([string]$Message) {
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $OutputRoot) { $OutputRoot = Join-Path $root "dist-windows-private" }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
-if (-not $OutputRoot.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "The private Windows build output must remain beneath the repository build root."
-}
+$trustedOutputParent = Get-WindowsPackagingOutputParent `
+    -SourceRoot $root -OutputRoot $OutputRoot
 $outputRootOwnership = $null
 $buildEnvironmentOwnership = $null
 $stageOwnership = $null
 $helperOwnership = $null
+$sourceArchivePin = $null
 $completed = $false
 $helperResult = $null
 $bodyError = $null
 try {
-    Assert-ContainedOrdinaryDirectoryPath `
-        -TrustedRoot $root -Candidate $OutputRoot -AllowMissingCandidate | Out-Null
     if ($null -ne (Get-Item -LiteralPath $OutputRoot -Force -ErrorAction SilentlyContinue)) {
         throw "The private Windows build output must be fresh."
     }
     $outputRootOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $root -Candidate $OutputRoot
+        -TrustedRoot $trustedOutputParent -Candidate $OutputRoot
 
     $outputPrefix = $OutputRoot + [IO.Path]::DirectorySeparatorChar
     if (-not $BuildEnvironmentRoot) {
@@ -49,6 +48,9 @@ try {
     )) {
         throw "The Windows helper build environment must remain beneath its private output root."
     }
+    if ([IO.Path]::GetFileName($BuildEnvironmentRoot) -in @("helper", "tvtime-helper")) {
+        throw "The Windows helper build environment used a reserved output name."
+    }
     if ($null -ne (Get-Item `
         -LiteralPath $BuildEnvironmentRoot `
         -Force `
@@ -59,6 +61,43 @@ try {
     $buildEnvironmentOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $OutputRoot -Candidate $BuildEnvironmentRoot `
         -TrustedRootOwnership $outputRootOwnership
+
+    $projectInstallSource = $root
+    if ([Environment]::GetEnvironmentVariable(
+        "TVTIME_IMMUTABLE_WINDOWS_RELEASE_SOURCE",
+        "Process"
+    ) -ceq "1") {
+        if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
+            throw "The reviewed Windows helper source commit was invalid."
+        }
+        $checkoutRoot = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable(
+            "TVTIME_WINDOWS_RELEASE_CHECKOUT_ROOT",
+            "Process"
+        ))
+        $gitExecutable = (
+            Get-Command git -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1
+        ).Source
+        $sourceArchive = Join-Path $BuildEnvironmentRoot "reviewed-source.tar.gz"
+        & $gitExecutable -C $checkoutRoot archive `
+            --format=tar.gz "--output=$sourceArchive" $SourceCommit
+        Assert-NativeSuccess "The reviewed Windows helper source archive could not be created."
+        $nativeBuildEnvironment = Get-OwnershipNativeCapability `
+            -OwnershipToken $buildEnvironmentOwnership
+        $identityPin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceIdentityPin(
+            $nativeBuildEnvironment.Handle
+        )
+        try {
+            $sourceArchiveIdentity = $identityPin.Identity
+        } finally {
+            $identityPin.Dispose()
+        }
+        $sourceArchivePin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceStrictReadPin(
+            $nativeBuildEnvironment.Handle,
+            $sourceArchiveIdentity
+        )
+        $projectInstallSource = $sourceArchive
+    }
 
     $tools = $BuildEnvironmentRoot
     $venv = Join-Path $BuildEnvironmentRoot "venv"
@@ -77,21 +116,28 @@ Assert-NativeSuccess "Windows helper builds require reviewed x64 Python."
 
 & $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --require-hashes --only-binary=:all: -r (Join-Path $root "requirements-windows-build.lock") | Out-Host
 Assert-NativeSuccess "The hash-locked Windows helper dependencies could not be installed."
-& $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --no-index --no-build-isolation --no-deps $root | Out-Host
-Assert-NativeSuccess "The local Windows helper source could not be installed."
+& $pythonExe -B -I -m pip install --disable-pip-version-check --no-compile --no-index --no-build-isolation --no-deps $projectInstallSource | Out-Host
+$sourceInstallExitCode = $LASTEXITCODE
+if ($null -ne $sourceArchivePin) {
+    $sourceArchivePin.Dispose()
+    $sourceArchivePin = $null
+}
+if ($sourceInstallExitCode -ne 0) {
+    throw "The local Windows helper source could not be installed."
+}
 & $pythonExe -B -I -m pip check | Out-Host
 Assert-NativeSuccess "The Windows helper dependency environment is inconsistent."
 & $pythonExe -B -I (Join-Path $root "script\verify_windows_python_environment.py") | Out-Host
 Assert-NativeSuccess "The installed Windows helper dependency bytes did not match their RECORD hashes."
 
 $stage = Join-Path $OutputRoot (".helper-stage-" + [Guid]::NewGuid().ToString("N"))
-$dist = Join-Path $stage "dist"
+$dist = $OutputRoot
 $work = Join-Path $stage "work"
 $spec = Join-Path $stage "spec"
 $stageOwnership = New-ContainedOrdinaryDirectory `
     -TrustedRoot $OutputRoot -Candidate $stage `
     -TrustedRootOwnership $outputRootOwnership
-foreach ($directory in @($dist, $work, $spec)) {
+foreach ($directory in @($work, $spec)) {
     $directoryOwnership = New-ContainedOrdinaryDirectory `
         -TrustedRoot $stage -Candidate $directory `
         -TrustedRootOwnership $stageOwnership
@@ -107,6 +153,9 @@ foreach ($font in $fonts) {
     $dataArgs += @("--add-data", ($fontPath + ";reportlab/fonts"))
 }
 
+# In immutable release mode, $root is the recursively ACL-locked and
+# inventory-verified Git stage. The pinned archive above is only pip's
+# out-of-tree build input; PyInstaller deliberately consumes the locked stage.
 & $pythonExe -B -I -m PyInstaller --clean --noconfirm --onedir --console --noupx `
     --name tvtime-helper --contents-directory _internal @dataArgs --paths $root `
     --distpath $dist --workpath $work --specpath $spec `
@@ -120,35 +169,30 @@ if (-not (Test-Path (Join-Path $helper "tvtime-helper.exe") -PathType Leaf)) {
 Assert-NativeSuccess "The private Windows helper failed its privacy scan."
 $helperOwnership = New-ContainedOrdinaryTreeSnapshot `
     -TrustedRoot $dist -Candidate $helper
-# The exact tree that will be promoted is scanned again while all of its
+# The exact tree that MSBuild will package is scanned again while all of its
 # directory and file capabilities deny mutation and replacement.
 & $pythonExe -B -I (Join-Path $root "script\scan_macos_release.py") --root $helper --forbidden-value $root | Out-Host
 Assert-NativeSuccess "The locked private Windows helper failed its privacy scan."
 
-$final = Join-Path $OutputRoot "helper"
-Assert-ContainedOrdinaryDirectoryOwnership `
-    -OwnershipToken $outputRootOwnership | Out-Null
-if (Test-Path $final) { throw "A previous private helper build exists. Remove it only after review." }
-$helperOwnership = Move-ContainedOrdinaryDirectory `
-    -OwnershipToken $helperOwnership `
-    -DestinationTrustedRoot $OutputRoot `
-    -Destination $final `
-    -DestinationRootOwnership $outputRootOwnership
 $completed = $true
 $helperResult = if ($ReturnBuildState) {
     [pscustomobject]@{
-        HelperRoot = $final
+        HelperRoot = $helper
         OutputRootOwnership = $outputRootOwnership
         BuildEnvironmentOwnership = $buildEnvironmentOwnership
         HelperOwnership = $helperOwnership
         HelperManifest = $helperOwnership.Manifest
     }
 } else {
-    $final
+    $helper
 }
 } catch {
     $bodyError = $_
 } finally {
+    if ($null -ne $sourceArchivePin) {
+        $sourceArchivePin.Dispose()
+        $sourceArchivePin = $null
+    }
     $cleanupTokens = @()
     if (-not $completed) { $cleanupTokens += $helperOwnership }
     $cleanupTokens += $stageOwnership

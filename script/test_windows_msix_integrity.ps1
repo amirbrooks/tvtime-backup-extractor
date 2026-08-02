@@ -164,6 +164,59 @@ try {
         $strictPin.Dispose()
     }
 
+    $reviewedSource = Join-Path $testRoot "reviewed-source.tar.gz"
+    [IO.File]::WriteAllBytes($reviewedSource, [byte[]](7, 8, 9))
+    $sourceIdentityPin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceIdentityPin(
+        (Get-OwnershipNativeCapability -OwnershipToken $testRootOwnership).Handle
+    )
+    $wrongSourceIdentityRejected = $false
+    try {
+        $wrongSourcePin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceStrictReadPin(
+            (Get-OwnershipNativeCapability -OwnershipToken $testRootOwnership).Handle,
+            ([string]::new('0', 48))
+        )
+        $wrongSourcePin.Dispose()
+    } catch {
+        $wrongSourceIdentityRejected = $true
+    }
+    if (-not $wrongSourceIdentityRejected) {
+        throw "The reviewed source archive pin accepted a different FileId."
+    }
+    $sourceStrictPin = [TVTimeWindowsPackaging.FileCapabilities]::OpenBuildSourceStrictReadPin(
+        (Get-OwnershipNativeCapability -OwnershipToken $testRootOwnership).Handle,
+        $sourceIdentityPin.Identity
+    )
+    $sourceIdentityPin.Dispose()
+    try {
+        if ($sourceStrictPin.Stream.ReadByte() -ne 7) {
+            throw "The reviewed source archive pin did not expose its exact bytes."
+        }
+        $sourceWriteRejected = $false
+        try {
+            [IO.File]::WriteAllBytes($reviewedSource, [byte[]](10, 11, 12))
+        } catch {
+            $sourceWriteRejected = $true
+        }
+        $sourceDeleteRejected = $false
+        try { [IO.File]::Delete($reviewedSource) } catch { $sourceDeleteRejected = $true }
+        $sourceReplacement = Join-Path $testRoot "source-replacement.tar.gz"
+        [IO.File]::WriteAllBytes($sourceReplacement, [byte[]](13, 14, 15))
+        $sourceReplaceRejected = $false
+        try {
+            [IO.File]::Replace($sourceReplacement, $reviewedSource, $null)
+        } catch {
+            $sourceReplaceRejected = $true
+        }
+        if (-not $sourceWriteRejected -or -not $sourceDeleteRejected -or
+            -not $sourceReplaceRejected) {
+            throw "The reviewed source archive pin did not deny mutation and replacement."
+        }
+        Remove-Item -LiteralPath $sourceReplacement -Force
+    } finally {
+        $sourceStrictPin.Dispose()
+    }
+    Remove-Item -LiteralPath $reviewedSource -Force
+
     $linkedPackage = Join-Path $outside "synthetic-linked.msix"
     Copy-Item -LiteralPath $syntheticMsix -Destination $linkedPackage
     $packageJunction = Join-Path $testRoot "synthetic-package-junction"

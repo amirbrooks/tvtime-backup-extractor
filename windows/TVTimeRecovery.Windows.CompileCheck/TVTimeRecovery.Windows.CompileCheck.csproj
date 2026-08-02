@@ -28,7 +28,9 @@
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="[2.2.0]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="[2.2.1]" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.3719.77]" ExcludeAssets="all" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="[10.0.26100.4948]" />
   </ItemGroup>
   <ItemGroup>

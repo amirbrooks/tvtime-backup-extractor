@@ -21,7 +21,7 @@ function Invoke-LocalMachineCertificateTrust {
         throw "The private package certificate could not be passed to the trust helper."
     }
     $helperPath = Join-Path $PSScriptRoot "windows_certificate_trust.ps1"
-    $expectedTrustHelperSha256 = "BCC1A071014879565F1ECFB58FA92417E564B87E5C26E02DE6165DF3901FB10F"
+    $expectedTrustHelperSha256 = "EAB48BDD7898235D27B6EF4833DD2B6735ADAF36705F117435B4E23610988BE8"
     $helperBytes = [IO.File]::ReadAllBytes($helperPath)
     if ($helperBytes.Length -eq 0 -or $helperBytes.Length -gt 16KB) {
         throw "The private package certificate trust helper has invalid size."
@@ -64,13 +64,16 @@ exit `$result
             -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $encodedCommand) `
             -Verb RunAs -Wait -PassThru
     } catch {
+        if ($Operation -eq "Add") {
+            throw "Windows could not start the private certificate trust helper (safe code 29)."
+        }
         throw $unresolvedTrustMessage
     }
     if ($Operation -eq "Add") {
         if ($elevatedProcess.ExitCode -eq 0) { return $true }
         if ($elevatedProcess.ExitCode -eq 10) { return $false }
-        if ($elevatedProcess.ExitCode -eq 20) {
-            throw "Windows could not update the exact private package certificate trust."
+        if ($elevatedProcess.ExitCode -in @(20, 22, 23, 24, 25, 27, 28)) {
+            throw "Windows could not update the exact private package certificate trust (safe code $($elevatedProcess.ExitCode))."
         }
     } elseif ($elevatedProcess.ExitCode -eq 0) {
         return
@@ -79,7 +82,7 @@ exit `$result
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$installed = @(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Private" -ErrorAction Stop)
+$installed = @(Get-AppxPackage -Name "AmirBrooks.TVTimeBackupExtractor.Alpha" -ErrorAction Stop)
 if ($installed.Count -ne 0) {
     throw "The private package is already installed. Review retained private output before any manual uninstall or versioned update; this installer never removes app data."
 }
@@ -132,8 +135,8 @@ try {
         throw "The private MSIX payload changed after its build scan."
     }
 
-    $subject = "CN=TV Time Backup Extractor Private"
-    $friendlyName = "TV Time Recovery private local install"
+    $subject = "CN=TV Time Backup Extractor Alpha"
+    $friendlyName = "TV Time Recovery alpha local install"
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
     $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object {
         $candidate = $_

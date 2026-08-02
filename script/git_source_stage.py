@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import io
 import os
@@ -8,13 +9,26 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 GIT_OBJECT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GENERATED_DIRECTORY = ".build-tools"
+WINDOWS_HOST = sys.platform == "win32"
+WINDOWS_SID_PATTERN = re.compile(r"^S-\d+(?:-\d+)+$")
+
+
+def git_executable() -> str:
+    if sys.platform == "darwin" and Path("/usr/bin/git").is_file():
+        return "/usr/bin/git"
+    resolved = shutil.which("git")
+    if resolved is None:
+        raise RuntimeError("Git is required for release source staging")
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -24,9 +38,110 @@ class SourceEntry:
     sha256: str | None
 
 
+def _windows_system_tool(name: str) -> Path:
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        raise RuntimeError("Windows system tools are unavailable for release source staging")
+    tool = Path(buffer.value) / name
+    if not tool.is_file():
+        raise RuntimeError("Windows system tools are unavailable for release source staging")
+    return tool
+
+
+def _windows_user_sid() -> str:
+    completed = subprocess.run(
+        [str(_windows_system_tool("whoami.exe")), "/user", "/fo", "csv", "/nh"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = list(csv.reader(completed.stdout.splitlines()))
+    if len(rows) != 1 or len(rows[0]) != 2 or not WINDOWS_SID_PATTERN.fullmatch(rows[0][1]):
+        raise RuntimeError("The Windows release user identity could not be verified")
+    return rows[0][1]
+
+
+def _run_windows_acl(root: Path, *arguments: str, recursive: bool = True) -> None:
+    command = [
+        str(_windows_system_tool("icacls.exe")),
+        str(root),
+        *arguments,
+    ]
+    if recursive:
+        command.append("/T")
+    command.append("/Q")
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("Windows release source permissions could not be applied")
+
+
+def _set_windows_tree_access(root: Path, rights: str) -> None:
+    sid = _windows_user_sid()
+    _run_windows_acl(
+        root,
+        "/inheritance:r",
+        "/grant:r",
+        f"*{sid}:{rights}",
+    )
+
+
+def _deny_windows_tree_mutation(root: Path) -> None:
+    sid = _windows_user_sid()
+    denied_rights = "(WD,AD,WEA,WA,DE,DC)"
+    _run_windows_acl(root, "/deny", f"*{sid}:{denied_rights}")
+
+
+def _remove_windows_tree_deny(root: Path) -> None:
+    _run_windows_acl(root, "/remove:d", f"*{_windows_user_sid()}")
+
+
+def _allow_windows_generated_descendants(root: Path) -> None:
+    sid = _windows_user_sid()
+    _run_windows_acl(root, "/grant", f"*{sid}:(OI)(CI)F", recursive=False)
+
+
+def _lock_windows_source(source: Path) -> None:
+    _set_windows_tree_access(source, "RX")
+    _deny_windows_tree_mutation(source)
+    generated = source / GENERATED_DIRECTORY
+    _remove_windows_tree_deny(generated)
+    _set_windows_tree_access(generated, "F")
+    _allow_windows_generated_descendants(generated)
+
+
+def _assert_windows_source_locked(source: Path) -> None:
+    probe = source / f".tvtime-source-write-probe-{os.getpid()}"
+    try:
+        with probe.open("xb"):
+            pass
+    except PermissionError:
+        pass
+    except OSError as exc:
+        raise RuntimeError("Windows release source permissions could not be verified") from exc
+    else:
+        probe.unlink(missing_ok=True)
+        raise RuntimeError("Windows release source root remained writable")
+
+    generated_probe = source / GENERATED_DIRECTORY / f".tvtime-build-write-probe-{os.getpid()}"
+    try:
+        with generated_probe.open("xb"):
+            pass
+        generated_probe.unlink()
+    except OSError as exc:
+        raise RuntimeError("Windows release build root was not writable") from exc
+
+
 def git_output(repository: Path, *arguments: str) -> str:
     completed = subprocess.run(
-        ["/usr/bin/git", "-C", str(repository), *arguments],
+        [git_executable(), "-C", str(repository), *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -63,7 +178,7 @@ def safe_member_path(value: str) -> Path:
 
 def git_archive(repository: Path, source_commit: str) -> bytes:
     completed = subprocess.run(
-        ["/usr/bin/git", "-C", str(repository), "archive", "--format=tar", source_commit],
+        [git_executable(), "-C", str(repository), "archive", "--format=tar", source_commit],
         check=True,
         capture_output=True,
     )
@@ -127,7 +242,7 @@ def extract_archive(archive_bytes: bytes, destination: Path) -> None:
                 while chunk := contents.read(1024 * 1024):
                     output.write(chunk)
             executable = bool(member.mode & 0o111)
-            target.chmod(0o555 if executable else 0o444)
+            target.chmod(0o444 if WINDOWS_HOST else (0o555 if executable else 0o444))
             tracked_files.append((target, executable))
 
     generated = destination / GENERATED_DIRECTORY
@@ -135,10 +250,14 @@ def extract_archive(archive_bytes: bytes, destination: Path) -> None:
     for directory in sorted(tracked_directories, key=lambda path: len(path.parts), reverse=True):
         directory.chmod(0o555)
     for target, executable in tracked_files:
-        expected_mode = 0o555 if executable else 0o444
+        expected_mode = 0o444 if WINDOWS_HOST else (0o555 if executable else 0o444)
         if stat.S_IMODE(target.stat().st_mode) != expected_mode:
             raise RuntimeError("staged Git source file mode could not be made read-only")
-    destination.chmod(0o555)
+    if WINDOWS_HOST:
+        _lock_windows_source(destination)
+        _assert_windows_source_locked(destination)
+    else:
+        destination.chmod(0o555)
 
 
 def actual_inventory(source: Path) -> dict[str, SourceEntry]:
@@ -192,14 +311,30 @@ def actual_inventory(source: Path) -> dict[str, SourceEntry]:
 def verify_source_stage(repository: Path, source_commit: str, source: Path) -> None:
     if not source.is_dir() or source.is_symlink():
         raise RuntimeError("staged Git source must be a regular directory")
+    if WINDOWS_HOST:
+        _lock_windows_source(source)
+        _assert_windows_source_locked(source)
     expected = archive_inventory(git_archive(repository, source_commit))
     actual = actual_inventory(source)
-    if actual != expected:
+    comparable_actual = actual
+    comparable_expected = expected
+    if WINDOWS_HOST:
+        comparable_actual = {
+            path: SourceEntry(entry.kind, False, entry.sha256) for path, entry in actual.items()
+        }
+        comparable_expected = {
+            path: SourceEntry(entry.kind, False, entry.sha256) for path, entry in expected.items()
+        }
+    if comparable_actual != comparable_expected:
         raise RuntimeError("staged Git source does not exactly match the reviewed commit")
-    if stat.S_IMODE(source.stat().st_mode) != 0o555:
+    if not WINDOWS_HOST and stat.S_IMODE(source.stat().st_mode) != 0o555:
         raise RuntimeError("staged Git source root is not read-only")
     for relative, entry in actual.items():
         mode = stat.S_IMODE((source / relative).stat().st_mode)
+        if WINDOWS_HOST:
+            if entry.kind == "file" and mode & stat.S_IWRITE:
+                raise RuntimeError("staged Git source entry is not read-only")
+            continue
         expected_mode = 0o555 if entry.kind == "directory" or entry.executable else 0o444
         if mode != expected_mode:
             raise RuntimeError("staged Git source entry is not read-only")
@@ -232,12 +367,48 @@ def prepare_source_stage(repository: Path, source_commit: str) -> Path:
 def make_source_removable(source: Path) -> None:
     if not source.exists() or source.is_symlink():
         return
-    for current, directory_names, _file_names in os.walk(source, topdown=False):
+    if WINDOWS_HOST:
+        # A partially applied lock may not have created the deny ACE yet. The
+        # full-control reset and chmod walk still fail closed if it remains.
+        with suppress(RuntimeError):
+            _remove_windows_tree_deny(source)
+        _set_windows_tree_access(source, "F")
+    for current, directory_names, file_names in os.walk(source, topdown=False):
+        if WINDOWS_HOST:
+            for file_name in file_names:
+                file_path = Path(current) / file_name
+                if not file_path.is_symlink():
+                    file_path.chmod(0o600)
         for directory_name in directory_names:
             directory = Path(current) / directory_name
             if not directory.is_symlink():
                 directory.chmod(0o700)
         Path(current).chmod(0o700)
+
+
+def remove_source_stage(repository: Path, source: Path) -> None:
+    repository = repository.resolve(strict=True)
+    output_parent = repository / "dist"
+    if output_parent.is_symlink() or not output_parent.is_dir():
+        raise RuntimeError("release output root is unavailable or unsafe")
+    output_parent = output_parent.resolve(strict=True)
+    source = source.absolute()
+    if source.is_symlink():
+        raise RuntimeError("staged Git source must not be a symbolic link")
+    source = source.resolve(strict=True)
+    release_stage = source.parent
+    if (
+        source.name != "source"
+        or release_stage.parent != output_parent
+        or not release_stage.name.startswith(".macos-release.")
+        or release_stage.is_symlink()
+        or not release_stage.is_dir()
+    ):
+        raise RuntimeError("staged Git source removal escaped its controlled release root")
+    make_source_removable(source)
+    shutil.rmtree(release_stage)
+    if release_stage.exists() or release_stage.is_symlink():
+        raise RuntimeError("staged Git source removal did not complete")
 
 
 def main() -> int:
@@ -248,6 +419,7 @@ def main() -> int:
     action.add_argument("--prepare", action="store_true")
     action.add_argument("--verify", action="store_true")
     action.add_argument("--unlock", action="store_true")
+    action.add_argument("--remove", action="store_true")
     parser.add_argument("--repository", type=Path)
     parser.add_argument("--source-commit")
     parser.add_argument("--source", type=Path)
@@ -259,7 +431,7 @@ def main() -> int:
         print(prepare_source_stage(arguments.repository, arguments.source_commit))
         return 0
     if arguments.source is None:
-        parser.error("--verify and --unlock require --source")
+        parser.error("--verify, --unlock, and --remove require --source")
     source = arguments.source.resolve(strict=True)
     if arguments.verify:
         if arguments.repository is None or arguments.source_commit is None:
@@ -270,6 +442,11 @@ def main() -> int:
             source,
         )
         print("Read-only Git source stage matches the reviewed commit.")
+        return 0
+    if arguments.remove:
+        if arguments.repository is None or arguments.source_commit is not None:
+            parser.error("--remove requires --repository and --source only")
+        remove_source_stage(arguments.repository, source)
         return 0
     if arguments.repository is not None or arguments.source_commit is not None:
         parser.error("--unlock accepts only --source")
