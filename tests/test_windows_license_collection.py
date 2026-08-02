@@ -175,7 +175,7 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             json.dumps({"version": 2, "contentHash": content_hash, "source": "synthetic"}),
             encoding="utf-8",
         )
-        (package_root / "fake.package.nuspec").write_text(nuspec, encoding="utf-8")
+        (package_root / "fake.package.nuspec").write_bytes(nuspec.encode("utf-8"))
         expanded = package_root / "lib" / "net8.0" / "synthetic.dll"
         expanded.parent.mkdir(parents=True)
         expanded.write_bytes(expanded_asset)
@@ -334,14 +334,10 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
                 json.dumps({"version": 2, "contentHash": content_hash}),
                 encoding="utf-8",
             )
-            (package_root / f"{name}.nuspec").write_text(nuspec, encoding="utf-8")
-            (package_root / "LICENSE.TXT").write_text(
-                "Synthetic runtime license\n",
-                encoding="ascii",
-            )
-            (package_root / "THIRD-PARTY-NOTICES.TXT").write_text(
-                "Synthetic runtime notices\n",
-                encoding="ascii",
+            (package_root / f"{name}.nuspec").write_bytes(nuspec.encode("utf-8"))
+            (package_root / "LICENSE.TXT").write_bytes(b"Synthetic runtime license\n")
+            (package_root / "THIRD-PARTY-NOTICES.TXT").write_bytes(
+                b"Synthetic runtime notices\n"
             )
             expanded = package_root / "runtimes" / "win-x64" / "lib" / "net8.0"
             expanded.mkdir(parents=True)
