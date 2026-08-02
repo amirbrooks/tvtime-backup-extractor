@@ -584,10 +584,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("/m:1 /nr:false", app)
         self.assertLess(
             app.index("collect_windows_licenses.py"),
-            app.index("& $makeAppx /? | Out-Null"),
+            app.index("$makeAppxProbe = (& $makeAppx /? 2>&1 | Out-String)"),
         )
+        self.assertIn('$makeAppxProbe -notmatch "(?i)makeappx"', app)
         self.assertLess(
-            app.index("& $makeAppx /? | Out-Null"),
+            app.index("$makeAppxProbe = (& $makeAppx /? 2>&1 | Out-String)"),
             app.index("/p:MakeAppxExeFullPath=$makeAppx"),
         )
         self.assertIn("/p:RestorePackagesPath=$nugetRoot", app)

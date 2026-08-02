@@ -176,8 +176,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "The private Windows license collection failed." }
     Assert-ContainedOrdinaryTreeSnapshot `
         -OwnershipToken $nugetRootOwnership | Out-Null
-    & $makeAppx /? | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    # MakeAppx returns a non-zero status for its help screen even when the
+    # executable loaded correctly. Require its fixed tool signature instead.
+    $makeAppxProbe = (& $makeAppx /? 2>&1 | Out-String)
+    if ($makeAppxProbe -notmatch "(?i)makeappx") {
         throw "The locked x64 Windows packaging tool could not start."
     }
     $noticeDestinationOwnership = Convert-ContainedOrdinaryDirectoryToTreeSnapshot `
