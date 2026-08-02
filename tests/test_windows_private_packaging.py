@@ -860,6 +860,10 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("& $stagedBuilder", builder)
         self.assertIn("--remove --repository $checkoutRoot --source $source", builder)
         self.assertIn("The Windows release checkout changed during the build", builder)
+        self.assertRegex(
+            builder,
+            r'X509Store\]::new\(\s*"TrustedPeople",\s*"LocalMachine"\s*\)',
+        )
         self.assertIn('"private_key_included": False', manifest_generator)
         self.assertIn('"dependency_locks"', manifest_generator)
         self.assertIn('-version "[17.0,18.0)"', app_builder)

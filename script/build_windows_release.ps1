@@ -214,7 +214,7 @@ try {
     )
     $temporaryTrustStore = [Security.Cryptography.X509Certificates.X509Store]::new(
         "TrustedPeople",
-        "CurrentUser"
+        "LocalMachine"
     )
     $temporaryTrustStore.Open(
         [Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite
