@@ -145,6 +145,15 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertNotIn("ReadAllText($TrustHelper", installer)
         self.assertNotIn("ReadAllText($helperPath", uninstaller)
 
+    def test_alpha_installer_checks_the_single_code_signing_usage_directly(self) -> None:
+        installer = self.read("script/install_windows_alpha.ps1")
+        self.assertIn("$ekuExtensions[0].EnhancedKeyUsages.Count -ne 1", installer)
+        self.assertIn(
+            "$ekuExtensions[0].EnhancedKeyUsages[0].Value -cne $codeSigningOid",
+            installer,
+        )
+        self.assertNotIn("$matchingUsages", installer)
+
     def test_machine_certificate_is_retained_for_other_windows_users(self) -> None:
         trust_helper = self.read("script/windows_certificate_trust.ps1")
         installer = self.read("script/install_windows_alpha.ps1")

@@ -89,11 +89,6 @@ function Assert-AlphaCertificate {
     $basicConstraintsExtensions = @(
         $Certificate.Extensions | Where-Object { $_.Oid.Value -eq "2.5.29.19" }
     )
-    $matchingUsages = if ($ekuExtensions.Count -eq 1) {
-        @($ekuExtensions[0].EnhancedKeyUsages | Where-Object { $_.Value -eq $codeSigningOid })
-    } else {
-        @()
-    }
     if ($Certificate.Thumbprint -cne $ExpectedThumbprint -or
         $Certificate.Subject -cne $expectedSubject -or
         $Certificate.Issuer -cne $expectedSubject -or
@@ -102,7 +97,7 @@ function Assert-AlphaCertificate {
         $Certificate.NotAfter -le (Get-Date).AddDays(7) -or
         $ekuExtensions.Count -ne 1 -or
         $ekuExtensions[0].EnhancedKeyUsages.Count -ne 1 -or
-        $matchingUsages.Count -ne 1 -or
+        $ekuExtensions[0].EnhancedKeyUsages[0].Value -cne $codeSigningOid -or
         $keyUsageExtensions.Count -ne 1 -or
         $keyUsageExtensions[0].KeyUsages -ne
             [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -or
