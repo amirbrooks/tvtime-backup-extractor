@@ -149,7 +149,7 @@ exit `$result
     if ($process.ExitCode -eq 11) {
         $certificateRetainedForOtherUsers = $true
     } elseif ($process.ExitCode -ne 0) {
-        throw "Windows could not remove the exact alpha signing certificate."
+        throw "Windows could not remove the exact alpha signing certificate (safe code $($process.ExitCode))."
     }
 }
 

@@ -20,6 +20,7 @@ function Set-PrivateWindowsCertificateTrust {
     $ErrorActionPreference = "Stop"
     Set-StrictMode -Version Latest
     $certificateAdded = $false
+    $failureCode = 20
     try {
         if ($RawCertificateBase64.Length -gt 4096) {
             throw "The requested alpha package certificate is too large."
@@ -34,7 +35,7 @@ function Set-PrivateWindowsCertificateTrust {
         } finally {
             $currentIdentity.Dispose()
         }
-        if (-not $isAdministrator) { throw "Machine certificate trust requires elevation." }
+        if (-not $isAdministrator) { return 22 }
 
         $rawCertificate = [Convert]::FromBase64String($RawCertificateBase64)
         $certificate = New-Object `
@@ -66,9 +67,10 @@ function Set-PrivateWindowsCertificateTrust {
                 $certificate.NotBefore -gt (Get-Date) -or
                 $certificate.NotAfter -le (Get-Date).AddDays(30) -or
                 $certificate.HasPrivateKey) {
-                throw "The requested alpha package certificate is not allowed."
+                return 23
             }
 
+            $failureCode = 24
             $store = New-Object `
                 System.Security.Cryptography.X509Certificates.X509Store(
                     "TrustedPeople",
@@ -90,6 +92,7 @@ function Set-PrivateWindowsCertificateTrust {
 
                 if ($Operation -eq "Add") {
                     if ($matches.Count -eq 1) { return 10 }
+                    $failureCode = 25
                     $store.Add($certificate)
                     $certificateAdded = $true
                     $added = @(
@@ -105,6 +108,7 @@ function Set-PrivateWindowsCertificateTrust {
                     return 0
                 }
 
+                $failureCode = 26
                 $dependentPackages = @(Get-AppxPackage `
                     -AllUsers -Name $packageIdentity -ErrorAction Stop |
                     Where-Object {
@@ -173,6 +177,6 @@ function Set-PrivateWindowsCertificateTrust {
             }
         }
         if ($Operation -eq "Remove") { return 21 }
-        return 20
+        return $failureCode
     }
 }

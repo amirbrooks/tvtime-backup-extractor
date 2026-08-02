@@ -148,7 +148,7 @@ exit `$result
     if ($Operation -eq "Remove" -and $process.ExitCode -in @(0, 11)) {
         return $process.ExitCode -eq 11
     }
-    throw "Windows could not update the exact alpha signing certificate trust."
+    throw "Windows could not update the exact alpha signing certificate trust (safe code $($process.ExitCode))."
 }
 
 function Open-BoundArtifactReadPin {

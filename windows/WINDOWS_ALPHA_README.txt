@@ -29,6 +29,7 @@ recovered content, or debug trace.
 
 If recovery fails, copy the app's Safe Diagnostics codes. Those codes use a fixed vocabulary and
 do not include paths, titles, identifiers, passwords, counts, or raw error messages.
+If install or removal fails, copy only the safe code printed by the script.
 
 Opening a report can add its filename to browser or viewer history and Windows Recent Items.
 
