@@ -167,7 +167,7 @@ if (-not (Test-Path (Join-Path $helper "tvtime-helper.exe") -PathType Leaf)) {
 }
 & $pythonExe -B -I (Join-Path $root "script\scan_macos_release.py") --root $helper --forbidden-value $root | Out-Host
 Assert-NativeSuccess "The private Windows helper failed its privacy scan."
-$helperOwnership = New-ContainedOrdinaryTreeSnapshot `
+$helperOwnership = New-ContainedPromotableOrdinaryTreeSnapshot `
     -TrustedRoot $dist -Candidate $helper
 # The exact tree that will be promoted is scanned again while all of its
 # directory and file capabilities deny mutation and replacement.

@@ -639,8 +639,12 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         )
         self.assertIn("FileDispositionInfo", capabilities)
         self.assertIn("FileBasicInfo", capabilities)
+        self.assertIn("OpenRelativeForDelete", capabilities)
+        self.assertIn("DeleteChildren(path, rootHandle", capabilities)
         self.assertIn("locked-move-source", self.read("script/test_windows_packaging_lib.ps1"))
         self.assertIn("LockTree", capabilities)
+        self.assertIn("LockTreeForMove", capabilities)
+        self.assertIn("New-ContainedPromotableOrdinaryTreeSnapshot", library)
         self.assertIn("$dist = $OutputRoot", helper)
         self.assertIn("foreach ($directory in @($work, $spec))", helper)
         self.assertIn("ReadTreeManifest", capabilities)
@@ -652,6 +656,11 @@ class WindowsPrivatePackagingContractTests(unittest.TestCase):
         self.assertIn("FileNonDirectoryFile", capabilities)
         self.assertIn("expectedIdentity", capabilities)
         self.assertIn("FileShareRead | FileShareWrite", capabilities)
+        self.assertIn(
+            "WindowsPackagingNative.FileShareRead |\n"
+            "                            WindowsPackagingNative.FileShareDelete",
+            capabilities,
+        )
         move_section = library[library.index("function Move-ContainedOrdinaryDirectory") :]
         owned_move = move_section.index(
             "$movedDestination = [TVTimeWindowsPackaging.DirectoryCapabilities]::Rename"

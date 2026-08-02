@@ -196,6 +196,11 @@ namespace TVTimeWindowsPackaging
             return WindowsPackagingTree.Lock(path);
         }
 
+        public static TreeSnapshot LockTreeForMove(string path)
+        {
+            return WindowsPackagingTree.LockForMove(path);
+        }
+
         public static TreeSnapshot FreezeTree(OwnedDirectory owned, string path)
         {
             return WindowsPackagingTree.Freeze(owned, path);
@@ -219,9 +224,8 @@ namespace TVTimeWindowsPackaging
             string destinationName)
         {
             // Child handles intentionally deny delete sharing and must be released
-            // before Windows can rename their ancestor. The root handle is retained:
-            // its no-delete share pins the root identity, and its DELETE access makes
-            // the rename handle-relative rather than path-authorized.
+            // before Windows can rename their ancestor. The retained root identity
+            // and DELETE access keep the rename handle-relative, not path-authorized.
             WindowsPackagingTree.Revalidate(snapshot, snapshot.Path);
             snapshot.ReleaseDescendants();
             string destination = WindowsPackagingNative.RenameRetainedRoot(
