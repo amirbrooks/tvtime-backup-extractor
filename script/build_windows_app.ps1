@@ -27,6 +27,7 @@ $assetDestination = Join-Path $generatedContentRoot "Assets"
 $noticeDestination = Join-Path $generatedContentRoot "Notices"
 $msbuildIntermediateRoot = (Join-Path $OutputRoot "obj") + [IO.Path]::DirectorySeparatorChar
 $msbuildBinaryRoot = (Join-Path $OutputRoot "bin") + [IO.Path]::DirectorySeparatorChar
+$generatedContentRootOwnership = $null
 $helperDestinationOwnership = $null
 $assetDestinationOwnership = $null
 $noticeDestinationOwnership = $null
@@ -70,6 +71,9 @@ try {
     $helperManifest = [string]$helperBuildState.HelperManifest
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $outputRootOwnership | Out-Null
+    $generatedContentRootOwnership = New-ContainedOrdinaryDirectory `
+        -TrustedRoot $OutputRoot -Candidate $generatedContentRoot `
+        -TrustedRootOwnership $outputRootOwnership
     if (Test-Path $helperDestination) { throw "The generated helper staging directory already exists." }
     if (Test-Path $assetDestination) { throw "The generated Windows asset staging directory already exists." }
     if (Test-Path $noticeDestination) { throw "The generated Windows notice staging directory already exists." }
@@ -78,8 +82,8 @@ try {
     Assert-ContainedOrdinaryDirectoryOwnership `
         -OwnershipToken $helperRootOwnership | Out-Null
     $helperDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $OutputRoot -Candidate $helperDestination `
-        -TrustedRootOwnership $outputRootOwnership
+        -TrustedRoot $generatedContentRoot -Candidate $helperDestination `
+        -TrustedRootOwnership $generatedContentRootOwnership
     $helperMembers = @(Get-ChildItem -LiteralPath $helperRoot -Force)
     foreach ($helperMember in $helperMembers) {
         Copy-Item -LiteralPath $helperMember.FullName `
@@ -91,8 +95,8 @@ try {
         throw "The copied Windows helper tree did not match its locked source manifest."
     }
     $assetDestinationOwnership = New-ContainedOrdinaryDirectory `
-        -TrustedRoot $OutputRoot -Candidate $assetDestination `
-        -TrustedRootOwnership $outputRootOwnership
+        -TrustedRoot $generatedContentRoot -Candidate $assetDestination `
+        -TrustedRootOwnership $generatedContentRootOwnership
     Add-Type -AssemblyName System.Drawing
     $sourceIcon = [Drawing.Image]::FromFile((Join-Path $root "macos\Bundle\AppIcon-1024.png"))
     try {
@@ -176,8 +180,9 @@ try {
         -OwnershipToken $noticeOutputOwnership
     $noticeDestinationOwnership = Move-ContainedOrdinaryDirectory `
         -OwnershipToken $noticeOutputOwnership `
-        -DestinationTrustedRoot $OutputRoot `
-        -Destination $noticeDestination
+        -DestinationTrustedRoot $generatedContentRoot `
+        -Destination $noticeDestination `
+        -DestinationRootOwnership $generatedContentRootOwnership
     $noticeOutputOwnership = $null
     $msixOutputDirectory = (Join-Path $OutputRoot "msix") + [IO.Path]::DirectorySeparatorChar
     $appxPackageDirectoryArgument = "/p:AppxPackageDir=$msixOutputDirectory"
@@ -206,7 +211,8 @@ try {
             $assetDestinationOwnership,
             $noticeDestinationOwnership,
             $noticeOutputOwnership,
-            $noticeStageOwnership
+            $noticeStageOwnership,
+            $generatedContentRootOwnership
         ) `
         -PrimaryError $buildError
 }
