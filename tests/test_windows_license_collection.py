@@ -336,9 +336,7 @@ class WindowsLicenseCollectionTests(unittest.TestCase):
             )
             (package_root / f"{name}.nuspec").write_bytes(nuspec.encode("utf-8"))
             (package_root / "LICENSE.TXT").write_bytes(b"Synthetic runtime license\n")
-            (package_root / "THIRD-PARTY-NOTICES.TXT").write_bytes(
-                b"Synthetic runtime notices\n"
-            )
+            (package_root / "THIRD-PARTY-NOTICES.TXT").write_bytes(b"Synthetic runtime notices\n")
             expanded = package_root / "runtimes" / "win-x64" / "lib" / "net8.0"
             expanded.mkdir(parents=True)
             (expanded / "synthetic.dll").write_bytes(runtime_asset)
